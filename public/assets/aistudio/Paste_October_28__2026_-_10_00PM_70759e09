@@ -1,0 +1,578 @@
+
+En la sección de entrevista. Requiero que el botón que funciona para grabar un audio "Grabar respuesta de voz" sea circular y de tamaño adecuado para personas mayores. Debe tener un ícono de un micrófono y el texto que diga "Pulsa y cuéntanos tu recuerdo". Cuando esté grabando el botón deberá cambiar a un tono verde 
+Abajo cambia el texto que dice "Puedes hablar libremente. Al pulsar «Enviar», se guardará el audio y se transcribirá automáticamente." por "«Habla con calma y a tu propio ritmo. Te escuchamos con el respeto que merece tu historia.»"
+Adicionalmente, la opción de grabar audio estará arriba como primera opción, y abajo de esta, estará la sección escrita.
+
+Los archivos de voz guardados con sus transcripciones los enviarás el final, debajo de la opción donde se cargan las fotografías o imágenes.
+
+Corrige para todos los navegadores y dispositivos: En IPhone, usando Firefox cuando se está grabando, la transcripción que aparece de forma automática, deja de transcribirse aproximadamente después de 1 minuto de hablar. Necesito que no debe de trasncribirse o en su caso, no hacer la transcripción en tiempo real y hacerla y/o completarla cuando el entrevistado termine y envíe su audio.
+
+Elimina de arriba el botón "Preguntas Frecuentes", pues ya está ese enlace al final.
+
+Elimina el texto "Graba tu testimonio oralmente. Se guardará el audio y la transcripción completa.", pues resulta redundante.
+
+Actualiza el texto "Fotografías o Imágenes Relacionadas con esta Pregunta (Opcional)" por " Puedes Cargar Fotografías o Imágenes Relacionadas (Opcional)"
+
+Elimina el texto "Puedes tomar una foto en el momento con tu cámara o subir imágenes guardadas de tus recuerdos familiares."
+
+Si puedes hacer más minimalista el diseño, está bien, pero sin alterar la funcionalidad actual.
+
+Adicionalmente, necesito esta actualización independiente de lo anterior:
+
+
+
+Incorporar un sistema obligatorio de avisos de privacidad, consentimiento único, verificación de identidad, registro electrónico en Firebase y un panel administrativo del entrevistado.
+
+**REGLA FUNDAMENTAL: EL PARTICIPANTE SOLO DEBE MARCAR UNA CASILLA PARA ACEPTAR EL AVISO DE PRIVACIDAD COMPLETO.**
+
+No deben aparecer múltiples casillas para aceptar diferentes secciones del aviso.
+
+Esta única aceptación también debe contener la declaración de que el participante confirma ser la persona identificada.
+
+No crees una aplicación nueva. Conserva las entrevistas, preguntas, fotografías, grabaciones, respuestas, libros y demás información existente.
+
+Antes de implementar, inspecciona la arquitectura, los mecanismos de acceso de los entrevistados y la configuración de Firebase.
+
+---
+
+## 2. PRINCIPIO DE CONSENTIMIENTO ÚNICO
+
+El sistema utilizará un único proceso de aceptación inicial por participante.
+
+El participante deberá:
+
+1. Identificarse mediante el mecanismo seguro de acceso existente.
+2. Consultar el aviso de privacidad simplificado.
+3. Tener acceso al aviso de privacidad integral.
+4. Marcar una única casilla de aceptación.
+5. Confirmar mediante esa misma declaración que es la persona identificada.
+6. Pulsar el botón "Aceptar y comenzar mi historia".
+
+No se solicitarán casillas individuales para cada categoría de datos personales ni para cada sección del documento.
+
+La aceptación deberá referirse expresamente al contenido completo del aviso de privacidad, incluyendo las condiciones aplicables al tratamiento de los datos personales proporcionados durante la entrevista.
+
+La única aceptación deberá cubrir los tratamientos necesarios para la prestación del servicio autobiográfico, incluida la información sensible, financiera o patrimonial que el participante decida voluntariamente proporcionar, siempre que se cumplan los requisitos de consentimiento y autenticación legalmente exigidos.
+
+**Limitación jurídica obligatoria:** la aceptación general del documento no debe interpretarse como autorización automática para tratamientos secundarios que requieran una elección libre e independiente.
+
+Las finalidades opcionales, como publicidad, divulgación de testimonios a terceros, acceso post mortem o activación de servicios adicionales no esenciales, permanecerán inactivas hasta que exista la autorización específica legalmente necesaria.
+
+No solicites esas autorizaciones opcionales durante el proceso inicial de aceptación. Cuando el participante decida utilizar una función opcional que las requiera, obtén la autorización correspondiente en ese momento, sin repetir el aviso de privacidad general.
+
+---
+
+## 3. PANTALLA ÚNICA DE PRIVACIDAD
+
+Antes de comenzar la entrevista, presenta una pantalla con el título:
+
+**"Antes de comenzar tu historia"**
+
+Mensaje introductorio:
+
+"Tu historia es única y merece ser protegida.
+
+En ForeverYou queremos ayudarte a conservar tus recuerdos, experiencias, fotografías y testimonios para crear tu libro autobiográfico.
+
+Antes de comenzar, queremos explicarte cómo utilizaremos tu información, quién podrá acceder a ella y qué derechos tienes.
+
+Tu historia te pertenece. Tú decides qué compartir y con quién".
+
+Debajo presenta una sección denominada:
+
+**"Tu privacidad es importante"**
+
+Incluye un resumen accesible:
+
+- Tus testimonios se utilizarán para construir tu libro autobiográfico.
+- Tus grabaciones de voz podrán convertirse en texto.
+- Tus fotografías podrán incorporarse a tus recuerdos y a tu libro.
+- Tus experiencias podrán procesarse mediante herramientas de inteligencia artificial para elaborar tu historia.
+- La información no será pública automáticamente.
+- Podrás solicitar acceso, rectificación, cancelación u oposición al tratamiento de tus datos conforme a la ley.
+- Tu información solo se compartirá de acuerdo con las finalidades y autorizaciones aplicables.
+
+Incluye dos enlaces:
+
+**"Leer aviso de privacidad simplificado"**
+
+**"Leer aviso de privacidad integral"**
+
+Ambos documentos deberán poder consultarse completamente antes de aceptar, sin perder el estado de la pantalla.
+
+### Identificación del participante
+
+Antes de la casilla de aceptación, muestra:
+
+**Nombre del participante: [NOMBRE COMPLETO]**
+
+La identidad debe estar vinculada al mecanismo seguro de acceso del sistema, no depender únicamente del nombre mostrado.
+
+### Casilla única y declaración completa
+
+Muestra exclusivamente una casilla, inicialmente desmarcada, con el siguiente texto:
+
+**"Confirmo que soy [NOMBRE COMPLETO DEL PARTICIPANTE], la persona identificada en esta entrevista. Declaro que he tenido acceso al Aviso de Privacidad Simplificado y al Aviso de Privacidad Integral de ForeverYou, que he leído o podido consultar sus secciones, que conozco y acepto íntegramente sus condiciones y que autorizo expresamente el tratamiento de los datos personales que voluntariamente proporcione, incluidos testimonios, grabaciones, fotografías y, cuando corresponda, datos sensibles, financieros o patrimoniales, para las finalidades necesarias de recopilación, conservación, procesamiento mediante inteligencia artificial y elaboración de mi libro autobiográfico, conforme a lo establecido en dichos avisos. Entiendo que las finalidades opcionales que requieren una autorización independiente no se activan automáticamente con esta aceptación, y que conservo los derechos y mecanismos de revocación establecidos en el Aviso de Privacidad".**
+
+Esta declaración es única e indivisible como acción de aceptación inicial.
+
+No distribuyas su contenido en múltiples casillas.
+
+El sistema deberá mostrar el texto completo y permitir leerlo cómodamente, incluyendo en dispositivos móviles.
+
+ 
+
+### Botones
+
+Botón principal:
+
+**"Confirmar mi identidad, aceptar y comenzar"**
+
+Botón secundario:
+
+**"No acepto"**
+
+El botón principal deberá permanecer deshabilitado hasta que el participante marque la casilla única y se satisfagan las verificaciones de identidad necesarias.
+
+Al pulsarlo, el sistema debe guardar exitosamente la aceptación antes de permitir el acceso a la entrevista.
+
+Si el participante pulsa "No acepto", mostrar:
+
+"Respetamos tu decisión. Para proteger tu información, no iniciaremos la entrevista sin tu autorización".
+
+Nunca registres una negativa como aceptación.
+
+---
+
+## 4. AVISOS DE PRIVACIDAD
+
+Conserva los documentos de privacidad simplificado e integral previamente definidos para ForeverYou.
+
+El aviso simplificado deberá identificar al responsable, las categorías de datos, las finalidades principales, los mecanismos para limitar usos o divulgaciones y el acceso al documento integral.
+
+El aviso integral deberá mantener las secciones relativas a:
+
+1. Identidad y domicilio del responsable.
+2. Datos personales tratados.
+3. Finalidades primarias y necesarias.
+4. Finalidades secundarias y opcionales.
+5. Uso de inteligencia artificial.
+6. Almacenamiento y seguridad.
+7. Conservación de la información.
+8. Acceso y confidencialidad.
+9. Proveedores, remisiones y transferencias.
+10. Derechos ARCO y revocación.
+11. Eliminación de información.
+12. Protección de personas mencionadas en testimonios.
+13. Protección de menores de edad.
+14. Libros y asistentes conversacionales.
+15. Acceso posterior al fallecimiento.
+16. Tratamiento internacional.
+17. Modificaciones al aviso.
+
+Elimina de los documentos cualquier redacción que indique que el participante deberá aceptar individualmente todas estas secciones mediante casillas independientes.
+
+Sustitúyela por una explicación de que existe una sola aceptación inicial para los tratamientos necesarios del servicio autobiográfico, sin perjuicio de las autorizaciones independientes exigibles para otros usos.
+
+No elimines los derechos, restricciones ni protecciones incluidos en el aviso.
+
+Antes de publicar, verifica que estén correctamente definidos el nombre y domicilio del responsable, los datos de contacto, los proveedores tecnológicos, las finalidades reales y las políticas de conservación.
+
+No inventes datos para completar campos pendientes.
+
+---
+
+## 5. REGISTRO DEL CONSENTIMIENTO ÚNICO EN FIREBASE
+
+Utiliza la infraestructura Firebase existente.
+
+Cada aceptación deberá generar un único evento electrónico verificable, asociado al participante y a la entrevista.
+
+Incluye como mínimo:
+
+- Identificador único de aceptación.
+- Identificador de entrevista.
+- Identificador verificable del participante.
+- Nombre del participante mostrado en la declaración.
+- Identificador de la versión del aviso.
+- Hash del aviso integral aceptado.
+- Hash o referencia de la declaración exacta aceptada.
+- Fecha y hora del servidor.
+- Indicación de aceptación expresa.
+- Confirmación de identidad declarada.
+- Mecanismo de autenticación utilizado.
+- Versión del texto de consentimiento.
+- Estado de vigencia y referencias a revocaciones posteriores, cuando existan.
+
+La aceptación se registrará en una sola operación lógica.
+
+No generes registros independientes de consentimiento inicial por cada sección del aviso.
+
+No almacenes contraseñas ni tokens completos de acceso como evidencia.
+
+Registra la hora mediante el servidor, preferentemente en UTC, y muestra la fecha en la zona horaria apropiada cuando sea necesario.
+
+### Integridad de la evidencia
+
+El registro de aceptación debe ser histórico e inalterable desde el cliente.
+
+Cuando exista revocación o un nuevo consentimiento legalmente necesario, crea un evento adicional.
+
+Implementa permisos, validaciones del servidor y mecanismos idempotentes para evitar duplicados.
+
+No permitas comenzar la entrevista hasta confirmar que el registro fue guardado correctamente.
+
+---
+
+## 6. ACEPTACIÓN UNA SOLA VEZ
+
+En cada acceso a la entrevista:
+
+1. Identifica de forma segura al participante.
+2. Consulta su aceptación en Firebase.
+3. Verifica que corresponde a la identidad y entrevista actuales.
+4. Verifica que el consentimiento necesario continúa vigente.
+5. Determina si existen cambios sustanciales que legalmente requieran una nueva aceptación.
+6. Si la aceptación es válida, permite continuar directamente.
+7. Si falta una aceptación necesaria, muestra la pantalla única.
+8. Si la autorización fue revocada, aplica las restricciones correspondientes.
+
+**No vuelvas a mostrar el formulario por recargar la página, cerrar el navegador o cambiar de dispositivo.**
+
+No utilices únicamente localStorage o cookies para determinar que el participante ya aceptó.
+
+### Historias de pareja
+
+Cada participante debe aceptar individualmente mediante la misma casilla única.
+
+La aceptación del primer participante no sustituye la del segundo.
+
+Los registros deben permanecer separados y asociados a las identidades correspondientes.
+
+### Participantes existentes
+
+Si un participante tiene información previamente almacenada pero no existe una constancia válida de aceptación, solicita el consentimiento antes de que continúe proporcionando nuevos testimonios.
+
+No elimines respuestas existentes ni inventes aceptaciones retroactivas.
+
+---
+
+## 7. CONSULTA Y REVOCACIÓN
+
+Mantén una sección denominada:
+
+**"Mi privacidad y mis autorizaciones"**
+
+Permite que el participante:
+
+- Consulte el aviso vigente.
+- Consulte la versión aceptada.
+- Vea la fecha y hora de aceptación.
+- Visualice o descargue una constancia.
+- Consulte los mecanismos de contacto del responsable.
+
+---
+
+## 22. PANEL ADMINISTRATIVO DEL ENTREVISTADO (Con icono con forma de engrane)
+
+Implementa un panel privado de administración para cada entrevistado, accesible desde un **icono con forma de engrane**, ubicado en una zona visible pero discreta de la interfaz.
+
+Este panel deberá permitir al participante visualizar su privacidad, sus autorizaciones, el acceso a sus recuerdos y las opciones relacionadas con la distribución de su libro autobiográfico.
+
+El panel debe ser intuitivo, accesible para adultos mayores y compatible con dispositivos móviles.
+
+### 22.1. Acceso al panel administrativo
+
+- El icono de engrane deberá estar disponible para el entrevistado autenticado.
+- Al pulsarlo, deberá abrirse el panel administrativo correspondiente a su identidad.
+- No deberá permitir acceder a información de otros participantes sin autorización.
+- En entrevistas de pareja, cada persona tendrá acceso a sus propios consentimientos y permisos.
+- Las funciones compartidas deberán respetar los permisos individuales.
+- La configuración deberá almacenarse de manera persistente en Firebase.
+
+### 22.2. Administración de privacidad
+
+Incluye las siguientes opciones:
+
+1. Consultar el aviso de privacidad simplificado.
+2. Consultar el aviso de privacidad integral.
+3. Consultar las versiones publicadas.
+4. Ver la fecha de entrada en vigor de cada versión.
+5. Consultar documentos históricos.
+6. Consultar el consentimiento otorgado.
+7. Visualizar la fecha y hora de aceptación.
+8. Descargar la constancia de aceptación.
+9. Consultar las autorizaciones opcionales.
+10. Solicitar la modificación o revocación de autorizaciones.
+11. Presentar solicitudes relacionadas con los derechos ARCO.
+12. Consultar los registros de auditoría propios que sean accesibles al participante.
+
+**Importante:** el entrevistado podrá consultar sus registros, pero no podrá alterar documentos históricos ni modificar evidencias de aceptación.
+
+La edición y publicación de avisos legales estará reservada al administrador general autorizado de ForeverYou.
+
+### 22.3. Administración de versiones del aviso
+
+Dentro de los mecanismos administrativos autorizados de ForeverYou deberá ser posible:
+
+- Administrar el aviso simplificado.
+- Administrar el aviso integral.
+- Publicar nuevas versiones.
+- Establecer su fecha de entrada en vigor.
+- Conservar versiones anteriores.
+- Generar identificadores y hashes de integridad.
+- Consultar los consentimientos asociados a cada versión.
+- Determinar si una modificación requiere nueva autorización.
+- Mantener evidencia histórica de aceptaciones y revocaciones.
+
+Una modificación del aviso no deberá alterar retroactivamente los consentimientos históricos.
+
+No solicites nuevamente una aceptación por simples correcciones de estilo que no impliquen un nuevo consentimiento legalmente necesario.
+
+### 22.4. Compartir el libro autobiográfico
+
+Añade una opción denominada:
+
+**"Compartir mi libro autobiográfico"**
+
+Esta función permitirá al entrevistado autorizar que otras personas accedan al libro digital completo una vez que esté disponible.
+
+Reglas obligatorias:
+
+- Solamente compartir el libro digital generado.
+- No compartir automáticamente grabaciones de voz.
+- No compartir transcripciones originales.
+- No compartir respuestas literales almacenadas en la entrevista.
+- No compartir fotografías o documentos independientes fuera de los que ya formen parte del libro autorizado.
+- No conceder acceso administrativo a quienes reciban el libro.
+- Permitir identificar y administrar los destinatarios autorizados.
+- Registrar cada autorización y operación de compartición en Firebase.
+
+El consentimiento inicial de privacidad no constituye autorización automática para compartir el libro.
+
+Antes de realizar una compartición, deberá existir una instrucción expresa y verificable del titular o de quien tenga facultades legales suficientes.
+
+### 22.5. Entrega automática del libro en una fecha futura
+
+Incorpora la siguiente opción:
+
+**"Programar entrega de mi libro"**
+
+Esta funcionalidad permitirá que el entrevistado configure una entrega futura mediante correo electrónico.
+
+El participante deberá poder:
+
+1. Seleccionar el libro autobiográfico que desea compartir.
+2. Introducir el correo electrónico del destinatario.
+3. Establecer una fecha futura de entrega.
+4. Confirmar explícitamente la autorización de envío.
+5. Consultar la entrega programada.
+6. Modificar la fecha antes de su ejecución.
+7. Cambiar el destinatario.
+8. Cancelar el envío programado.
+9. Consultar el estado del envío.
+10. Revisar el historial de entregas.
+
+Cuando llegue la fecha configurada, el sistema deberá procesar el envío mediante un servicio de correo electrónico real y autorizado.
+
+El destinatario recibirá un mensaje con acceso seguro al libro digital completo.
+
+No adjuntes ni expongas las respuestas originales, audios o transcripciones.
+
+### Condiciones de seguridad
+
+- No programes envíos sin autorización expresa.
+- Verifica que el libro esté disponible antes de ejecutar la entrega.
+- Utiliza enlaces de acceso seguros y protegidos.
+- Evita enlaces públicos permanentes sin restricciones.
+- Registra los intentos y resultados de entrega.
+- Evita envíos duplicados.
+- Permite revocar accesos cuando técnicamente sea posible y legalmente procedente.
+- Respeta las políticas de privacidad y las autorizaciones del participante.
+
+En entrevistas de pareja, valida que la entrega no divulgue información compartida de forma contraria a los derechos o autorizaciones aplicables al otro participante.
+
+### 22.6. Configurar accesos secundarios
+
+Añade la opción:
+
+**"Personas autorizadas"**
+
+El participante podrá designar personas que tengan acceso a determinados contenidos o servicios, según las funcionalidades disponibles.
+
+El sistema deberá permitir:
+
+- Agregar personas autorizadas.
+- Identificarlas mediante información suficiente.
+- Definir los permisos permitidos.
+- Consultar los permisos otorgados.
+- Modificar los permisos.
+- Revocar accesos.
+- Registrar fecha y hora de cada autorización.
+- Conservar historial de cambios.
+
+No concedas automáticamente acceso a las respuestas originales, transcripciones o grabaciones.
+
+Los permisos deben aplicarse efectivamente en Firebase Storage, Firestore y cualquier otro servicio relacionado.
+
+Los enlaces o mecanismos de acceso secundarios no deberán permitir elevar privilegios.
+
+### 22.7. Acceso posterior al fallecimiento
+
+Permite que el participante registre instrucciones voluntarias sobre el acceso futuro a su libro o recuerdos, cuando esta funcionalidad esté disponible.
+
+Estas instrucciones deberán incluir:
+
+- Persona o personas designadas.
+- Contenido autorizado.
+- Condiciones de acceso.
+- Fecha o acontecimiento establecido.
+- Posibilidad de modificar o retirar las instrucciones.
+
+No se deberá activar automáticamente un acceso por una declaración de fallecimiento no verificada.
+
+Las instrucciones estarán sujetas a las condiciones legales y contractuales correspondientes.
+
+### 22.8. Registros y auditoría
+
+Conserva en Firebase:
+
+- Cambios en autorizaciones.
+- Revocaciones.
+- Modificaciones de permisos.
+- Designación de destinatarios.
+- Programaciones de envío.
+- Cancelaciones de envío.
+- Ejecución de entregas.
+- Consultas administrativas relevantes.
+- Cambios de versiones de documentos.
+- Registros de acceso que sean necesarios y estén debidamente informados.
+
+Los registros deberán incluir identidad verificable del actor, fecha y hora del servidor, tipo de evento e identificadores de los recursos afectados.
+
+No se permitirá modificar o eliminar indebidamente la evidencia histórica.
+
+### 22.9. Restricciones del panel administrativo
+
+El panel del entrevistado no debe confundirse con el panel de administración general de la plataforma.
+
+Define permisos diferenciados para:
+
+**Entrevistado:**
+Puede administrar exclusivamente su privacidad, autorizaciones, destinatarios, accesos y entregas disponibles.
+
+**Administrador general autorizado:**
+Puede administrar los avisos institucionales, versiones publicadas, configuración legal, auditoría general y solicitudes de privacidad dentro de sus atribuciones.
+
+**Persona con acceso secundario:**
+Únicamente puede utilizar los permisos específicos que le hayan sido otorgados.
+
+No permitas que un entrevistado modifique los avisos generales de privacidad aplicables a toda la plataforma.
+
+### 22.10. Funcionalidades adicionales
+
+Podrás incorporar funciones adicionales estrictamente necesarias para garantizar el correcto funcionamiento de este panel, siempre que:
+
+- Estén relacionadas con privacidad, autorización o distribución controlada del libro.
+- No alteren la experiencia de entrevista.
+- No comprometan la información almacenada.
+- No concedan permisos automáticamente.
+- No contradigan el consentimiento único inicial.
+- No amplíen el acceso a testimonios sin autorización.
+
+---
+
+## 8. NORMATIVA Y CONDICIONES LEGALES
+
+Considera la legislación mexicana vigente, especialmente:
+
+- Ley Federal de Protección de Datos Personales en Posesión de los Particulares, publicada el 20 de marzo de 2025, con sus reformas aplicables.
+- Disposiciones reglamentarias vigentes.
+- Reglas de consentimiento expreso aplicables a datos financieros y patrimoniales.
+- Reglas de consentimiento expreso por escrito aplicables a datos sensibles.
+- Requisitos de información, finalidad, proporcionalidad, seguridad, confidencialidad y derechos ARCO.
+
+Cuando corresponda, considera también las obligaciones internacionales aplicables, incluido el RGPD europeo.
+
+**La simplificación de la interfaz no deberá eliminar requisitos legales de especificidad, libertad, autenticación o revocación.**
+
+No declares cumplimiento jurídico pleno sin revisar los requisitos de la operación real y la validez del mecanismo electrónico utilizado.
+
+---
+
+## 9. PRUEBAS OBLIGATORIAS
+
+Comprueba:
+
+1. Se muestra una única casilla de aceptación inicial.
+2. No aparecen casillas individuales para las diferentes secciones del aviso.
+3. La declaración única contiene la confirmación de identidad.
+4. El nombre mostrado corresponde al participante autenticado.
+5. El aviso simplificado e integral están disponibles antes de aceptar.
+6. La casilla aparece inicialmente desmarcada.
+7. No es posible continuar sin marcar la casilla.
+8. La identidad se verifica mediante el mecanismo seguro existente.
+9. La aceptación se guarda correctamente en Firebase.
+10. El registro contiene la fecha y hora del servidor.
+11. Se identifica la versión exacta del aviso.
+12. La operación no genera aceptaciones iniciales duplicadas.
+13. Una aceptación válida no se vuelve a solicitar.
+14. El cambio de dispositivo no modifica la vigencia del registro.
+15. Los participantes de una pareja mantienen registros independientes.
+16. El rechazo impide el inicio de nuevos testimonios que requieran consentimiento.
+17. La revocación queda documentada.
+18. Los consentimientos históricos no pueden alterarse desde el navegador.
+19. Ninguna persona puede consultar aceptaciones ajenas sin autorización.
+20. Las funciones existentes de ForeverYou siguen operando normalmente.
+21. Los usos secundarios no se activan automáticamente mediante la aceptación inicial.
+22. Los tratamientos que requieran firma o autenticación especial no se activan sin cumplir ese requisito.
+23. El engrane abre correctamente el panel administrativo del entrevistado.
+24. Cada participante puede consultar únicamente su información autorizada.
+25. El entrevistado puede consultar su constancia de privacidad.
+26. Los avisos históricos no pueden modificarse desde el panel del entrevistado.
+27. El participante puede gestionar las personas autorizadas.
+28. Los cambios de permisos se guardan correctamente.
+29. Se puede programar la entrega futura de un libro.
+30. Se puede modificar o cancelar una entrega programada.
+31. El destinatario recibe exclusivamente acceso autorizado al libro digital.
+32. El envío programado no incluye transcripciones, audios ni respuestas originales.
+33. La revocación de un acceso impide nuevos accesos cuando corresponda.
+34. Las entregas y autorizaciones quedan documentadas en Firebase.
+35. Las restricciones de privacidad se respetan en las entrevistas de pareja.
+
+No declares completadas pruebas que no hayas ejecutado.
+
+---
+
+## 10. RESTRICCIONES DE IMPLEMENTACIÓN
+
+Modifica exclusivamente los componentes relacionados con privacidad, consentimiento y las funciones expresamente descritas en el panel administrativo del entrevistado.
+
+No debes:
+
+- Crear una aplicación nueva.
+- Modificar el cuestionario existente.
+- Alterar testimonios.
+- Cambiar los algoritmos de entrevistas.
+- Rediseñar la grabación de voz.
+- Modificar el manejo de fotografías.
+- Alterar la generación del libro autobiográfico.
+- Cambiar la navegación más allá del control inicial de privacidad y el acceso al panel.
+- Eliminar información histórica.
+- Añadir funcionalidades ajenas a las expresamente solicitadas.
+
+Las mejoras deben aplicarse directamente sobre el proyecto actual.
+
+---
+
+## 11. RESULTADO ESPERADO
+
+El participante deberá encontrar una experiencia sencilla:
+
+1. Accede a su entrevista.
+2. El sistema comprueba si ya aceptó.
+3. Si no existe aceptación válida, muestra el aviso de privacidad.
+4. El participante puede leer el aviso completo.
+5. Se muestra su nombre y la declaración única de aceptación e identidad.
+6. Marca **una sola casilla**.
+7. Pulsa **"Confirmar mi identidad, aceptar

@@ -1,0 +1,385 @@
+{
+  "entities": {
+    "AppConfig": {
+      "title": "AppConfig",
+      "description": "Global application configuration for digital legacy interviews",
+      "type": "object",
+      "properties": {
+        "defaultOpenDays": { "type": "number", "description": "Default open period in calendar days" },
+        "defaultSufficiencyThreshold": { "type": "number", "description": "Default number of completed questions before sufficiency evaluation" },
+        "defaultMaxFollowUps": { "type": "number", "description": "Default max follow up questions per original question" },
+        "allowAnswerEditing": { "type": "boolean", "description": "Whether participants can edit previous answers while interview is open" },
+        "allowAdditionalMemories": { "type": "boolean", "description": "Whether participants can add unprompted memories" },
+        "updatedAt": { "type": "string", "description": "ISO timestamp of last update" },
+        "updatedBy": { "type": "string", "description": "Admin email or ID who modified the config" }
+      },
+      "required": ["defaultOpenDays", "defaultSufficiencyThreshold", "defaultMaxFollowUps", "allowAnswerEditing", "allowAdditionalMemories"]
+    },
+    "Question": {
+      "title": "Question",
+      "description": "Question bank item",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique identifier for the question" },
+        "text": { "type": "string", "description": "The question text in Spanish" },
+        "lifeStage": { "type": "string", "enum": ["infancia", "juventud", "adultez", "madurez", "legado_general"] },
+        "topic": { "type": "string", "description": "Topic or category" },
+        "priority": { "type": "string", "enum": ["alta", "media", "baja"] },
+        "allowedStoryModes": { "type": "string", "enum": ["individual", "compartida", "ambas"] },
+        "requirementType": { "type": "string", "enum": ["mandatory", "optional", "skippable"] },
+        "active": { "type": "boolean", "description": "Whether the question is active" },
+        "version": { "type": "number", "description": "Version number of question" },
+        "createdAt": { "type": "string", "description": "Timestamp created" },
+        "flowId": { "type": "string", "description": "Flow or sub-flow identifier (e.g. principal, hijos)" },
+        "orderIndex": { "type": "number", "description": "Sequence index within the flow" },
+        "branchConfig": { "type": "object", "description": "Conditional branching rules to jump to a sub-flow and return to main thread" }
+      },
+      "required": ["id", "text", "lifeStage", "topic", "priority", "allowedStoryModes", "requirementType", "active"]
+    },
+    "Interview": {
+      "title": "Interview",
+      "description": "Interview record for individual or shared life story",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique interview ID" },
+        "title": { "type": "string", "description": "Title of the life story" },
+        "storyMode": { "type": "string", "enum": ["individual", "compartida"] },
+        "storyType": { "type": "string", "description": "Type of story" },
+        "status": { "type": "string", "enum": ["draft", "open", "ready_for_review", "completed", "expired", "archived"] },
+        "openedAt": { "type": "string", "description": "Server ISO timestamp when opened" },
+        "expiresAt": { "type": "string", "description": "Server ISO timestamp when interview expires" },
+        "openDaysAtCreation": { "type": "number", "description": "Days duration snapshot" },
+        "sufficiencyThreshold": { "type": "number", "description": "Threshold snapshot" },
+        "maxFollowUpsAtCreation": { "type": "number", "description": "Max follow ups snapshot" },
+        "completedQuestionCount": { "type": "number", "description": "Server-maintained count of completed questions" },
+        "sufficiencyStatus": { "type": "string", "enum": ["not_evaluated", "insufficient", "sufficient", "sufficient_with_limitations"] },
+        "userDeclaredComplete": { "type": "boolean", "description": "Flag when participant explicitly finishes" },
+        "closedAt": { "type": "string", "description": "Server ISO timestamp when closed" },
+        "closureReason": { "type": "string", "description": "Reason interview was closed" },
+        "lastActivityAt": { "type": "string", "description": "Last activity timestamp" },
+        "questionnaireVersionId": { "type": "string", "description": "Version snapshot of question bank used" },
+        "createdById": { "type": "string", "description": "Admin creator UID" },
+        "createdByName": { "type": "string", "description": "Admin creator email or name" }
+      },
+      "required": ["id", "title", "storyMode", "status", "openedAt", "expiresAt", "completedQuestionCount", "sufficiencyStatus", "userDeclaredComplete"]
+    },
+    "Participant": {
+      "title": "Participant",
+      "description": "Participant associated with an interview",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique participant ID" },
+        "interviewId": { "type": "string", "description": "Parent interview ID" },
+        "name": { "type": "string", "description": "Name of participant" },
+        "relationship": { "type": "string", "description": "Role or relationship in shared story" },
+        "role": { "type": "string", "enum": ["primary", "contributor"] },
+        "status": { "type": "string", "enum": ["invited", "active", "completed"] },
+        "email": { "type": "string", "description": "Optional email" },
+        "joinedAt": { "type": "string", "description": "Timestamp when joined" }
+      },
+      "required": ["id", "interviewId", "name", "role", "status"]
+    },
+    "InterviewToken": {
+      "title": "InterviewToken",
+      "description": "Cryptographically hashed invitation token",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Token document ID" },
+        "tokenHash": { "type": "string", "description": "SHA-256 hash of random token" },
+        "interviewId": { "type": "string", "description": "Target interview ID" },
+        "participantId": { "type": "string", "description": "Target participant ID" },
+        "expiresAt": { "type": "string", "description": "Expiration ISO timestamp" },
+        "revoked": { "type": "boolean", "description": "Whether token is revoked" },
+        "createdAt": { "type": "string", "description": "Creation timestamp" }
+      },
+      "required": ["id", "tokenHash", "interviewId", "participantId", "expiresAt", "revoked"]
+    },
+    "Answer": {
+      "title": "Answer",
+      "description": "Answer submitted by a participant",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique answer ID" },
+        "interviewId": { "type": "string", "description": "Parent interview ID" },
+        "questionId": { "type": "string", "description": "Question ID or adaptive question ID" },
+        "questionText": { "type": "string", "description": "Text of the question or autonomous follow-up" },
+        "participantId": { "type": "string", "description": "Author participant ID" },
+        "participantName": { "type": "string", "description": "Author participant name" },
+        "answerText": { "type": "string", "description": "Text of the answer or memory" },
+        "notRecalled": { "type": "boolean", "description": "Whether participant stated 'No lo recuerdo'" },
+        "isFollowUp": { "type": "boolean", "description": "Whether this is an adaptive follow-up" },
+        "parentQuestionId": { "type": "string", "description": "Parent question ID if follow-up" },
+        "isAdditionalMemory": { "type": "boolean", "description": "Whether this is an unprompted memory" },
+        "branchChoice": { "type": "string", "description": "Participant choice on gateway branch question (yes/no)" },
+        "deepeningReason": { "type": "string", "description": "Reason why system generated autonomous follow-up" },
+        "photos": { "type": "array", "description": "Optional list of photo attachments with context for this answer" },
+        "audio": { "type": "object", "description": "Optional voice recording attachment and transcription" },
+        "audioRecordings": { "type": "array", "description": "Optional list of voice recordings" },
+        "idempotencyKey": { "type": "string", "description": "Client idempotency key" },
+        "createdAt": { "type": "string", "description": "Created at timestamp" },
+        "updatedAt": { "type": "string", "description": "Updated at timestamp" }
+      },
+      "required": ["id", "interviewId", "questionId", "participantId", "notRecalled"]
+    },
+    "InterviewAudio": {
+      "title": "InterviewAudio",
+      "description": "Voice audio file and transcription recorded by an interviewee for a question",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique audio ID" },
+        "interviewId": { "type": "string", "description": "Parent interview ID" },
+        "questionId": { "type": "string", "description": "Associated question ID" },
+        "questionText": { "type": "string", "description": "Question text when audio was recorded" },
+        "participantId": { "type": "string", "description": "Author participant ID" },
+        "participantName": { "type": "string", "description": "Author participant name" },
+        "audioUrl": { "type": "string", "description": "Server URL to stream the audio" },
+        "audioDataUrl": { "type": "string", "description": "Base64 audio data URL persisted in Firestore" },
+        "transcription": { "type": "string", "description": "Verbatim Spanish transcription of the voice recording" },
+        "durationSeconds": { "type": "number", "description": "Duration in seconds" },
+        "mimeType": { "type": "string", "description": "MIME type of the audio recording" },
+        "createdAt": { "type": "string", "description": "Upload timestamp" }
+      },
+      "required": ["id", "interviewId", "questionId", "participantId", "transcription", "audioDataUrl"]
+    },
+    "InterviewPhoto": {
+      "title": "InterviewPhoto",
+      "description": "Photograph uploaded by an interviewee for a specific question with contextual description",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique photo ID" },
+        "interviewId": { "type": "string", "description": "Parent interview ID" },
+        "questionId": { "type": "string", "description": "Associated question ID" },
+        "questionText": { "type": "string", "description": "Question text at the moment of upload" },
+        "lifeStage": { "type": "string", "description": "Life stage of the question" },
+        "topic": { "type": "string", "description": "Topic of the question" },
+        "participantId": { "type": "string", "description": "Author participant ID" },
+        "participantName": { "type": "string", "description": "Author participant name" },
+        "fileName": { "type": "string", "description": "Original file name" },
+        "mimeType": { "type": "string", "description": "MIME type of the image" },
+        "caption": { "type": "string", "description": "Contextual description of the photo provided by the interviewee" },
+        "imageUrl": { "type": "string", "description": "Server endpoint URL to render the photo" },
+        "dataUrl": { "type": "string", "description": "Encoded image data URL persisted in Firestore" },
+        "createdAt": { "type": "string", "description": "Upload timestamp" }
+      },
+      "required": ["id", "interviewId", "questionId", "participantId", "caption", "dataUrl"]
+    },
+    "Manuscript": {
+      "title": "Manuscript",
+      "description": "Draft or finalized biography manuscript compiled from memories",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Manuscript ID" },
+        "interviewId": { "type": "string", "description": "Interview ID" },
+        "version": { "type": "number", "description": "Version number" },
+        "title": { "type": "string", "description": "Title of manuscript" },
+        "content": { "type": "string", "description": "Full compiled manuscript text in markdown" },
+        "status": { "type": "string", "enum": ["draft", "approved", "exported"] },
+        "generatedAt": { "type": "string", "description": "Timestamp of generation" },
+        "generatedBy": { "type": "string", "description": "Admin or system generator" }
+      },
+      "required": ["id", "interviewId", "version", "title", "content", "status"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Administrative actions audit trail",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Audit log entry ID" },
+        "action": { "type": "string", "description": "Action performed" },
+        "targetType": { "type": "string", "description": "Target entity type" },
+        "targetId": { "type": "string", "description": "Target entity ID" },
+        "performedBy": { "type": "string", "description": "Admin email or UID" },
+        "timestamp": { "type": "string", "description": "ISO timestamp of action" }
+      },
+      "required": ["id", "action", "targetType", "targetId", "performedBy", "timestamp"]
+    },
+    "Admin": {
+      "title": "Admin",
+      "description": "Explicit authorized administrators",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Admin UID or email hash" },
+        "email": { "type": "string", "description": "Admin email" },
+        "role": { "type": "string", "enum": ["admin"] },
+        "addedAt": { "type": "string", "description": "Timestamp when added" }
+      },
+      "required": ["id", "email", "role"]
+    },
+    "PrivacyConsent": {
+      "title": "PrivacyConsent",
+      "description": "Single verified electronic privacy consent and identity confirmation event",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Consent unique ID" },
+        "interviewId": { "type": "string", "description": "Associated interview ID" },
+        "participantId": { "type": "string", "description": "Verified participant ID" },
+        "participantName": { "type": "string", "description": "Declared participant full name" },
+        "versionId": { "type": "string", "description": "Privacy notice version ID" },
+        "noticeHash": { "type": "string", "description": "SHA-256 hash of comprehensive notice" },
+        "declarationHash": { "type": "string", "description": "SHA-256 hash of exact declaration" },
+        "declarationText": { "type": "string", "description": "Accepted verbatim declaration" },
+        "acceptedAt": { "type": "string", "description": "Server ISO timestamp" },
+        "expressAcceptance": { "type": "boolean", "description": "Single checkbox affirmative acceptance" },
+        "identityConfirmed": { "type": "boolean", "description": "Affirmative confirmation of personal identity" },
+        "authMechanism": { "type": "string", "description": "Authentication method used" },
+        "status": { "type": "string", "enum": ["active", "revoked"] }
+      },
+      "required": ["id", "interviewId", "participantId", "participantName", "versionId", "noticeHash", "declarationHash", "acceptedAt", "expressAcceptance", "identityConfirmed", "status"]
+    },
+    "BookShare": {
+      "title": "BookShare",
+      "description": "Authorized digital book sharing recipient",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique share ID" },
+        "interviewId": { "type": "string", "description": "Associated interview ID" },
+        "participantId": { "type": "string", "description": "Author participant ID" },
+        "participantName": { "type": "string", "description": "Author name" },
+        "recipientName": { "type": "string", "description": "Recipient name" },
+        "recipientEmail": { "type": "string", "description": "Recipient email" },
+        "relationship": { "type": "string", "description": "Relationship" },
+        "note": { "type": "string", "description": "Personal note" },
+        "status": { "type": "string", "enum": ["active", "revoked"] },
+        "createdAt": { "type": "string", "description": "Timestamp created" }
+      },
+      "required": ["id", "interviewId", "participantId", "recipientName", "recipientEmail", "status", "createdAt"]
+    },
+    "ScheduledDelivery": {
+      "title": "ScheduledDelivery",
+      "description": "Automated future email delivery of digital autobiography book",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Scheduled delivery ID" },
+        "interviewId": { "type": "string", "description": "Interview ID" },
+        "participantId": { "type": "string", "description": "Participant ID" },
+        "recipientName": { "type": "string", "description": "Recipient name" },
+        "recipientEmail": { "type": "string", "description": "Recipient email" },
+        "scheduledDate": { "type": "string", "description": "Future delivery date" },
+        "status": { "type": "string", "enum": ["scheduled", "executed", "cancelled", "modified"] },
+        "createdAt": { "type": "string", "description": "Timestamp created" }
+      },
+      "required": ["id", "interviewId", "participantId", "recipientName", "recipientEmail", "scheduledDate", "status", "createdAt"]
+    },
+    "SecondaryAccess": {
+      "title": "SecondaryAccess",
+      "description": "Configured secondary companion or reader access",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Access ID" },
+        "interviewId": { "type": "string", "description": "Interview ID" },
+        "participantId": { "type": "string", "description": "Participant ID" },
+        "authorizedPersonName": { "type": "string", "description": "Authorized person name" },
+        "authorizedPersonEmail": { "type": "string", "description": "Authorized person email" },
+        "relationship": { "type": "string", "description": "Relationship" },
+        "status": { "type": "string", "enum": ["active", "revoked"] },
+        "createdAt": { "type": "string", "description": "Timestamp created" }
+      },
+      "required": ["id", "interviewId", "participantId", "authorizedPersonName", "authorizedPersonEmail", "status", "createdAt"]
+    },
+    "PostMortemInstruction": {
+      "title": "PostMortemInstruction",
+      "description": "Participant voluntary instructions for post-mortem digital legacy access",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Instruction ID" },
+        "interviewId": { "type": "string", "description": "Interview ID" },
+        "participantId": { "type": "string", "description": "Participant ID" },
+        "designatedPersonName": { "type": "string", "description": "Designated person name" },
+        "designatedPersonEmail": { "type": "string", "description": "Designated person email" },
+        "relationship": { "type": "string", "description": "Relationship" },
+        "instructions": { "type": "string", "description": "Specific voluntary instructions" },
+        "status": { "type": "string", "enum": ["active", "revoked"] },
+        "createdAt": { "type": "string", "description": "Timestamp created" }
+      },
+      "required": ["id", "interviewId", "participantId", "designatedPersonName", "designatedPersonEmail", "instructions", "status", "createdAt"]
+    },
+    "ArcoRequest": {
+      "title": "ArcoRequest",
+      "description": "Official ARCO privacy rights exercise request",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Request ID" },
+        "folio": { "type": "string", "description": "Tracking folio" },
+        "interviewId": { "type": "string", "description": "Interview ID" },
+        "participantId": { "type": "string", "description": "Participant ID" },
+        "participantName": { "type": "string", "description": "Participant name" },
+        "email": { "type": "string", "description": "Contact email" },
+        "requestType": { "type": "string", "enum": ["acceso", "rectificacion", "cancelacion", "oposicion"] },
+        "details": { "type": "string", "description": "Specific details of request" },
+        "status": { "type": "string", "enum": ["received", "in_review", "resolved"] },
+        "createdAt": { "type": "string", "description": "Timestamp created" }
+      },
+      "required": ["id", "folio", "interviewId", "participantId", "email", "requestType", "details", "status", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/settings/{settingId}": {
+      "schema": { "$ref": "#/entities/AppConfig" },
+      "description": "Global application configuration"
+    },
+    "/questions/{questionId}": {
+      "schema": { "$ref": "#/entities/Question" },
+      "description": "Question bank repository"
+    },
+    "/interviews/{interviewId}": {
+      "schema": { "$ref": "#/entities/Interview" },
+      "description": "Interviews lifecycle and settings"
+    },
+    "/participants/{participantId}": {
+      "schema": { "$ref": "#/entities/Participant" },
+      "description": "Interview participants"
+    },
+    "/interviewTokens/{tokenId}": {
+      "schema": { "$ref": "#/entities/InterviewToken" },
+      "description": "Cryptographically hashed invitation tokens"
+    },
+    "/answers/{answerId}": {
+      "schema": { "$ref": "#/entities/Answer" },
+      "description": "Participant answers and memories"
+    },
+    "/interviewPhotos/{photoId}": {
+      "schema": { "$ref": "#/entities/InterviewPhoto" },
+      "description": "Photographs uploaded by interviewees with context"
+    },
+    "/interviewAudio/{audioId}": {
+      "schema": { "$ref": "#/entities/InterviewAudio" },
+      "description": "Voice audio recordings and verbatim transcriptions submitted by interviewees"
+    },
+    "/manuscripts/{manuscriptId}": {
+      "schema": { "$ref": "#/entities/Manuscript" },
+      "description": "Generated life story drafts"
+    },
+    "/auditLogs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "Security audit logs"
+    },
+    "/admins/{adminId}": {
+      "schema": { "$ref": "#/entities/Admin" },
+      "description": "Explicit administrator allowlist"
+    },
+    "/privacyConsents/{consentId}": {
+      "schema": { "$ref": "#/entities/PrivacyConsent" },
+      "description": "Single verified electronic privacy consent records"
+    },
+    "/bookShares/{shareId}": {
+      "schema": { "$ref": "#/entities/BookShare" },
+      "description": "Authorized autobiography book sharing recipients"
+    },
+    "/scheduledDeliveries/{deliveryId}": {
+      "schema": { "$ref": "#/entities/ScheduledDelivery" },
+      "description": "Scheduled future digital book deliveries"
+    },
+    "/secondaryAccess/{accessId}": {
+      "schema": { "$ref": "#/entities/SecondaryAccess" },
+      "description": "Configured secondary authorized persons"
+    },
+    "/postMortemInstructions/{instructionId}": {
+      "schema": { "$ref": "#/entities/PostMortemInstruction" },
+      "description": "Voluntary post-mortem digital legacy instructions"
+    },
+    "/arcoRequests/{requestId}": {
+      "schema": { "$ref": "#/entities/ArcoRequest" },
+      "description": "Official ARCO privacy requests"
+    }
+  }
+}

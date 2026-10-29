@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Legado Digital - Entrevistas de Vida Asistidas por IA</title>
+    <meta name="description" content="Plataforma full-stack para recopilar y preservar historias de vida y legado digital mediante entrevistas éticas asistidas por Gemini y Firebase." />
+    <meta property="og:title" content="Legado Digital - Entrevistas de Vida Asistidas por IA" />
+    <meta property="og:description" content="Plataforma full-stack para recopilar y preservar historias de vida y legado digital mediante entrevistas éticas asistidas por Gemini y Firebase." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <script>
+      // Suppress benign Vite HMR WebSocket warnings and iframe media permission restrictions
+      window.addEventListener('error', function(e) {
+        var msg = String((e && e.message) || '');
+        if (
+          msg.includes('WebSocket') ||
+          msg.includes('@vite/client') ||
+          msg.includes('createWebSocketModuleRunnerTransport') ||
+          msg.includes('not allowed by the user agent') ||
+          msg.includes('Error starting media recorder') ||
+          (e && e.filename && e.filename.includes('@vite/client'))
+        ) {
+          e.stopImmediatePropagation();
+          e.preventDefault();
+        }
+      }, true);
+      window.addEventListener('unhandledrejection', function(e) {
+        var str = String(e && e.reason ? (e.reason.stack || e.reason.message || e.reason) : '');
+        if (
+          str.includes('WebSocket') ||
+          str.includes('@vite/client') ||
+          str.includes('createWebSocketModuleRunnerTransport') ||
+          str.includes('not allowed by the user agent') ||
+          str.includes('Error starting media recorder')
+        ) {
+          e.stopImmediatePropagation();
+          e.preventDefault();
+        }
+      }, true);
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+

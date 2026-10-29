@@ -1,0 +1,128 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        (request.auth.token.email == "garcia.michel@gmail.com" && request.auth.token.email_verified == true) ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128;
+    }
+
+    match /test/{docId} {
+      allow read, write: if true;
+    }
+
+    match /admins/{adminId} {
+      allow read: if true;
+      allow write: if isValidId(adminId);
+    }
+
+    match /settings/{settingId} {
+      allow read: if true;
+      allow write: if isValidId(settingId);
+    }
+
+    match /questions/{questionId} {
+      allow read: if true;
+      allow create, update: if isValidId(questionId) && request.resource.data.text is string;
+      allow delete: if isValidId(questionId);
+    }
+
+    match /questionnaireVersions/{versionId} {
+      allow read: if true;
+      allow write: if isValidId(versionId);
+    }
+
+    match /interviews/{interviewId} {
+      allow read: if true;
+      allow create, update: if isValidId(interviewId) && request.resource.data.title is string;
+      allow delete: if isValidId(interviewId);
+    }
+
+    match /participants/{participantId} {
+      allow read: if true;
+      allow create, update: if isValidId(participantId) && request.resource.data.interviewId is string;
+      allow delete: if isValidId(participantId);
+    }
+
+    match /interviewTokens/{tokenId} {
+      allow read: if true;
+      allow create, update: if isValidId(tokenId) && request.resource.data.tokenHash is string;
+      allow delete: if isValidId(tokenId);
+    }
+
+    match /answers/{answerId} {
+      allow read: if true;
+      allow create, update: if isValidId(answerId) && request.resource.data.interviewId is string;
+      allow delete: if isValidId(answerId);
+    }
+
+    match /interviewPhotos/{photoId} {
+      allow read: if true;
+      allow create, update: if isValidId(photoId) && request.resource.data.interviewId is string;
+      allow delete: if isValidId(photoId);
+    }
+
+    match /interviewAudio/{audioId} {
+      allow read: if true;
+      allow create, update: if isValidId(audioId) && request.resource.data.interviewId is string;
+      allow delete: if isValidId(audioId);
+    }
+
+    match /manuscripts/{manuscriptId} {
+      allow read: if true;
+      allow create, update: if isValidId(manuscriptId) && request.resource.data.interviewId is string;
+      allow delete: if isValidId(manuscriptId);
+    }
+
+    match /auditLogs/{logId} {
+      allow read: if true;
+      allow write: if isValidId(logId) && request.resource.data.action is string;
+    }
+
+    match /privacyConsents/{consentId} {
+      allow read: if true;
+      allow create, update: if isValidId(consentId) && request.resource.data.interviewId is string;
+      allow delete: if isValidId(consentId);
+    }
+
+    match /bookShares/{shareId} {
+      allow read: if true;
+      allow create, update: if isValidId(shareId) && request.resource.data.interviewId is string;
+      allow delete: if isValidId(shareId);
+    }
+
+    match /scheduledDeliveries/{deliveryId} {
+      allow read: if true;
+      allow create, update: if isValidId(deliveryId) && request.resource.data.interviewId is string;
+      allow delete: if isValidId(deliveryId);
+    }
+
+    match /secondaryAccess/{accessId} {
+      allow read: if true;
+      allow create, update: if isValidId(accessId) && request.resource.data.interviewId is string;
+      allow delete: if isValidId(accessId);
+    }
+
+    match /postMortemInstructions/{instructionId} {
+      allow read: if true;
+      allow create, update: if isValidId(instructionId) && request.resource.data.interviewId is string;
+      allow delete: if isValidId(instructionId);
+    }
+
+    match /arcoRequests/{requestId} {
+      allow read: if true;
+      allow create, update: if isValidId(requestId) && request.resource.data.interviewId is string;
+      allow delete: if isValidId(requestId);
+    }
+  }
+}
+
