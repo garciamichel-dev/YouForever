@@ -10,6 +10,9 @@ import {
   isConsentValid,
 } from '../logic/privacyRules.ts';
 import {
+  PRIVACY_NOTICE_VERSION,
+} from '../logic/privacyNoticeContent.ts';
+import {
   CURRENT_PRIVACY_POLICY_VERSION,
 } from '../logic/interviewRules.ts';
 
@@ -784,11 +787,11 @@ apiRouter.post('/participant/session', (req: Request, res: Response) => {
     const otherParticipants = storage.getParticipantsForInterview(interview.id);
 
     // Verify existing informed consent on record for this specific participant
-    const consent = storage.getConsentForParticipant(participant.id, CURRENT_PRIVACY_POLICY_VERSION);
-    const hasValidConsent = isConsentValid(consent, interview.id, participant.id, CURRENT_PRIVACY_POLICY_VERSION);
-    const policyInfo = storage.getPrivacyPolicyVersion(CURRENT_PRIVACY_POLICY_VERSION);
+    const consent = storage.getActiveConsent(interview.id, participant.id) || storage.getConsentForParticipant(participant.id, PRIVACY_NOTICE_VERSION);
+    const hasValidConsent = isConsentValid(consent, interview.id, participant.id, PRIVACY_NOTICE_VERSION);
+    const policyInfo = storage.getPrivacyPolicyVersion(PRIVACY_NOTICE_VERSION);
     const deliverySchedules = storage.getDeliverySchedulesForInterview(interview.id);
-    const secondaryAccessList = storage.getSecondaryAccessForInterview(interview.id);
+    const secondaryAccessList = storage.getSecondaryAccess(interview.id, participant.id);
 
     res.json({
       success: true,
@@ -842,6 +845,16 @@ apiRouter.post('/participant/answer', async (req: Request, res: Response) => {
       return;
     }
 
+    const { interview, participant } = storage.resolveToken(token);
+    const activeConsent = storage.getActiveConsent(interview.id, participant.id);
+    if (!isConsentValid(activeConsent, interview.id, participant.id, PRIVACY_NOTICE_VERSION)) {
+      res.status(403).json({
+        success: false,
+        error: 'Debe aceptar el aviso de privacidad y confirmar su identidad antes de registrar respuestas.',
+      });
+      return;
+    }
+
     const result = await storage.submitAnswer({
       plainToken: token,
       questionId,
@@ -880,6 +893,16 @@ apiRouter.post('/participant/audio/upload', async (req: Request, res: Response) 
 
     if (!token) {
       res.status(400).json({ success: false, error: 'Token de invitación requerido.' });
+      return;
+    }
+
+    const { interview, participant } = storage.resolveToken(token);
+    const activeConsent = storage.getActiveConsent(interview.id, participant.id);
+    if (!isConsentValid(activeConsent, interview.id, participant.id, PRIVACY_NOTICE_VERSION)) {
+      res.status(403).json({
+        success: false,
+        error: 'Debe aceptar el aviso de privacidad y confirmar su identidad antes de guardar audios.',
+      });
       return;
     }
 
@@ -1071,20 +1094,19 @@ apiRouter.get('/privacy/policy', (req: Request, res: Response) => {
 
 apiRouter.post('/participant/consent', async (req: Request, res: Response) => {
   try {
-    const { token, declarations, confirmedIdentity, confirmedParticipantName } = req.body;
+    const { token, hasAcceptedSingleCheckbox } = req.body;
     if (!token) {
       res.status(400).json({ success: false, error: 'Token de invitación requerido.' });
       return;
     }
 
     const clientIp = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '';
-    const consent = await storage.submitPrivacyConsent({
-      plainToken: token,
-      declarations,
-      confirmedIdentity: !!confirmedIdentity,
-      confirmedParticipantName: confirmedParticipantName || '',
-      clientIp,
-    });
+    const userAgent = (req.headers['user-agent'] as string) || '';
+    const consent = await storage.recordPrivacyConsent(
+      token,
+      hasAcceptedSingleCheckbox !== false,
+      userAgent || clientIp
+    );
 
     res.json({ success: true, data: consent });
   } catch (err: unknown) {
@@ -1194,6 +1216,199 @@ apiRouter.post('/participant/secondary-access', async (req: Request, res: Respon
     });
 
     res.json({ success: true, data: access });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
+// Participant Admin Panel Endpoints (Gear / Settings modal)
+apiRouter.post('/participant/admin/profile', async (req: Request, res: Response) => {
+  try {
+    const { token } = req.body;
+    if (!token) {
+      res.status(400).json({ success: false, error: 'Token de invitación requerido.' });
+      return;
+    }
+    const { interview, participant } = storage.resolveToken(token);
+    const activeConsent = storage.getActiveConsent(interview.id, participant.id);
+    const consentHistory = storage.getConsentHistory(interview.id, participant.id);
+    const bookShares = storage.getBookShares(interview.id, participant.id);
+    const scheduledDeliveries = storage.getScheduledDeliveries(interview.id, participant.id);
+    const secondaryAccessList = storage.getSecondaryAccess(interview.id, participant.id);
+    const postMortemInstructions = storage.getPostMortemInstructions(interview.id, participant.id);
+    const auditLogs = storage.getParticipantAuditLogs(interview.id, participant.id);
+    const manuscripts = storage.getManuscriptsForInterview(interview.id);
+    const hasGeneratedBook = manuscripts && manuscripts.length > 0;
+    const latestManuscript = hasGeneratedBook ? manuscripts[manuscripts.length - 1] : null;
+
+    res.json({
+      success: true,
+      data: {
+        participant,
+        interview,
+        activeConsent,
+        consentHistory,
+        bookShares,
+        scheduledDeliveries,
+        secondaryAccessList,
+        postMortemInstructions,
+        auditLogs,
+        hasGeneratedBook,
+        latestManuscript: latestManuscript
+          ? { id: latestManuscript.id, title: latestManuscript.title, version: latestManuscript.version }
+          : null,
+      },
+    });
+  } catch (err: unknown) {
+    res.status(403).json({ success: false, error: (err as Error).message });
+  }
+});
+
+apiRouter.post('/participant/admin/shares', async (req: Request, res: Response) => {
+  try {
+    const { token, recipientName, recipientEmail, relationship, note } = req.body;
+    if (!token) {
+      res.status(400).json({ success: false, error: 'Token requerido.' });
+      return;
+    }
+    const share = await storage.addBookShare(token, {
+      recipientName,
+      recipientEmail,
+      relationship,
+      note,
+    });
+    res.json({ success: true, data: share });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
+apiRouter.post('/participant/admin/shares/:id/revoke', async (req: Request, res: Response) => {
+  try {
+    const { token } = req.body;
+    if (!token) {
+      res.status(400).json({ success: false, error: 'Token requerido.' });
+      return;
+    }
+    const revoked = await storage.revokeBookShare(token, req.params.id);
+    res.json({ success: true, data: revoked });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
+apiRouter.post('/participant/admin/scheduled-deliveries', async (req: Request, res: Response) => {
+  try {
+    const { token, recipientName, recipientEmail, scheduledDate, note } = req.body;
+    if (!token) {
+      res.status(400).json({ success: false, error: 'Token requerido.' });
+      return;
+    }
+    const delivery = await storage.addScheduledDelivery(token, {
+      recipientName,
+      recipientEmail,
+      scheduledDate,
+      note,
+    });
+    res.json({ success: true, data: delivery });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
+apiRouter.post('/participant/admin/scheduled-deliveries/:id/cancel', async (req: Request, res: Response) => {
+  try {
+    const { token } = req.body;
+    if (!token) {
+      res.status(400).json({ success: false, error: 'Token requerido.' });
+      return;
+    }
+    const cancelled = await storage.cancelScheduledDelivery(token, req.params.id);
+    res.json({ success: true, data: cancelled });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
+apiRouter.post('/participant/admin/secondary-access', async (req: Request, res: Response) => {
+  try {
+    const { token, authorizedPersonName, authorizedPersonEmail, relationship, permissions } = req.body;
+    if (!token) {
+      res.status(400).json({ success: false, error: 'Token requerido.' });
+      return;
+    }
+    const access = await storage.addSecondaryAccess(token, {
+      authorizedPersonName,
+      authorizedPersonEmail,
+      relationship,
+      permissions: permissions || ['view_manuscript'],
+    });
+    res.json({ success: true, data: access });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
+apiRouter.post('/participant/admin/secondary-access/:id/revoke', async (req: Request, res: Response) => {
+  try {
+    const { token } = req.body;
+    if (!token) {
+      res.status(400).json({ success: false, error: 'Token requerido.' });
+      return;
+    }
+    const revoked = await storage.revokeSecondaryAccess(token, req.params.id);
+    res.json({ success: true, data: revoked });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
+apiRouter.post('/participant/admin/post-mortem', async (req: Request, res: Response) => {
+  try {
+    const { token, designatedPersonName, designatedPersonEmail, relationship, instructions } = req.body;
+    if (!token) {
+      res.status(400).json({ success: false, error: 'Token requerido.' });
+      return;
+    }
+    const pmi = await storage.savePostMortemInstructions(token, {
+      designatedPersonName,
+      designatedPersonEmail,
+      relationship,
+      instructions,
+    });
+    res.json({ success: true, data: pmi });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
+apiRouter.post('/participant/admin/post-mortem/revoke', async (req: Request, res: Response) => {
+  try {
+    const { token } = req.body;
+    if (!token) {
+      res.status(400).json({ success: false, error: 'Token requerido.' });
+      return;
+    }
+    await storage.revokePostMortemInstructions(token);
+    res.json({ success: true });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
+apiRouter.post('/participant/admin/arco', async (req: Request, res: Response) => {
+  try {
+    const { token, requestType, details, email } = req.body;
+    if (!token) {
+      res.status(400).json({ success: false, error: 'Token requerido.' });
+      return;
+    }
+    const arco = await storage.submitArcoRequest(token, {
+      requestType,
+      details,
+      email,
+    });
+    res.json({ success: true, data: arco });
   } catch (err: unknown) {
     res.status(400).json({ success: false, error: (err as Error).message });
   }

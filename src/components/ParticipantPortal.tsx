@@ -21,6 +21,7 @@ import {
   Volume2,
   Mic,
   HelpCircle,
+  Settings,
 } from 'lucide-react';
 import {
   InterviewRecord,
@@ -38,6 +39,8 @@ import { QuestionPhotoUploader, DraftPhotoItem } from './QuestionPhotoUploader.t
 import { VoiceRecorder, VoiceRecorderHandle, SavedVoiceAudiosList } from './VoiceRecorder.tsx';
 import { AudioPlayer } from './AudioPlayer.tsx';
 import { FAQModal } from './FAQModal.tsx';
+import { PrivacyConsentScreen } from './PrivacyConsentScreen.tsx';
+import { ParticipantAdminPanel } from './ParticipantAdminPanel.tsx';
 
 function mapAttachmentsToDraftItems(attachments?: AnswerPhotoAttachment[]): DraftPhotoItem[] {
   if (!attachments || attachments.length === 0) return [];
@@ -65,6 +68,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
   const [isFaqOpen, setIsFaqOpen] = useState(false);
   const handleOpenFaq = onOpenFaq || (() => setIsFaqOpen(true));
   const [tokenInput, setTokenInput] = useState<string>(initialToken || '');
+  const [isParticipantAdminOpen, setIsParticipantAdminOpen] = useState(false);
   const [sessionData, setSessionData] = useState<{
     interview: InterviewRecord;
     participant: ParticipantRecord;
@@ -73,6 +77,8 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
     otherParticipants: Array<{ id: string; name: string; relationship: string; role: string }>;
     allowAnswerEditing: boolean;
     allowAdditionalMemories: boolean;
+    hasValidConsent?: boolean;
+    consent?: any;
   } | null>(null);
 
   const [loading, setLoading] = useState(false);
@@ -1016,6 +1022,38 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
     );
   }
 
+  // Obligatory Single-Consent Privacy Gate: Participant must accept single consent before proceeding
+  if (sessionData && !sessionData.hasValidConsent) {
+    return (
+      <div className="space-y-6">
+        <PrivacyConsentScreen
+          participantName={sessionData.participant.name}
+          interviewTitle={sessionData.interview.title}
+          onAccept={async () => {
+            const res = await fetch('/api/participant/consent', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                token: activeToken,
+                hasAcceptedSingleCheckbox: true,
+              }),
+            });
+            const json = await res.json();
+            if (!json.success) {
+              throw new Error(json.error || 'No se pudo registrar el consentimiento en el servidor.');
+            }
+            setSessionData({
+              ...sessionData,
+              hasValidConsent: true,
+              consent: json.data,
+            });
+          }}
+        />
+        <FAQModal isOpen={isFaqOpen} onClose={() => setIsFaqOpen(false)} />
+      </div>
+    );
+  }
+
   const { interview, participant, questions, answers } = sessionData;
   const isInterviewOpen = interview.status === 'open' && !interview.userDeclaredComplete;
   const isExpired = new Date(interview.expiresAt).getTime() < Date.now();
@@ -1076,9 +1114,20 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
             </div>
           </div>
 
-          {/* Voluntary Finish Button */}
-          {isInterviewOpen && (
-            <div className="flex items-center space-x-2">
+          {/* Header Action Buttons (Ajustes/Privacidad & Voluntary Finish) */}
+          <div className="flex items-center space-x-2">
+            <button
+              type="button"
+              onClick={() => setIsParticipantAdminOpen(true)}
+              title="Panel de Privacidad y Gestión del Entrevistado"
+              aria-label="Panel de Privacidad y Gestión del Entrevistado"
+              className="inline-flex items-center space-x-1.5 px-3 py-1.5 bg-stone-100 hover:bg-amber-100 text-stone-700 hover:text-amber-900 border border-stone-300 rounded-lg text-xs font-semibold transition cursor-pointer"
+            >
+              <Settings className="w-3.5 h-3.5 text-stone-600 hover:text-amber-800" />
+              <span>Ajustes &amp; Privacidad</span>
+            </button>
+
+            {isInterviewOpen && (
               <button
                 type="button"
                 onClick={() => setShowFinishModal(true)}
@@ -1087,8 +1136,8 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                 <Check className="w-3.5 h-3.5 text-emerald-700" />
                 <span>He terminado mi historia</span>
               </button>
-            </div>
-          )}
+            )}
+          </div>
         </div>
 
         {/* Visual Progress Bar Card with Percentage */}
@@ -2037,6 +2086,18 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
 
       {/* FAQ Modal */}
       <FAQModal isOpen={isFaqOpen} onClose={() => setIsFaqOpen(false)} />
+
+      {/* Participant Administrative Panel Modal */}
+      {isParticipantAdminOpen && (
+        <ParticipantAdminPanel
+          token={activeToken}
+          onClose={() => setIsParticipantAdminOpen(false)}
+          onConsentRevoked={() => {
+            setIsParticipantAdminOpen(false);
+            setSessionData((prev) => (prev ? { ...prev, hasValidConsent: false } : null));
+          }}
+        />
+      )}
     </div>
   );
 };

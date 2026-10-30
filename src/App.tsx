@@ -48,39 +48,66 @@ export default function App() {
 
   // Listen to Firebase Auth state
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (user) => {
-      setIsAuthChecking(false);
-      if (user && user.email) {
-        const email = user.email.toLowerCase().trim();
-        setAdminUser(email);
-        const authorized = email === 'garcia.michel@gmail.com';
-        setIsAuthorizedAdmin(authorized);
+    const unsubscribe = onAuthStateChanged(
+      auth,
+      async (user) => {
+        setIsAuthChecking(false);
+        if (user && user.email) {
+          try {
+            await user.getIdToken();
+          } catch (tokenErr: unknown) {
+            const msg = tokenErr instanceof Error ? tokenErr.message : String(tokenErr);
+            if (msg.includes('token-service-api') || msg.includes('securetoken')) {
+              console.warn('Stale auth session token refresh failed, signing out:', msg);
+              await signOut(auth).catch(() => {});
+              setAdminUser(null);
+              setIsAuthorizedAdmin(false);
+              return;
+            }
+          }
 
-        const urlParams = new URLSearchParams(window.location.search);
-        const token = urlParams.get('token') || urlParams.get('code');
-        const isAdminUrl = window.location.pathname.startsWith('/admin') || urlParams.get('view') === 'admin';
+          const email = user.email.toLowerCase().trim();
+          setAdminUser(email);
+          const authorized = email === 'garcia.michel@gmail.com';
+          setIsAuthorizedAdmin(authorized);
 
-        if (authorized && (isAdminUrl || !token)) {
-          setCurrentView('admin');
+          const urlParams = new URLSearchParams(window.location.search);
+          const token = urlParams.get('token') || urlParams.get('code');
+          const isAdminUrl = window.location.pathname.startsWith('/admin') || urlParams.get('view') === 'admin';
+
+          if (authorized && (isAdminUrl || !token)) {
+            setCurrentView('admin');
+          }
+        } else {
+          setAdminUser(null);
+          setIsAuthorizedAdmin(false);
         }
-      } else {
+      },
+      (error) => {
+        console.warn('Auth state observation error:', error);
+        setIsAuthChecking(false);
         setAdminUser(null);
         setIsAuthorizedAdmin(false);
       }
-    });
+    );
     return () => unsubscribe();
   }, []);
 
   const handleLogin = async () => {
-    const result = await signInWithPopup(auth, googleProvider);
-    if (result.user?.email) {
-      const email = result.user.email.toLowerCase().trim();
-      setAdminUser(email);
-      const authorized = email === 'garcia.michel@gmail.com';
-      setIsAuthorizedAdmin(authorized);
-      if (authorized) {
-        setCurrentView('admin');
+    try {
+      const result = await signInWithPopup(auth, googleProvider);
+      if (result.user?.email) {
+        const email = result.user.email.toLowerCase().trim();
+        setAdminUser(email);
+        const authorized = email === 'garcia.michel@gmail.com';
+        setIsAuthorizedAdmin(authorized);
+        if (authorized) {
+          setCurrentView('admin');
+        }
       }
+    } catch (err: unknown) {
+      console.warn('Login error:', err);
+      throw err;
     }
   };
 

@@ -32,7 +32,9 @@
           str.includes('@vite/client') ||
           str.includes('createWebSocketModuleRunnerTransport') ||
           str.includes('not allowed by the user agent') ||
-          str.includes('Error starting media recorder')
+          str.includes('Error starting media recorder') ||
+          str.includes('token-service-api') ||
+          str.includes('securetoken.googleapis.com')
         ) {
           e.stopImmediatePropagation();
           e.preventDefault();

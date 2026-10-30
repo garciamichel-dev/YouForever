@@ -1,6 +1,6 @@
 import { initializeApp, getApps, getApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
-import { getFirestore, doc, getDocFromServer } from 'firebase/firestore';
+import { getAuth, GoogleAuthProvider, signOut } from 'firebase/auth';
+import { getFirestore, doc, getDocFromServer, enableNetwork } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 
 const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
@@ -47,16 +47,60 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
   throw new Error(JSON.stringify(errInfo));
 }
 
+// Clean up stale or corrupted auth sessions that cannot refresh against securetoken API
+if (typeof window !== 'undefined') {
+  auth.onAuthStateChanged(
+    async (user) => {
+      if (user) {
+        try {
+          await user.getIdToken();
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          if (msg.includes('token-service-api') || msg.includes('securetoken')) {
+            console.warn('Clearing stale user session with unrefreshable token');
+            await signOut(auth).catch(() => {});
+            await enableNetwork(db).catch(() => {});
+          }
+        }
+      }
+    },
+    (err) => {
+      console.warn('Auth state observation error:', err);
+    }
+  );
+}
+
 // Test connection to Firestore on initial boot as required by skill
 async function testConnection() {
   try {
+    if (auth.currentUser) {
+      try {
+        await auth.currentUser.getIdToken();
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes('token-service-api') || msg.includes('securetoken')) {
+          await signOut(auth).catch(() => {});
+          await enableNetwork(db).catch(() => {});
+        }
+      }
+    }
     await getDocFromServer(doc(db, 'test', 'connection'));
   } catch (error) {
     if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.error('Please check your Firebase configuration.');
+      try {
+        await signOut(auth).catch(() => {});
+        await enableNetwork(db).catch(() => {});
+        await getDocFromServer(doc(db, 'test', 'connection'));
+        return;
+      } catch (retryError) {
+        if (retryError instanceof Error && retryError.message.includes('the client is offline')) {
+          console.error('Please check your Firebase configuration.');
+        }
+      }
     }
   }
 }
 testConnection();
+
 
 
