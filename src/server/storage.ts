@@ -1,3 +1,5 @@
+import fs from 'fs';
+import path from 'path';
 import { initializeApp, getApps, getApp } from 'firebase/app';
 import {
   getFirestore,
@@ -994,6 +996,25 @@ class StorageManager {
       audioDataUrl = `data:${mimeType};base64,${params.audioBase64}`;
     }
 
+    // Persist audio binary to local disk for robust streaming of large/long (10+ min) recordings
+    try {
+      const audioDir = path.join(process.cwd(), 'data', 'audios');
+      if (!fs.existsSync(audioDir)) {
+        fs.mkdirSync(audioDir, { recursive: true });
+      }
+      let rawBase64 = params.audioBase64;
+      if (rawBase64.startsWith('data:')) {
+        const cIdx = rawBase64.indexOf(',');
+        if (cIdx !== -1) rawBase64 = rawBase64.substring(cIdx + 1);
+      }
+      fs.writeFileSync(
+        path.join(audioDir, `${audioId}.bin`),
+        Buffer.from(rawBase64.replace(/\s+/g, ''), 'base64')
+      );
+    } catch (diskErr) {
+      console.warn('[Disk Audio Storage Note]:', diskErr);
+    }
+
     const audioRecord: InterviewAudioRecord = {
       id: audioId,
       interviewId: interview.id,
@@ -1010,7 +1031,15 @@ class StorageManager {
     };
 
     this.audios.set(audioId, audioRecord);
-    await this.persistDoc('interviewAudio', audioId, audioRecord);
+
+    // If audio is large (> 400KB), omit the heavy base64 payload from the Firestore document
+    // to strictly prevent Firestore 1MB document limit rejections.
+    const firestoreRecord: any = { ...audioRecord };
+    if (firestoreRecord.audioDataUrl && firestoreRecord.audioDataUrl.length > 400_000) {
+      firestoreRecord.audioDataUrl = '';
+      firestoreRecord.storedOnDisk = true;
+    }
+    await this.persistDoc('interviewAudio', audioId, firestoreRecord);
 
     await this.addAuditLog('UPLOAD_VOICE_RECORDING', 'audio', audioId, participant.name, {
       interviewId: interview.id,
@@ -1020,6 +1049,34 @@ class StorageManager {
     });
 
     return audioRecord;
+  }
+
+  public getAudioBuffer(audioId: string): { buffer: Buffer; mimeType: string } | null {
+    const audio = this.audios.get(audioId);
+    const audioDir = path.join(process.cwd(), 'data', 'audios');
+    const diskPath = path.join(audioDir, `${audioId}.bin`);
+
+    if (fs.existsSync(diskPath)) {
+      try {
+        const buf = fs.readFileSync(diskPath);
+        return { buffer: buf, mimeType: audio?.mimeType || 'audio/webm' };
+      } catch (err) {
+        console.warn('Error reading audio from disk:', err);
+      }
+    }
+
+    if (audio?.audioDataUrl) {
+      let raw = audio.audioDataUrl;
+      if (raw.startsWith('data:')) {
+        const cIdx = raw.indexOf(',');
+        if (cIdx !== -1) raw = raw.substring(cIdx + 1);
+      }
+      return {
+        buffer: Buffer.from(raw.replace(/\s+/g, ''), 'base64'),
+        mimeType: audio.mimeType || 'audio/webm',
+      };
+    }
+    return null;
   }
 
   public async deleteAudioForParticipant(

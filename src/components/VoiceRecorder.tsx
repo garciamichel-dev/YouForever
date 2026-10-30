@@ -82,7 +82,6 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
     const [state, setState] = useState<RecorderState>('idle');
     const [timerSeconds, setTimerSeconds] = useState(0);
     const [errorMsg, setErrorMsg] = useState<string | null>(null);
-    const [liveTranscription, setLiveTranscription] = useState('');
     const [previewAudioUrl, setPreviewAudioUrl] = useState<string | null>(null);
     const [previewAudioName, setPreviewAudioName] = useState<string | null>(null);
     const [deletingAudioId, setDeletingAudioId] = useState<string | null>(null);
@@ -93,7 +92,6 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
     const audioChunksRef = useRef<Blob[]>([]);
     const audioStreamRef = useRef<MediaStream | null>(null);
     const timerIntervalRef = useRef<number | null>(null);
-    const speechRecognitionRef = useRef<any>(null);
     const audioContextRef = useRef<AudioContext | null>(null);
     const analyserRef = useRef<AnalyserNode | null>(null);
     const animFrameRef = useRef<number | null>(null);
@@ -110,7 +108,6 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
       cleanupResources();
       setState('idle');
       setTimerSeconds(0);
-      setLiveTranscription('');
       setErrorMsg(null);
       setPreviewAudioName(null);
       if (previewAudioUrl) {
@@ -142,14 +139,6 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
       if (animFrameRef.current) {
         cancelAnimationFrame(animFrameRef.current);
         animFrameRef.current = null;
-      }
-      if (speechRecognitionRef.current) {
-        try {
-          speechRecognitionRef.current.stop();
-        } catch {
-          // ignore
-        }
-        speechRecognitionRef.current = null;
       }
       if (audioStreamRef.current) {
         try {
@@ -228,7 +217,6 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
     // Start Voice Recording with progressive constraints and non-fatal fallback
     const handleStartRecording = async () => {
       setErrorMsg(null);
-      setLiveTranscription('');
       setPreviewAudioName(null);
       audioChunksRef.current = [];
       finalRecordedBlobRef.current = null;
@@ -297,35 +285,6 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
           setPreviewAudioUrl(previewUrl);
         };
 
-        // Real-time Spanish speech recognition preview
-        const SpeechRecognition =
-          (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-        if (SpeechRecognition) {
-          try {
-            const recognition = new SpeechRecognition();
-            recognition.lang = 'es-ES';
-            recognition.continuous = true;
-            recognition.interimResults = true;
-
-            recognition.onresult = (e: any) => {
-              let fullText = '';
-              for (let i = 0; i < e.results.length; i++) {
-                fullText += e.results[i][0].transcript + ' ';
-              }
-              setLiveTranscription(fullText.trim());
-            };
-
-            recognition.onerror = () => {
-              // Non-fatal
-            };
-
-            recognition.start();
-            speechRecognitionRef.current = recognition;
-          } catch {
-            // Non-fatal
-          }
-        }
-
         mediaRecorder.start(250);
         setTimerSeconds(0);
         setState('recording');
@@ -367,10 +326,10 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
       if (!file) return;
 
       setErrorMsg(null);
-      // Maximum 14MB to fit within server JSON limit
-      if (file.size > 14 * 1024 * 1024) {
+      // Maximum 50MB (supports recordings of 10-30+ minutes)
+      if (file.size > 50 * 1024 * 1024) {
         setErrorMsg(
-          'El archivo de audio supera el límite de 14 MB. Por favor selecciona una nota de voz de menor duración o tamaño.'
+          'El archivo de audio supera el límite de 50 MB. Por favor selecciona una nota de voz de menor tamaño.'
         );
         if (e.target) e.target.value = '';
         return;
@@ -421,13 +380,6 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
           clearInterval(timerIntervalRef.current);
           timerIntervalRef.current = null;
         }
-        if (speechRecognitionRef.current) {
-          try {
-            speechRecognitionRef.current.stop();
-          } catch {
-            // ignore
-          }
-        }
         setState('paused');
       } catch (err) {
         console.warn('Error pausing recorder:', err);
@@ -443,14 +395,6 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
         timerIntervalRef.current = window.setInterval(() => {
           setTimerSeconds((prev) => prev + 1);
         }, 1000);
-
-        if (speechRecognitionRef.current) {
-          try {
-            speechRecognitionRef.current.start();
-          } catch {
-            // ignore
-          }
-        }
 
         setState('recording');
       } catch (err) {
@@ -469,7 +413,6 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
       }
       setPreviewAudioName(null);
       setTimerSeconds(0);
-      setLiveTranscription('');
       setErrorMsg(null);
       setState('idle');
     };
@@ -514,14 +457,6 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
       }
       setVolumeLevel(0);
 
-      if (speechRecognitionRef.current) {
-        try {
-          speechRecognitionRef.current.stop();
-        } catch {
-          // ignore
-        }
-      }
-
       await stopRecordingAndGetBlob();
 
       if (audioStreamRef.current) {
@@ -551,14 +486,6 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
           animFrameRef.current = null;
         }
         setVolumeLevel(0);
-
-        if (speechRecognitionRef.current) {
-          try {
-            speechRecognitionRef.current.stop();
-          } catch {
-            // ignore
-          }
-        }
 
         audioBlob = await stopRecordingAndGetBlob();
 
@@ -594,7 +521,6 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
         const audioBase64 = await base64Promise;
 
         const duration = timerSeconds > 0 ? timerSeconds : 1;
-        const capturedSpeech = liveTranscription.trim();
 
         // Send to server: persists voice recording, transcribes with Gemini, saves in Firestore
         const res = await fetch('/api/participant/audio/upload', {
@@ -607,7 +533,6 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
             audioBase64,
             mimeType: audioBlob.type || 'audio/webm',
             durationSeconds: duration,
-            clientTranscription: capturedSpeech,
           }),
         });
 
@@ -616,8 +541,7 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
           throw new Error(data.error || 'Error al guardar el archivo de voz.');
         }
 
-        const returnedTranscription =
-          (data.data.transcription || '').trim() || capturedSpeech;
+        const returnedTranscription = (data.data.transcription || '').trim();
 
         const audioAttachment: AnswerVoiceAttachment = {
           id: data.data.id,
@@ -641,7 +565,6 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
         // Reset recorder state to idle ready to record another note if desired
         setState('idle');
         setTimerSeconds(0);
-        setLiveTranscription('');
         setPreviewAudioName(null);
         finalRecordedBlobRef.current = null;
         audioChunksRef.current = [];
@@ -732,74 +655,37 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
         />
 
         {/* Main active recorder container */}
-        <div className="w-full bg-slate-50 border border-slate-200 rounded-xl p-4 transition-all shadow-sm">
-          {/* Header bar */}
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2">
-              <div
-                className={`w-8 h-8 rounded-full flex items-center justify-center ${
-                  state === 'recording'
-                    ? 'bg-rose-100 text-rose-600 animate-pulse'
-                    : state === 'paused'
-                    ? 'bg-amber-100 text-amber-700'
-                    : state === 'stopped'
-                    ? 'bg-indigo-100 text-indigo-700'
-                    : state === 'uploading'
-                    ? 'bg-indigo-100 text-indigo-700'
-                    : savedAudios.length > 0
-                    ? 'bg-emerald-100 text-emerald-700'
-                    : 'bg-indigo-100 text-indigo-700'
-                }`}
-              >
-                <Mic className="w-4 h-4" />
-              </div>
-              <div>
-                <h4 className="text-sm font-semibold text-slate-900 flex items-center gap-1.5">
-                  Respuesta por Nota de Voz
-                  {savedAudios.length > 0 && (
-                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800">
-                      <CheckCircle2 className="w-3 h-3" /> {savedAudios.length}{' '}
-                      {savedAudios.length === 1 ? 'audio guardado' : 'audios guardados'}
-                    </span>
-                  )}
-                </h4>
-                <p className="text-xs text-slate-600">
-                  {state === 'idle' &&
-                    (savedAudios.length > 0
-                      ? 'Puedes grabar o subir notas de voz adicionales para complementar tu respuesta.'
-                      : 'Graba tu testimonio con el micrófono o sube una nota de voz. Se guardará el audio y la transcripción completa.')}
-                  {state === 'recording' && 'Grabando audio... Habla con naturalidad.'}
-                  {state === 'paused' && 'Grabación en pausa. Puedes continuar cuando lo desees.'}
-                  {state === 'stopped' && 'Audio listo. Escucha la vista previa y pulsa «Enviar y Transcribir».'}
-                  {state === 'uploading' && 'Guardando archivo de voz y transcribiendo con IA...'}
-                </p>
-              </div>
-            </div>
-
-            {/* Live Timer badge */}
-            {(state === 'recording' || state === 'paused' || state === 'stopped') && (
-              <div className="flex items-center gap-2 bg-white px-3 py-1 rounded-full border border-slate-200 shadow-xs">
+        <div className="w-full bg-gradient-to-b from-amber-50/30 via-stone-50/60 to-white border border-stone-200/90 rounded-2xl p-5 transition-all shadow-xs">
+          {/* Live Timer badge (visible when recording, paused or stopped) */}
+          {(state === 'recording' || state === 'paused' || state === 'stopped') && (
+            <div className="flex items-center justify-between mb-3 pb-2.5 border-b border-stone-200/60">
+              <div className="flex items-center gap-2">
                 <span
-                  className={`w-2.5 h-2.5 rounded-full ${
+                  className={`w-3 h-3 rounded-full ${
                     state === 'recording'
                       ? 'bg-rose-500 animate-ping'
                       : state === 'paused'
                       ? 'bg-amber-500'
-                      : 'bg-indigo-500'
+                      : 'bg-emerald-600'
                   }`}
                 />
-                <span className="font-mono text-xs font-semibold text-slate-800">
-                  {formatTimer(timerSeconds)}
+                <span className="text-xs font-semibold text-stone-700">
+                  {state === 'recording' && 'Grabando tu recuerdo en vivo...'}
+                  {state === 'paused' && 'Grabación en pausa'}
+                  {state === 'stopped' && 'Grabación lista para enviar'}
                 </span>
               </div>
-            )}
-          </div>
+              <span className="font-mono text-sm font-bold text-amber-900 bg-amber-100/80 px-3 py-0.5 rounded-full border border-amber-200">
+                {formatTimer(timerSeconds)}
+              </span>
+            </div>
+          )}
 
           {/* Error notification banner with recovery actions */}
           {errorMsg && (
-            <div className="mb-3 p-3 bg-amber-50 border border-amber-200 rounded-xl space-y-2">
+            <div className="mb-4 p-3.5 bg-amber-50 border border-amber-300 rounded-xl space-y-2">
               <div className="flex items-start gap-2 text-xs text-amber-900 leading-relaxed">
-                <AlertCircle className="w-4 h-4 shrink-0 text-amber-600 mt-0.5" />
+                <AlertCircle className="w-4 h-4 shrink-0 text-amber-700 mt-0.5" />
                 <span className="flex-1">{errorMsg}</span>
                 <button
                   type="button"
@@ -815,7 +701,7 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
                   type="button"
                   onClick={() => audioFileInputRef.current?.click()}
                   disabled={disabled}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold rounded-lg shadow-xs transition cursor-pointer"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-800 hover:bg-amber-900 text-white text-xs font-semibold rounded-lg shadow-xs transition cursor-pointer"
                 >
                   <Upload className="w-3.5 h-3.5" />
                   Subir archivo de audio o nota de voz
@@ -833,57 +719,61 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
             </div>
           )}
 
-          {/* 1. STATE: IDLE (Dual options: Live Mic or Upload Audio) */}
+          {/* 1. STATE: IDLE (Senior-friendly circular button) */}
           {state === 'idle' && (
-            <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 pt-1">
-              <div className="flex flex-wrap items-center gap-2">
-                {/* Live Microphone Recording */}
-                <button
-                  type="button"
-                  onClick={handleStartRecording}
-                  disabled={disabled}
-                  className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg shadow-sm transition-colors cursor-pointer"
-                >
-                  <Mic className="w-4 h-4" />
-                  {savedAudios.length > 0 ? 'Grabar con micrófono' : 'Grabar con micrófono'}
-                </button>
+            <div className="flex flex-col items-center justify-center text-center space-y-4 py-4">
+              {/* Circular voice button designed for seniors */}
+              <button
+                type="button"
+                onClick={handleStartRecording}
+                disabled={disabled}
+                className="w-36 h-36 sm:w-40 sm:h-40 rounded-full bg-gradient-to-br from-amber-700 via-amber-800 to-amber-900 text-white shadow-md hover:shadow-xl hover:scale-105 active:scale-95 transition-all duration-300 flex flex-col items-center justify-center p-3 cursor-pointer group focus:outline-none focus:ring-4 focus:ring-amber-200 border-4 border-amber-100 disabled:opacity-50"
+                aria-label="Pulsa y cuéntanos tu recuerdo"
+              >
+                <div className="w-12 h-12 rounded-full bg-white/20 flex items-center justify-center mb-1 group-hover:bg-white/30 transition shadow-inner">
+                  <Mic className="w-7 h-7 text-white" />
+                </div>
+                <span className="text-xs sm:text-sm font-bold text-center leading-snug px-2 text-amber-50">
+                  Pulsa y cuéntanos tu recuerdo
+                </span>
+              </button>
 
-                {/* Upload Audio File / Voice Memo */}
+              <p className="font-serif italic text-sm text-stone-700 text-center max-w-md px-2 leading-relaxed">
+                «Habla con calma y a tu propio ritmo. Te escuchamos con el respeto que merece tu historia.»
+              </p>
+
+              <div className="pt-1">
                 <button
                   type="button"
                   onClick={() => audioFileInputRef.current?.click()}
                   disabled={disabled}
-                  className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-white hover:bg-slate-100 border border-slate-300 text-slate-700 text-sm font-medium rounded-lg shadow-xs transition-colors cursor-pointer"
+                  className="inline-flex items-center gap-1.5 text-xs text-stone-500 hover:text-amber-800 transition underline underline-offset-4 cursor-pointer"
                   title="Subir archivo de audio o nota de voz (.mp3, .m4a, .wav, .ogg, .webm)"
                 >
-                  <Upload className="w-4 h-4 text-slate-500" />
-                  Subir nota de voz o audio
+                  <Upload className="w-3.5 h-3.5" />
+                  <span>O si lo prefieres, sube una nota de voz o archivo de audio</span>
                 </button>
               </div>
-
-              <span className="text-xs text-slate-500 text-center sm:text-right">
-                Puedes grabar en vivo o subir un archivo. Al pulsar «Enviar», se guardará y transcribirá con IA.
-              </span>
             </div>
           )}
 
-          {/* 2. STATE: RECORDING or PAUSED (The 5 Controls) */}
+          {/* 2. STATE: RECORDING or PAUSED (Controls: Pausar/Continuar, Finalizar, Cancelar, Enviar y Transcribir) */}
           {(state === 'recording' || state === 'paused') && (
-            <div className="space-y-3">
+            <div className="space-y-4 py-2">
               {/* Sound Wave Visualizer */}
-              <div className="bg-slate-900 rounded-lg p-3 flex items-center justify-center gap-1.5 h-14 overflow-hidden shadow-inner">
+              <div className="bg-stone-900 rounded-xl p-3 flex items-center justify-center gap-1.5 h-16 overflow-hidden shadow-inner">
                 {[20, 45, 80, 60, 30, 95, 70, 40, 85, 55, 35, 90, 65, 45, 75, 30, 60, 85, 40, 70].map(
                   (baseHeight, idx) => {
                     const dynamicHeight =
                       state === 'recording'
-                        ? Math.max(12, Math.min(46, (baseHeight * (volumeLevel + 20)) / 100))
+                        ? Math.max(12, Math.min(50, (baseHeight * (volumeLevel + 20)) / 100))
                         : 10;
                     return (
                       <div
                         key={idx}
                         style={{ height: `${dynamicHeight}px` }}
                         className={`w-1.5 rounded-full transition-all duration-75 ${
-                          state === 'recording' ? 'bg-indigo-400' : 'bg-slate-600'
+                          state === 'recording' ? 'bg-amber-400' : 'bg-stone-600'
                         }`}
                       />
                     );
@@ -891,16 +781,8 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
                 )}
               </div>
 
-              {/* Real-time speech preview */}
-              {liveTranscription && (
-                <div className="p-2.5 bg-white border border-slate-200 rounded-lg text-xs text-slate-600 italic">
-                  <span className="font-semibold not-italic text-slate-700">Detectando voz: </span>«
-                  {liveTranscription}»
-                </div>
-              )}
-
               {/* CONTROLES: Pausar / Continuar, Finalizar, Cancelar, Enviar y Transcribir */}
-              <div className="bg-white p-3 rounded-xl border border-slate-200 flex flex-wrap items-center justify-between gap-2 shadow-xs">
+              <div className="bg-white p-3 rounded-xl border border-stone-200 flex flex-wrap items-center justify-between gap-2 shadow-xs">
                 <div className="flex flex-wrap items-center gap-2">
                   {/* PAUSAR (visible al estar grabando) */}
                   {state === 'recording' && (
@@ -912,7 +794,7 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
                       title="Pausar temporalmente la nota de voz"
                     >
                       <Pause className="w-3.5 h-3.5" />
-                      Pausar
+                      <span>Pausar</span>
                     </button>
                   )}
 
@@ -922,11 +804,11 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
                       type="button"
                       onClick={handleResume}
                       disabled={disabled}
-                      className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 shadow-xs transition-colors cursor-pointer"
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg bg-emerald-700 text-white hover:bg-emerald-800 shadow-xs transition-colors cursor-pointer"
                       title="Continuar la grabación en el punto donde se quedó"
                     >
                       <Play className="w-3.5 h-3.5" />
-                      Continuar
+                      <span>Continuar</span>
                     </button>
                   )}
 
@@ -935,11 +817,11 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
                     type="button"
                     onClick={handleStopAndFinalize}
                     disabled={disabled}
-                    className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg bg-slate-100 text-slate-800 hover:bg-slate-200 border border-slate-300 transition-colors cursor-pointer"
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg bg-stone-100 text-stone-800 hover:bg-stone-200 border border-stone-300 transition-colors cursor-pointer"
                     title="Detener grabación para escucharla antes de enviar"
                   >
-                    <Square className="w-3.5 h-3.5 fill-slate-700" />
-                    Finalizar y escuchar
+                    <Square className="w-3.5 h-3.5 fill-stone-700" />
+                    <span>Finalizar y escuchar</span>
                   </button>
 
                   {/* CANCELAR (cancela la grabación y descarta) */}
@@ -947,11 +829,11 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
                     type="button"
                     onClick={handleCancel}
                     disabled={disabled}
-                    className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-slate-600 hover:text-rose-700 hover:bg-rose-50 border border-slate-200 hover:border-rose-200 rounded-lg transition-colors cursor-pointer"
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-stone-600 hover:text-rose-700 hover:bg-rose-50 border border-stone-200 hover:border-rose-200 rounded-lg transition-colors cursor-pointer"
                     title="Cancelar grabación y descartar sin guardar nada"
                   >
                     <X className="w-3.5 h-3.5" />
-                    Cancelar
+                    <span>Cancelar</span>
                   </button>
                 </div>
 
@@ -961,11 +843,11 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
                     type="button"
                     onClick={() => handleSend()}
                     disabled={disabled}
-                    className="inline-flex items-center gap-2 px-4 py-2 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg shadow-sm transition-all transform hover:scale-[1.02] cursor-pointer"
+                    className="inline-flex items-center gap-2 px-5 py-2.5 text-xs font-bold text-white bg-amber-800 hover:bg-amber-900 rounded-lg shadow-sm transition-all transform hover:scale-[1.02] cursor-pointer"
                     title="Finalizar grabación, guardar en base de datos y transcribir con IA"
                   >
                     <Send className="w-3.5 h-3.5" />
-                    Enviar y Transcribir
+                    <span>Enviar y Transcribir</span>
                   </button>
                 </div>
               </div>
@@ -974,15 +856,15 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
 
           {/* 3. STATE: STOPPED (Preview mode before upload) */}
           {state === 'stopped' && (
-            <div className="space-y-3">
+            <div className="space-y-3 py-1">
               {previewAudioUrl && (
-                <div className="bg-white p-3.5 rounded-xl border border-indigo-200 shadow-xs space-y-3">
+                <div className="bg-white p-4 rounded-xl border border-amber-200 shadow-xs space-y-3">
                   <div className="flex items-center justify-between text-xs">
-                    <span className="font-semibold text-slate-800 flex items-center gap-1.5">
-                      <FileAudio className="w-4 h-4 text-indigo-600" />
-                      {previewAudioName || 'Audio listo para enviar y transcribir'}
+                    <span className="font-semibold text-stone-800 flex items-center gap-1.5">
+                      <FileAudio className="w-4 h-4 text-amber-700" />
+                      <span>{previewAudioName || 'Grabación lista para enviar y transcribir'}</span>
                     </span>
-                    <span className="text-slate-500 font-mono text-[11px]">
+                    <span className="text-stone-500 font-mono text-[11px]">
                       Duración: {formatTimer(timerSeconds)}
                     </span>
                   </div>
@@ -993,32 +875,25 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
                     title={previewAudioName || 'Vista previa del audio'}
                   />
 
-                  {liveTranscription && (
-                    <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-600 italic">
-                      <span className="font-semibold not-italic text-slate-700">Transcripción en vivo: </span>«
-                      {liveTranscription}»
-                    </div>
-                  )}
-
-                  <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-100">
+                  <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-stone-100">
                     <button
                       type="button"
                       onClick={handleCancel}
                       disabled={disabled}
-                      className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-lg transition cursor-pointer"
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-stone-600 hover:text-stone-900 bg-stone-100 hover:bg-stone-200 rounded-lg transition cursor-pointer"
                     >
                       <RotateCcw className="w-3.5 h-3.5" />
-                      Descartar y grabar/subir otro
+                      <span>Descartar y volver a grabar</span>
                     </button>
 
                     <button
                       type="button"
                       onClick={() => handleSend()}
                       disabled={disabled}
-                      className="inline-flex items-center gap-2 px-5 py-2.5 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg shadow-sm transition-all transform hover:scale-[1.02] cursor-pointer"
+                      className="inline-flex items-center gap-2 px-6 py-2.5 text-xs font-bold text-white bg-amber-800 hover:bg-amber-900 rounded-lg shadow-sm transition-all transform hover:scale-[1.02] cursor-pointer"
                     >
                       <Send className="w-4 h-4" />
-                      Enviar y Transcribir con IA
+                      <span>Enviar y Transcribir</span>
                     </button>
                   </div>
                 </div>
@@ -1028,17 +903,17 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
 
           {/* 4. STATE: UPLOADING / TRANSCRIBING */}
           {state === 'uploading' && (
-            <div className="py-6 px-4 bg-white border border-slate-200 rounded-xl flex flex-col items-center justify-center text-center space-y-3">
+            <div className="py-8 px-4 bg-white border border-amber-200 rounded-xl flex flex-col items-center justify-center text-center space-y-3">
               <div className="relative">
-                <RefreshCw className="w-8 h-8 text-indigo-600 animate-spin" />
+                <RefreshCw className="w-9 h-9 text-amber-700 animate-spin" />
                 <Sparkles className="w-4 h-4 text-amber-500 absolute -top-1 -right-1 animate-bounce" />
               </div>
-              <div>
-                <h5 className="text-sm font-semibold text-slate-900">
-                  Guardando archivo de voz en la base de datos...
+              <div className="max-w-md">
+                <h5 className="text-sm font-bold text-stone-900">
+                  Guardando tu audio y transcribiendo con inteligencia artificial...
                 </h5>
-                <p className="text-xs text-slate-500 mt-1">
-                  Transcribiendo testimonio con inteligencia artificial en español y vinculándolo a tu respuesta.
+                <p className="text-xs text-stone-500 mt-1 leading-relaxed">
+                  Escuchando con atención tu testimonio para transcribirlo fidedignamente al texto de tu respuesta.
                 </p>
               </div>
             </div>

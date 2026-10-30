@@ -14,7 +14,7 @@ import {
 } from '../logic/interviewRules.ts';
 
 export const apiRouter: Router = express.Router();
-apiRouter.use(express.json({ limit: '15mb' }));
+apiRouter.use(express.json({ limit: '100mb' }));
 
 // Ensure Firestore state is hydrated before processing any API request (handles Cloud Run scale-to-zero cold starts)
 apiRouter.use(async (_req: Request, _res: Response, next: NextFunction) => {
@@ -935,31 +935,24 @@ apiRouter.post('/participant/audio/:audioId/delete', async (req: Request, res: R
 // Serve stored voice audio recording by ID with HTTP 206 Range streaming support
 apiRouter.get('/audio/:audioId', async (req: Request, res: Response) => {
   try {
-    const audio = await storage.getAudioByIdAsync(req.params.audioId);
-    if (!audio || !audio.audioDataUrl) {
+    const audioPayload = storage.getAudioBuffer(req.params.audioId);
+    if (!audioPayload) {
+      // Fallback try loading from Firestore
+      const audio = await storage.getAudioByIdAsync(req.params.audioId);
+      if (!audio || !audio.audioDataUrl) {
+        res.status(404).json({ success: false, error: 'Archivo de voz no encontrado.' });
+        return;
+      }
+    }
+
+    const audioData = audioPayload || storage.getAudioBuffer(req.params.audioId);
+    if (!audioData) {
       res.status(404).json({ success: false, error: 'Archivo de voz no encontrado.' });
       return;
     }
 
-    let rawData = audio.audioDataUrl;
-    let mimeType = audio.mimeType || 'audio/webm';
-
-    if (rawData.startsWith('data:')) {
-      const commaIdx = rawData.indexOf(',');
-      if (commaIdx !== -1) {
-        const header = rawData.substring(0, commaIdx);
-        const mimeMatch = header.match(/^data:([^;]+)/);
-        if (mimeMatch && mimeMatch[1]) {
-          mimeType = mimeMatch[1];
-        }
-        rawData = rawData.substring(commaIdx + 1);
-      }
-    }
-
-    // Clean whitespace and newlines from base64 string
-    const cleanBase64 = rawData.replace(/\s+/g, '');
-    const cleanMime = mimeType.split(';')[0].trim() || 'audio/webm';
-    const audioBuffer = Buffer.from(cleanBase64, 'base64');
+    const audioBuffer = audioData.buffer;
+    const cleanMime = audioData.mimeType.split(';')[0].trim() || 'audio/webm';
     const total = audioBuffer.length;
     const range = req.headers.range;
 

@@ -21,11 +21,6 @@ import {
   Volume2,
   Mic,
   HelpCircle,
-  Shield,
-  Settings,
-  FileText,
-  BarChart2,
-  BookOpen,
 } from 'lucide-react';
 import {
   InterviewRecord,
@@ -34,9 +29,6 @@ import {
   AnswerRecord,
   AnswerPhotoAttachment,
   AnswerVoiceAttachment,
-  PrivacyConsentRecord,
-  BookDeliveryScheduleRecord,
-  SecondaryAccessRecord,
   buildParticipantFlowSequence,
   getNextQuestionInFlow,
   isQuestionnaireFlowComplete,
@@ -46,9 +38,6 @@ import { QuestionPhotoUploader, DraftPhotoItem } from './QuestionPhotoUploader.t
 import { VoiceRecorder, VoiceRecorderHandle, SavedVoiceAudiosList } from './VoiceRecorder.tsx';
 import { AudioPlayer } from './AudioPlayer.tsx';
 import { FAQModal } from './FAQModal.tsx';
-import { PrivacyConsentScreen } from './PrivacyConsentScreen.tsx';
-import { ParticipantAdminPanel } from './ParticipantAdminPanel.tsx';
-import { safeFetchJson } from '../utils/safeApi.ts';
 
 function mapAttachmentsToDraftItems(attachments?: AnswerPhotoAttachment[]): DraftPhotoItem[] {
   if (!attachments || attachments.length === 0) return [];
@@ -84,23 +73,10 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
     otherParticipants: Array<{ id: string; name: string; relationship: string; role: string }>;
     allowAnswerEditing: boolean;
     allowAdditionalMemories: boolean;
-    hasValidConsent?: boolean;
-    consent?: PrivacyConsentRecord | null;
-    deliverySchedules?: BookDeliveryScheduleRecord[];
-    secondaryAccessList?: SecondaryAccessRecord[];
   } | null>(null);
 
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-
-  // Privacy Settings modal & detailed progress modal
-  const [isPrivacySettingsOpen, setIsPrivacySettingsOpen] = useState(false);
-  const [isParticipantAdminOpen, setIsParticipantAdminOpen] = useState(false);
-  const [showProgressMetricsModal, setShowProgressMetricsModal] = useState(false);
-
-  // UI state for conversational experience: written answer expander and photo expander
-  const [isWritingModeOpen, setIsWritingModeOpen] = useState(false);
-  const [isPhotoSectionOpen, setIsPhotoSectionOpen] = useState(false);
 
   // Current question navigation by ID & index in dynamic flow sequence
   const [currentQuestionId, setCurrentQuestionId] = useState<string | null>(null);
@@ -182,10 +158,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
     return idx >= 0 ? idx : 0;
   }, [flowSequence, currentQuestionId]);
 
-  const currentFlowItem = flowSequence[currentIndex] || null;
-  const currentQuestion = currentFlowItem?.question || null;
-
-  // Interviewee progress percentage calculation (must be at top level before any conditional returns)
+  // Interviewee progress percentage calculation (declared unconditionally at top level to obey Rules of Hooks)
   const answeredQuestionIds = useMemo(() => {
     return new Set(
       myAnswers
@@ -195,40 +168,25 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
   }, [myAnswers]);
 
   const flowQuestionsCount = flowSequence.length;
+
   const answeredInFlowCount = useMemo(() => {
     return flowSequence.filter((item) => answeredQuestionIds.has(item.question.id)).length;
   }, [flowSequence, answeredQuestionIds]);
 
+  const allFlowCompleted = useMemo(() => {
+    if (!sessionData) return false;
+    return isQuestionnaireFlowComplete(flowSequence, myAnswers);
+  }, [sessionData, flowSequence, myAnswers]);
+
   const progressPercent = useMemo(() => {
     if (!sessionData) return 0;
-    const isCompleted =
-      showCompletionScreen ||
-      sessionData.interview?.userDeclaredComplete ||
-      isQuestionnaireFlowComplete(flowSequence, myAnswers);
-    if (isCompleted) return 100;
-    if (flowSequence.length === 0) return 0;
-    return Math.min(
-      100,
-      Math.max(0, Math.round((answeredInFlowCount / flowSequence.length) * 100))
-    );
-  }, [sessionData, showCompletionScreen, flowSequence, myAnswers, answeredInFlowCount]);
+    if (showCompletionScreen || sessionData.interview?.userDeclaredComplete || allFlowCompleted) return 100;
+    if (flowQuestionsCount === 0) return 0;
+    return Math.min(100, Math.max(0, Math.round((answeredInFlowCount / flowQuestionsCount) * 100)));
+  }, [sessionData, showCompletionScreen, allFlowCompleted, flowQuestionsCount, answeredInFlowCount]);
 
-  // Detailed progress breakdown metrics for expandable modal
-  const participantVoiceCount = useMemo(() => {
-    return myAnswers.reduce((sum, a) => sum + (a.audioRecordings?.length || (a.audio ? 1 : 0)), 0);
-  }, [myAnswers]);
-
-  const skippedQuestionsCount = useMemo(() => {
-    return myAnswers.filter((a) => a.notRecalled && !a.isFollowUp && !a.isAdditionalMemory).length;
-  }, [myAnswers]);
-
-  const deepeningQuestionsCount = useMemo(() => {
-    return myAnswers.filter((a) => a.isFollowUp).length;
-  }, [myAnswers]);
-
-  const pendingQuestionsCount = useMemo(() => {
-    return Math.max(0, flowSequence.length - answeredInFlowCount);
-  }, [flowSequence.length, answeredInFlowCount]);
+  const currentFlowItem = flowSequence[currentIndex] || null;
+  const currentQuestion = currentFlowItem?.question || null;
 
   const activeToken = (
     tokenInput ||
@@ -248,30 +206,23 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
       setLoading(true);
       setErrorMsg(null);
 
-      const res = await safeFetchJson<any>('/api/participant/session', {
+      const res = await fetch('/api/participant/session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token: cleanToken }),
       });
 
-      const responseData = res.data;
-      if (res.success && responseData) {
-        const sessionPayload = {
-          ...responseData,
-          hasValidConsent:
-            responseData.hasAcceptedPrivacy !== undefined
-              ? Boolean(responseData.hasAcceptedPrivacy)
-              : Boolean(responseData.hasValidConsent),
-        };
-        setSessionData(sessionPayload);
+      const data = await res.json();
+      if (data.success && data.data) {
+        setSessionData(data.data);
 
-        const participantAnswers: AnswerRecord[] = responseData.answers.filter(
-          (a: AnswerRecord) => a.participantId === responseData.participant.id
+        const participantAnswers: AnswerRecord[] = data.data.answers.filter(
+          (a: AnswerRecord) => a.participantId === data.data.participant.id
         );
         const seq = buildParticipantFlowSequence({
-          allQuestions: responseData.questions,
+          allQuestions: data.data.questions,
           participantAnswers,
-          storyMode: responseData.interview.storyMode,
+          storyMode: data.data.interview.storyMode,
         });
 
         const answeredIds = new Set(
@@ -289,9 +240,9 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
           setShowCompletionScreen(true);
         }
       } else {
-        setErrorMsg(res.error || 'No se pudo validar el enlace de invitación.');
+        setErrorMsg(data.error || 'No se pudo validar el enlace de invitación.');
       }
-    } catch (_err: unknown) {
+    } catch (err: unknown) {
       setErrorMsg('Error de conexión al cargar la sesión.');
     } finally {
       setLoading(false);
@@ -368,8 +319,8 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
     setTimeout(() => setSaveSuccessNotice(null), 3000);
   };
 
-  // Delete an already-persisted audio recording from the server
-  const handleDeleteAudio = async (audioId: string) => {
+  // Delete an already-persisted voice audio from the server
+  const handleDeletePersistedVoiceAudio = async (audioId: string) => {
     if (!sessionData) return;
     try {
       const res = await fetch(`/api/participant/audio/${audioId}/delete`, {
@@ -383,30 +334,35 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
       }
 
       setCurrentAudios((prev) => prev.filter((a) => a.id !== audioId));
+
       const updatedAnswers = sessionData.answers.map((ans) => {
-        if (ans.audioRecordings && ans.audioRecordings.some((a) => a.id === audioId)) {
-          return {
-            ...ans,
-            audioRecordings: ans.audioRecordings.filter((a) => a.id !== audioId),
-            audio: ans.audio?.id === audioId ? undefined : ans.audio,
-          };
+        let changed = false;
+        let nextRecordings = ans.audioRecordings;
+        if (nextRecordings && nextRecordings.some((a) => a.id === audioId)) {
+          nextRecordings = nextRecordings.filter((a) => a.id !== audioId);
+          changed = true;
         }
-        if (ans.audio?.id === audioId) {
-          return {
-            ...ans,
-            audio: undefined,
-          };
+        let nextAudio = ans.audio;
+        if (nextAudio && nextAudio.id === audioId) {
+          nextAudio =
+            nextRecordings && nextRecordings.length > 0
+              ? nextRecordings[nextRecordings.length - 1]
+              : undefined;
+          changed = true;
         }
-        return ans;
+        return changed ? { ...ans, audio: nextAudio, audioRecordings: nextRecordings } : ans;
       });
+
       setSessionData({
         ...sessionData,
         answers: updatedAnswers,
       });
-      setSaveSuccessNotice('Archivo de voz eliminado correctamente.');
+
+      setSaveSuccessNotice('Archivo de voz eliminado del servidor correctamente.');
       setTimeout(() => setSaveSuccessNotice(null), 3000);
     } catch (err: any) {
-      console.warn('Error deleting audio:', err);
+      console.warn('Error deleting voice audio:', err);
+      setCurrentAudios((prev) => prev.filter((a) => a.id !== audioId));
     }
   };
 
@@ -1060,49 +1016,9 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
     );
   }
 
-  // Mandatory Informed Privacy Notice & Single Consent Gate (Regla Fundamental: 1 sola casilla)
-  // Interviewee CANNOT answer, record voice, or upload photos until valid consent is accepted
-  if (sessionData && !sessionData.hasValidConsent) {
-    return (
-      <div className="max-w-4xl mx-auto py-8 px-4">
-        <PrivacyConsentScreen
-          participantName={sessionData.participant.name}
-          interviewTitle={sessionData.interview.title}
-          onAccept={async () => {
-            const res = await fetch('/api/participant/consent', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                token: activeToken,
-                hasAcceptedSingleCheckbox: true,
-              }),
-            });
-            const data = await res.json();
-            if (!data.success) {
-              throw new Error(data.error || 'Error al registrar el consentimiento.');
-            }
-            setSessionData((prev) => {
-              if (!prev) return prev;
-              return {
-                ...prev,
-                hasValidConsent: true,
-                consent: data.data,
-              };
-            });
-            setSaveSuccessNotice(
-              '¡Identidad confirmada y aviso de privacidad aceptado! Bienvenido a tu historia.'
-            );
-            setTimeout(() => setSaveSuccessNotice(null), 4000);
-          }}
-        />
-      </div>
-    );
-  }
-
   const { interview, participant, questions, answers } = sessionData;
   const isInterviewOpen = interview.status === 'open' && !interview.userDeclaredComplete;
   const isExpired = new Date(interview.expiresAt).getTime() < Date.now();
-  const allFlowCompleted = isQuestionnaireFlowComplete(flowSequence, myAnswers);
   const myAdditionalMemories = myAnswers.filter((a) => a.isAdditionalMemory);
   const followUpsForCurrent = currentQuestion
     ? myAnswers.filter((a) => a.isFollowUp && a.parentQuestionId === currentQuestion.id)
@@ -1121,17 +1037,13 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
       : [];
 
   return (
-    <div className="max-w-4xl mx-auto space-y-6 pb-12 px-4 sm:px-0">
-      {/* 1. Compact ForeverYou Header with Identity, Participant, Life Stage & Privacy Settings */}
-      <div className="bg-white p-5 sm:p-6 rounded-2xl border border-stone-200 shadow-sm space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-stone-100">
+    <div className="max-w-4xl mx-auto space-y-6 pb-12">
+      {/* Interview Top Status Header */}
+      <div className="bg-white p-6 rounded-2xl border border-stone-200 shadow-sm space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-stone-100">
           <div>
-            <div className="flex flex-wrap items-center gap-2">
-              <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-stone-900 text-stone-100 text-xs font-serif font-bold tracking-tight">
-                <BookOpen className="w-3.5 h-3.5 text-amber-400" />
-                <span>ForeverYou</span>
-              </div>
-              <span className="font-serif text-lg sm:text-xl font-bold text-stone-900">
+            <div className="flex items-center space-x-2">
+              <span className="font-serif text-xl font-bold text-stone-900">
                 {interview.title}
               </span>
               <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-stone-100 text-stone-700 uppercase tracking-wide">
@@ -1140,8 +1052,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                   : 'Historia Individual'}
               </span>
             </div>
-
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1.5 text-xs text-stone-500">
+            <div className="flex items-center space-x-3 mt-1 text-xs text-stone-500">
               <span className="flex items-center space-x-1 font-medium text-stone-800">
                 <User className="w-3.5 h-3.5 text-amber-700" />
                 <span>
@@ -1152,28 +1063,22 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                 </span>
               </span>
               <span>•</span>
-              {currentQuestion && (
-                <span className="inline-flex items-center gap-1 font-semibold text-amber-900 bg-amber-50 px-2 py-0.5 rounded border border-amber-200">
-                  <span>Etapa:</span> {currentQuestion.lifeStage.replace('_', ' ')}
+              <span className="flex items-center space-x-1">
+                <Clock className="w-3.5 h-3.5" />
+                <span>
+                  Vence:{' '}
+                  {new Date(interview.expiresAt).toLocaleDateString('es-MX', {
+                    day: 'numeric',
+                    month: 'long',
+                  })}
                 </span>
-              )}
+              </span>
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
-            {/* Panel Administrativo del Entrevistado (Settings ⚙️) */}
-            <button
-              type="button"
-              onClick={() => setIsParticipantAdminOpen(true)}
-              className="inline-flex items-center space-x-1.5 px-3 py-1.5 bg-stone-100 hover:bg-stone-200 text-stone-800 border border-stone-300 rounded-lg text-xs font-semibold transition cursor-pointer"
-              title="Panel Administrativo del Entrevistado (Aviso de privacidad, constancia oficial, compartir libro, personas autorizadas)"
-            >
-              <Settings className="w-4 h-4 text-stone-700" />
-              <span className="hidden sm:inline font-medium">Panel Administrativo</span>
-            </button>
-
-            {/* Voluntary Finish Button */}
-            {isInterviewOpen && (
+          {/* Voluntary Finish Button */}
+          {isInterviewOpen && (
+            <div className="flex items-center space-x-2">
               <button
                 type="button"
                 onClick={() => setShowFinishModal(true)}
@@ -1182,54 +1087,67 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                 <Check className="w-3.5 h-3.5 text-emerald-700" />
                 <span>He terminado mi historia</span>
               </button>
-            )}
-          </div>
+            </div>
+          )}
         </div>
 
-        {/* 2. Discreet Progress Bar with Expandable Metrics */}
-        <div className="bg-stone-50 p-3.5 rounded-xl border border-stone-200 shadow-2xs space-y-2">
+        {/* Visual Progress Bar Card with Percentage */}
+        <div className="bg-gradient-to-br from-amber-50/70 via-stone-50 to-amber-50/40 p-4 rounded-xl border border-amber-200/80 shadow-xs space-y-3">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
             <div className="flex items-center space-x-2">
-              <span className="font-serif font-bold text-stone-900 text-xs sm:text-sm">
-                Avance del Entrevistado:
+              <span className="font-serif font-bold text-stone-900 text-sm">
+                Progreso del Entrevistado:
               </span>
-              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold bg-amber-200 text-amber-950 border border-amber-300">
-                {progressPercent}%
+              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-200/90 text-amber-950 border border-amber-300 shadow-xs">
+                {progressPercent}% de avance
               </span>
             </div>
 
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setShowProgressMetricsModal(true)}
-                className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-900 hover:text-amber-950 hover:underline cursor-pointer"
-              >
-                <BarChart2 className="w-3 h-3 text-amber-700" />
-                <span>Ver métricas detalladas ({answeredInFlowCount}/{flowQuestionsCount})</span>
-              </button>
-
+            <div className="flex flex-wrap items-center gap-2 text-xs text-stone-600">
+              <span className="font-semibold text-stone-800">
+                {answeredInFlowCount} de {flowQuestionsCount} preguntas respondidas
+              </span>
               {silentAutosaveNotice && (
-                <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-medium">
+                <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[11px] font-medium transition-all">
                   ✓ {silentAutosaveNotice}
                 </span>
               )}
             </div>
           </div>
 
-          {/* Discreet Progress Track */}
-          <div
-            onClick={() => setShowProgressMetricsModal(true)}
-            className="w-full h-2.5 bg-stone-200 rounded-full overflow-hidden shadow-inner cursor-pointer"
-            title="Pulsa para ver el desglose detallado de avance"
-          >
+          {/* Progress Bar Track & Fill */}
+          <div className="w-full h-3.5 bg-stone-200/90 rounded-full overflow-hidden shadow-inner p-0.5 border border-stone-300/60">
             <div
-              className="h-full bg-gradient-to-r from-amber-600 to-amber-700 rounded-full transition-all duration-500 ease-out"
+              className="h-full bg-gradient-to-r from-amber-600 via-amber-700 to-amber-800 rounded-full transition-all duration-700 ease-out shadow-xs"
               style={{ width: `${progressPercent}%` }}
               role="progressbar"
               aria-valuenow={progressPercent}
               aria-valuemin={0}
               aria-valuemax={100}
             />
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between text-[11px] text-stone-600 pt-0.5 gap-2">
+            <div className="flex items-center space-x-1.5">
+              <span className="font-medium text-stone-700">
+                {currentQuestion
+                  ? `Etapa actual: ${currentQuestion.lifeStage.replace('_', ' ')} (Pregunta ${currentIndex + 1} de ${flowQuestionsCount})`
+                  : 'Cuestionario completado'}
+              </span>
+              {interview.sufficiencyStatus === 'sufficient' && (
+                <span className="inline-flex items-center space-x-1 px-2 py-0.5 bg-emerald-100 text-emerald-900 rounded font-semibold text-[10px] border border-emerald-300">
+                  <Sparkles className="w-3 h-3 text-emerald-700" />
+                  <span>Suficiente</span>
+                </span>
+              )}
+            </div>
+
+            <span className="text-stone-400">
+              Guardado automático silencioso activo cada 10 min
+              {lastAutosavedAt
+                ? ` • Último: ${lastAutosavedAt.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}`
+                : ''}
+            </span>
           </div>
         </div>
 
@@ -1519,106 +1437,83 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                 </div>
               )}
 
-              {/* 1. Grabadora de voz como primera opción (arriba) */}
-              <div className="pt-2">
-                <VoiceRecorder
-                  ref={voiceRecorderRef}
-                  token={activeToken}
-                  questionId={currentQuestion.id}
-                  questionText={currentQuestion.text}
-                  initialAudio={currentAudio}
-                  initialAudios={currentAudios}
-                  hideSavedList={true}
-                  onVoiceSubmitted={(audio, transcription, allAudios) => {
-                    setCurrentAudios(allAudios);
-                    if (transcription && transcription.trim().length > 0) {
-                      const cleanTranscript = transcription.trim();
-                      setCurrentAnswerText((prev) => {
-                        const cleanPrev = prev.trim();
-                        if (!cleanPrev || cleanPrev === 'No aplica a mi historia.') {
-                          return cleanTranscript;
-                        }
-                        if (cleanPrev.includes(cleanTranscript)) {
-                          return cleanPrev;
-                        }
-                        return `${cleanPrev}\n\n[Nota de voz]: ${cleanTranscript}`;
-                      });
-                    }
-                    setSaveSuccessNotice(
-                      'Archivo de voz y transcripción guardados con éxito en la base de datos.'
-                    );
-                    setTimeout(() => setSaveSuccessNotice(null), 3500);
-                  }}
-                  onVoiceDeleted={(delId) => {
-                    setCurrentAudios((prev) => prev.filter((a) => a.id !== delId));
-                  }}
+              {/* 1. Voice recording input as first option (senior-friendly circular button) */}
+              <VoiceRecorder
+                ref={voiceRecorderRef}
+                token={activeToken}
+                questionId={currentQuestion.id}
+                questionText={currentQuestion.text}
+                initialAudio={currentAudio}
+                initialAudios={currentAudios}
+                hideSavedList={true}
+                onVoiceSubmitted={(audio, transcription, allAudios) => {
+                  setCurrentAudios(allAudios);
+                  if (transcription && transcription.trim().length > 0) {
+                    const cleanTranscript = transcription.trim();
+                    setCurrentAnswerText((prev) => {
+                      const cleanPrev = prev.trim();
+                      if (!cleanPrev || cleanPrev === 'No aplica a mi historia.') {
+                        return cleanTranscript;
+                      }
+                      if (cleanPrev.includes(cleanTranscript)) {
+                        return cleanPrev;
+                      }
+                      return `${cleanPrev}\n\n[Nota de voz]: ${cleanTranscript}`;
+                    });
+                  }
+                  setSaveSuccessNotice(
+                    'Archivo de voz y transcripción guardados con éxito en la base de datos.'
+                  );
+                  setTimeout(() => setSaveSuccessNotice(null), 3500);
+                }}
+                onVoiceDeleted={(delId) => {
+                  setCurrentAudios((prev) => prev.filter((a) => a.id !== delId));
+                }}
+                disabled={!isInterviewOpen || Boolean(adaptiveQuestion)}
+              />
+
+              {/* 2. Written testimony area below voice recording */}
+              <div className="space-y-2">
+                <label className="block text-xs font-semibold text-stone-700">
+                  Tu recuerdo o testimonio personal:
+                </label>
+                <textarea
+                  rows={5}
                   disabled={!isInterviewOpen || Boolean(adaptiveQuestion)}
+                  placeholder={
+                    isInterviewOpen
+                      ? 'Escribe aquí con tus propias palabras lo que venga a tu memoria...'
+                      : 'La entrevista no está abierta para nuevas respuestas.'
+                  }
+                  value={currentAnswerText}
+                  onChange={(e) => setCurrentAnswerText(e.target.value)}
+                  className="w-full p-4 border border-stone-300 rounded-xl text-stone-900 text-sm focus:outline-none focus:ring-2 focus:ring-amber-200 focus:border-amber-600 leading-relaxed font-sans disabled:bg-stone-50"
                 />
               </div>
 
-              {/* 2. Sección del recuerdo escrito directamente abajo de la grabadora */}
-              <div className="pt-2 border-t border-stone-200">
-                <div className="space-y-2 bg-stone-50/60 p-4 sm:p-5 rounded-2xl border border-stone-200">
-                  <div className="flex items-center justify-between">
-                    <label className="text-xs sm:text-sm font-serif font-bold text-stone-800 flex items-center gap-1.5">
-                      <Edit3 className="w-4 h-4 text-amber-700" />
-                      <span>Tu recuerdo o testimonio por escrito:</span>
-                    </label>
-                    <span className="text-[11px] text-stone-500 font-sans">
-                      Guardado automático silencioso cada 10 min
-                    </span>
-                  </div>
+              {/* 3. Optional Photo Uploader for Every Question */}
+              <QuestionPhotoUploader
+                photos={currentPhotos}
+                onChange={(updated) => {
+                  setCurrentPhotos(updated);
+                  if (validationNotice) setValidationNotice(null);
+                }}
+                onDeletePersistedPhoto={handleDeletePersistedPhoto}
+                disabled={!isInterviewOpen || Boolean(adaptiveQuestion)}
+                label=" Puedes Cargar Fotografías o Imágenes Relacionadas (Opcional)"
+              />
 
-                  <textarea
-                    rows={4}
-                    disabled={!isInterviewOpen || Boolean(adaptiveQuestion)}
-                    placeholder={
-                      isInterviewOpen
-                        ? 'Escribe aquí con tus propias palabras lo que venga a tu memoria, o complementa tu testimonio de voz...'
-                        : 'La entrevista no está abierta para nuevas respuestas.'
-                    }
-                    value={currentAnswerText}
-                    onChange={(e) => setCurrentAnswerText(e.target.value)}
-                    className="w-full p-4 border border-stone-300 rounded-xl text-stone-900 text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-amber-300 focus:border-amber-600 leading-relaxed font-sans bg-white shadow-inner"
-                  />
-                  <div className="flex items-center justify-between text-[11px] text-stone-500">
-                    <span>Puedes combinar notas de voz con texto escrito sin que se borre nada.</span>
-                    {currentAnswerText.trim() && (
-                      <span>{currentAnswerText.trim().split(/\s+/).length} palabras</span>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              {/* 3. Opción para subir fotografías o imágenes relacionadas (abajo del recuerdo escrito) */}
-              <div className="pt-2 border-t border-stone-200">
-                <div className="space-y-3 bg-stone-50/60 p-4 sm:p-5 rounded-2xl border border-stone-200">
-                  <QuestionPhotoUploader
-                    photos={currentPhotos}
-                    onChange={(updated) => {
-                      setCurrentPhotos(updated);
-                      if (validationNotice) setValidationNotice(null);
-                    }}
-                    onDeletePersistedPhoto={handleDeletePersistedPhoto}
-                    disabled={!isInterviewOpen || Boolean(adaptiveQuestion)}
-                    label=" Puedes Cargar Fotografías o Imágenes Relacionadas (Opcional)"
-                  />
-                </div>
-              </div>
-
-              {/* 4. Archivos de voz guardados con sus transcripciones (AL FINAL, debajo de la opción de subir fotografías/imágenes) */}
-              {currentAudios.length > 0 && (
-                <div className="pt-2 border-t border-stone-200">
-                  <SavedVoiceAudiosList
-                    audios={currentAudios}
-                    disabled={!isInterviewOpen || Boolean(adaptiveQuestion)}
-                    onDelete={handleDeleteAudio}
-                  />
-                </div>
+              {/* 4. Saved voice audios with transcriptions placed at the end below photos */}
+              {currentAudios && currentAudios.length > 0 && (
+                <SavedVoiceAudiosList
+                  audios={currentAudios}
+                  disabled={!isInterviewOpen || Boolean(adaptiveQuestion)}
+                  onDelete={handleDeletePersistedVoiceAudio}
+                />
               )}
 
               {validationNotice && (
-                <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-800 text-xs flex items-center space-x-2">
+                <div className="p-3 bg-rose-50 border border-rose-200 rounded-lg text-rose-800 text-xs flex items-center space-x-2">
                   <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
                   <span>{validationNotice}</span>
                 </div>
@@ -1646,12 +1541,12 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
 
               {/* Action buttons for Base Question (hidden while answering an autonomous follow-up) */}
               {isInterviewOpen && !adaptiveQuestion && (
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-3 border-t border-stone-200">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-2">
                   <button
                     type="button"
                     onClick={() => handleSaveAnswer(true, 'no')}
                     disabled={savingAnswer}
-                    className="px-4 py-2.5 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-xl text-xs sm:text-sm font-semibold transition cursor-pointer border border-stone-200"
+                    className="px-4 py-2 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-lg text-xs font-semibold transition"
                     title="Esta acción te permite avanzar a la siguiente pregunta respetando tu ritmo y sin forzar el recuerdo"
                   >
                     «Omitir y continuar»
@@ -1666,7 +1561,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                         const prevItem = flowSequence[Math.max(0, currentIndex - 1)];
                         if (prevItem) setCurrentQuestionId(prevItem.question.id);
                       }}
-                      className="p-2.5 border border-stone-300 text-stone-600 rounded-xl hover:bg-stone-50 disabled:opacity-40 cursor-pointer"
+                      className="p-2 border border-stone-300 text-stone-600 rounded-lg hover:bg-stone-50 disabled:opacity-40"
                     >
                       <ChevronLeft className="w-4 h-4" />
                     </button>
@@ -1675,10 +1570,10 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                       type="button"
                       onClick={() => handleSaveAnswer(false)}
                       disabled={savingAnswer}
-                      className="inline-flex items-center space-x-2 px-6 py-2.5 bg-amber-700 hover:bg-amber-800 text-white rounded-xl text-xs sm:text-sm font-bold shadow-md transition disabled:opacity-50 cursor-pointer transform hover:scale-[1.02]"
+                      className="inline-flex items-center space-x-2 px-5 py-2.5 bg-amber-700 hover:bg-amber-800 text-white rounded-lg text-xs font-semibold shadow-sm transition disabled:opacity-50"
                     >
-                      <Save className="w-4 h-4 text-amber-200" />
-                      <span>{savingAnswer ? 'Guardando recuerdo...' : 'Guardar y continuar'}</span>
+                      <Save className="w-4 h-4" />
+                      <span>{savingAnswer ? 'Analizando y Guardando...' : 'Guardar y Continuar'}</span>
                     </button>
 
                     <button
@@ -1692,7 +1587,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                           setShowCompletionScreen(true);
                         }
                       }}
-                      className="p-2.5 border border-stone-300 text-stone-600 rounded-xl hover:bg-stone-50 cursor-pointer"
+                      className="p-2 border border-stone-300 text-stone-600 rounded-lg hover:bg-stone-50"
                     >
                       <ChevronRight className="w-4 h-4" />
                     </button>
@@ -2134,113 +2029,6 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                 className="w-1/2 py-2 bg-amber-700 hover:bg-amber-800 text-white rounded-lg text-xs font-semibold shadow-sm"
               >
                 {finishing ? 'Guardando...' : 'Confirmar Cierre'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Panel Administrativo del Entrevistado (⚙️ Sección 22) */}
-      {isParticipantAdminOpen && (
-        <ParticipantAdminPanel
-          token={activeToken}
-          onClose={() => setIsParticipantAdminOpen(false)}
-          onConsentRevoked={() => {
-            setIsParticipantAdminOpen(false);
-            setSessionData((prev) => (prev ? { ...prev, hasValidConsent: false } : null));
-          }}
-        />
-      )}
-
-      {/* Detailed Progress Metrics Breakdown Modal */}
-      {showProgressMetricsModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-stone-200 space-y-5">
-            <div className="flex items-center justify-between pb-3 border-b border-stone-100">
-              <div className="flex items-center gap-2">
-                <div className="w-9 h-9 rounded-xl bg-amber-100 text-amber-800 flex items-center justify-center">
-                  <BarChart2 className="w-5 h-5 text-amber-700" />
-                </div>
-                <div>
-                  <h3 className="font-serif text-lg font-bold text-stone-900">
-                    Desglose de Avance del Entrevistado
-                  </h3>
-                  <p className="text-xs text-stone-500">
-                    Métricas del instrumento y estado de suficiencia
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowProgressMetricsModal(false)}
-                className="text-stone-400 hover:text-stone-700 p-1 rounded-lg"
-              >
-                ✕
-              </button>
-            </div>
-
-            <div className="space-y-3">
-              <div className="grid grid-cols-2 gap-3">
-                <div className="bg-stone-50 p-3.5 rounded-xl border border-stone-200 text-center">
-                  <div className="text-2xl font-bold font-serif text-amber-900">
-                    {progressPercent}%
-                  </div>
-                  <div className="text-[11px] text-stone-500 mt-0.5">Porcentaje de Avance</div>
-                </div>
-
-                <div className="bg-stone-50 p-3.5 rounded-xl border border-stone-200 text-center">
-                  <div className="text-2xl font-bold font-serif text-stone-900">
-                    {answeredInFlowCount} / {flowQuestionsCount}
-                  </div>
-                  <div className="text-[11px] text-stone-500 mt-0.5">Preguntas Respondidas</div>
-                </div>
-              </div>
-
-              <div className="bg-amber-50/50 p-4 rounded-xl border border-amber-200/80 space-y-2 text-xs">
-                <div className="flex justify-between items-center py-1 border-b border-amber-100">
-                  <span className="text-stone-700">Testimonios de voz grabados:</span>
-                  <span className="font-bold text-amber-900">{participantVoiceCount} archivos</span>
-                </div>
-
-                <div className="flex justify-between items-center py-1 border-b border-amber-100">
-                  <span className="text-stone-700">Preguntas pendientes en tu flujo:</span>
-                  <span className="font-bold text-stone-800">{pendingQuestionsCount}</span>
-                </div>
-
-                <div className="flex justify-between items-center py-1 border-b border-amber-100">
-                  <span className="text-stone-700">Preguntas omitidas voluntariamente:</span>
-                  <span className="font-bold text-stone-600">{skippedQuestionsCount}</span>
-                </div>
-
-                <div className="flex justify-between items-center py-1 border-b border-amber-100">
-                  <span className="text-stone-700">Profundizaciones con IA completadas:</span>
-                  <span className="font-bold text-emerald-800">{deepeningQuestionsCount}</span>
-                </div>
-
-                <div className="flex justify-between items-center pt-1">
-                  <span className="text-stone-700">Estado de suficiencia testimonial:</span>
-                  <span
-                    className={`font-bold ${
-                      interview.sufficiencyStatus === 'sufficient'
-                        ? 'text-emerald-700'
-                        : 'text-amber-800'
-                    }`}
-                  >
-                    {interview.sufficiencyStatus === 'sufficient'
-                      ? 'Suficiente para libro'
-                      : 'En recopilación testimonial'}
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            <div className="pt-2 flex justify-end">
-              <button
-                type="button"
-                onClick={() => setShowProgressMetricsModal(false)}
-                className="px-5 py-2.5 bg-stone-900 hover:bg-stone-800 text-white rounded-xl text-xs font-semibold cursor-pointer"
-              >
-                Cerrar ventana
               </button>
             </div>
           </div>

@@ -38,7 +38,14 @@ export interface ManuscriptDraftResult {
   generatedAt: string;
 }
 
-const ai = new GoogleGenAI();
+const ai = new GoogleGenAI({
+  apiKey: process.env.GEMINI_API_KEY,
+  httpOptions: {
+    headers: {
+      'User-Agent': 'aistudio-build',
+    },
+  },
+});
 export const TEXT_MODEL = 'gemini-3.1-flash-lite';
 
 /**
@@ -738,14 +745,14 @@ Instrucciones de transcripción obligatorias:
 4. No agregues introducciones, prefacios, explicaciones, timestamps ni etiquetas como "Transcripción:".
 5. Si no se escucha voz perceptible o solo hay silencio/ruido ininteligible, responde con una cadena vacía.`;
 
-    // Audio transcription timeout: 180 seconds (3 minutes) to comfortably handle long 5-10 minute recordings
-    const AUDIO_TIMEOUT_MS = 180000;
+    // Audio transcription timeout: 90 seconds
+    const AUDIO_TIMEOUT_MS = 90000;
 
     let rawText = '';
-    // 1. Primary dedicated transcription model: gemini-3.5-transcribe
+    // 1. Primary multimodal transcription model: gemini-3.1-flash-lite (fast, robust audio processing)
     try {
       const callPromise = ai.models.generateContent({
-        model: 'gemini-3.5-transcribe',
+        model: 'gemini-3.1-flash-lite',
         contents: [
           {
             inlineData: {
@@ -764,7 +771,7 @@ Instrucciones de transcripción obligatorias:
         rawText = response.text.trim();
       }
     } catch (primaryErr) {
-      console.warn('gemini-3.5-transcribe error, trying fallback to gemini-3.8-flash:', primaryErr);
+      console.warn('gemini-3.1-flash-lite transcription error, trying gemini-3.8-flash:', primaryErr);
     }
 
     // 2. Fallback model: gemini-3.8-flash

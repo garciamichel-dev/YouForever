@@ -13,9 +13,9 @@ async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
 
-  // Generous limit for audio recordings (base64/binary) and photo attachments
-  app.use(express.json({ limit: '50mb' }));
-  app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+  // Generous limit for long audio recordings (10+ min) and photo attachments
+  app.use(express.json({ limit: '100mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
   // API Routes
   app.use('/api', apiRouter);
