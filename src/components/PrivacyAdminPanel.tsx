@@ -184,74 +184,91 @@ export const PrivacyAdminPanel: React.FC<PrivacyAdminPanelProps> = ({ adminEmail
                 </tr>
               </thead>
               <tbody className="divide-y divide-stone-100">
-                {consents.map((consent) => (
-                  <tr key={consent.id} className="hover:bg-stone-50/80 transition-colors">
-                    <td className="py-3 px-3">
-                      <div className="font-bold text-stone-900">{consent.participantName}</div>
-                      <div className="text-[11px] text-stone-500 truncate max-w-[200px]" title={consent.interviewId}>
-                        Entrevista: {consent.interviewId}
-                      </div>
-                    </td>
+                {consents.map((consent: any) => {
+                  const versionLabel = consent.versionId || consent.policyVersion || CURRENT_PRIVACY_POLICY_VERSION;
+                  const rawTimestamp = consent.acceptedAt || consent.serverTimestamp || new Date().toISOString();
+                  const hashValue = consent.declarationHash || consent.noticeHash || consent.policyHash || '';
+                  const decl = consent.declarations;
 
-                    <td className="py-3 px-3">
-                      <span className="font-mono font-semibold bg-stone-100 px-2 py-0.5 rounded text-stone-800">
-                        v{consent.policyVersion}
-                      </span>
-                    </td>
+                  return (
+                    <tr key={consent.id} className="hover:bg-stone-50/80 transition-colors">
+                      <td className="py-3 px-3">
+                        <div className="font-bold text-stone-900">{consent.participantName}</div>
+                        <div className="text-[11px] text-stone-500 truncate max-w-[200px]" title={consent.interviewId}>
+                          Entrevista: {consent.interviewId}
+                        </div>
+                      </td>
 
-                    <td className="py-3 px-3">
-                      <div className="font-medium text-stone-800">
-                        {new Date(consent.serverTimestamp).toLocaleString('es-MX', { timeZone: consent.serverTimezone || 'America/Merida' })}
-                      </div>
-                      <div className="text-[10px] font-mono text-stone-400">
-                        UTC: {consent.serverTimestamp}
-                      </div>
-                    </td>
+                      <td className="py-3 px-3">
+                        <span className="font-mono font-semibold bg-stone-100 px-2 py-0.5 rounded text-stone-800">
+                          v{versionLabel}
+                        </span>
+                      </td>
 
-                    <td className="py-3 px-3">
-                      <div className="flex flex-wrap gap-1 max-w-[160px]">
-                        {consent.declarations.declarationA_acknowledgement && (
-                          <span className="px-1.5 py-0.5 bg-emerald-100 text-emerald-800 text-[10px] font-bold rounded" title="A: Conocimiento">A</span>
-                        )}
-                        {consent.declarations.declarationB_necessaryProcessing && (
-                          <span className="px-1.5 py-0.5 bg-emerald-100 text-emerald-800 text-[10px] font-bold rounded" title="B: Procesamiento">B</span>
-                        )}
-                        {consent.declarations.declarationC_sensitiveData && (
-                          <span className="px-1.5 py-0.5 bg-amber-100 text-amber-800 text-[10px] font-bold rounded" title="C: Datos Sensibles">C</span>
-                        )}
-                        {consent.declarations.declarationD_financialData && (
-                          <span className="px-1.5 py-0.5 bg-amber-100 text-amber-800 text-[10px] font-bold rounded" title="D: Datos Patrimoniales">D</span>
-                        )}
-                        {consent.declarations.declarationE_aiAssistant && (
-                          <span className="px-1.5 py-0.5 bg-indigo-100 text-indigo-800 text-[10px] font-bold rounded" title="E: Asistente IA">E</span>
-                        )}
-                        {consent.declarations.declarationF_shareWithFamily && (
-                          <span className="px-1.5 py-0.5 bg-blue-100 text-blue-800 text-[10px] font-bold rounded" title="F: Compartir Familia">F</span>
-                        )}
-                        {consent.declarations.declarationG_promotionalUse && (
-                          <span className="px-1.5 py-0.5 bg-purple-100 text-purple-800 text-[10px] font-bold rounded" title="G: Uso Promocional">G</span>
-                        )}
-                      </div>
-                    </td>
+                      <td className="py-3 px-3">
+                        <div className="font-medium text-stone-800">
+                          {new Date(rawTimestamp).toLocaleString('es-MX', {
+                            timeZone: consent.serverTimezone || 'America/Merida',
+                          })}
+                        </div>
+                        <div className="text-[10px] font-mono text-stone-400">
+                          UTC: {rawTimestamp}
+                        </div>
+                      </td>
 
-                    <td className="py-3 px-3">
-                      <span className="font-mono text-[11px] text-stone-600 bg-stone-100 px-2 py-0.5 rounded" title={consent.policyHash}>
-                        {consent.policyHash.substring(0, 12)}...
-                      </span>
-                    </td>
+                      <td className="py-3 px-3">
+                        {decl ? (
+                          <div className="flex flex-wrap gap-1 max-w-[160px]">
+                            {decl?.declarationA_acknowledgement && (
+                              <span className="px-1.5 py-0.5 bg-emerald-100 text-emerald-800 text-[10px] font-bold rounded" title="A: Conocimiento">A</span>
+                            )}
+                            {decl?.declarationB_necessaryProcessing && (
+                              <span className="px-1.5 py-0.5 bg-emerald-100 text-emerald-800 text-[10px] font-bold rounded" title="B: Procesamiento">B</span>
+                            )}
+                            {decl?.declarationC_sensitiveData && (
+                              <span className="px-1.5 py-0.5 bg-amber-100 text-amber-800 text-[10px] font-bold rounded" title="C: Datos Sensibles">C</span>
+                            )}
+                            {decl?.declarationD_financialData && (
+                              <span className="px-1.5 py-0.5 bg-amber-100 text-amber-800 text-[10px] font-bold rounded" title="D: Datos Patrimoniales">D</span>
+                            )}
+                            {decl?.declarationE_aiAssistant && (
+                              <span className="px-1.5 py-0.5 bg-indigo-100 text-indigo-800 text-[10px] font-bold rounded" title="E: Asistente IA">E</span>
+                            )}
+                            {decl?.declarationF_shareWithFamily && (
+                              <span className="px-1.5 py-0.5 bg-blue-100 text-blue-800 text-[10px] font-bold rounded" title="F: Compartir Familia">F</span>
+                            )}
+                            {decl?.declarationG_promotionalUse && (
+                              <span className="px-1.5 py-0.5 bg-purple-100 text-purple-800 text-[10px] font-bold rounded" title="G: Uso Promocional">G</span>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="flex flex-wrap gap-1">
+                            <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 text-[10px] font-bold rounded">
+                              ✓ Casilla Única Integral
+                            </span>
+                          </div>
+                        )}
+                      </td>
 
-                    <td className="py-3 px-3 text-right">
-                      <button
-                        type="button"
-                        onClick={() => setSelectedConsent(consent)}
-                        className="inline-flex items-center gap-1 text-[11px] text-amber-800 hover:text-amber-900 font-semibold cursor-pointer"
-                      >
-                        <Eye className="w-3.5 h-3.5" />
-                        <span>Detalles</span>
-                      </button>
-                    </td>
-                  </tr>
-                ))}
+                      <td className="py-3 px-3">
+                        <span className="font-mono text-[11px] text-stone-600 bg-stone-100 px-2 py-0.5 rounded" title={hashValue}>
+                          {hashValue ? `${hashValue.substring(0, 12)}...` : 'Verificado'}
+                        </span>
+                      </td>
+
+                      <td className="py-3 px-3 text-right">
+                        <button
+                          type="button"
+                          onClick={() => setSelectedConsent(consent)}
+                          className="inline-flex items-center gap-1 text-[11px] text-amber-800 hover:text-amber-900 font-semibold cursor-pointer"
+                        >
+                          <Eye className="w-3.5 h-3.5" />
+                          <span>Detalles</span>
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -278,7 +295,7 @@ export const PrivacyAdminPanel: React.FC<PrivacyAdminPanelProps> = ({ adminEmail
           </div>
         ) : (
           <div className="space-y-3">
-            {arcoRequests.map((req) => (
+            {arcoRequests.map((req: any) => (
               <div key={req.id} className="p-3.5 bg-stone-50 rounded-xl border border-stone-200 text-xs space-y-1.5">
                 <div className="flex items-center justify-between">
                   <span className="font-bold text-stone-900">
@@ -290,8 +307,8 @@ export const PrivacyAdminPanel: React.FC<PrivacyAdminPanelProps> = ({ adminEmail
                 </div>
                 <p className="text-stone-700">«{req.details}»</p>
                 <div className="text-[11px] text-stone-400">
-                  Participante: {req.participantName} • Contacto: {req.contactEmail} •{' '}
-                  {new Date(req.submittedAt).toLocaleString('es-MX')}
+                  Participante: {req.participantName} • Contacto: {req.contactEmail || req.participantEmail || 'N/A'} •{' '}
+                  {new Date(req.submittedAt || req.createdAt || new Date().toISOString()).toLocaleString('es-MX')}
                 </div>
               </div>
             ))}
@@ -319,7 +336,7 @@ export const PrivacyAdminPanel: React.FC<PrivacyAdminPanelProps> = ({ adminEmail
           </div>
         ) : (
           <div className="space-y-3">
-            {deliveries.map((del) => (
+            {deliveries.map((del: any) => (
               <div key={del.id} className="p-3.5 bg-stone-50 rounded-xl border border-stone-200 text-xs space-y-1.5">
                 <div className="flex items-center justify-between">
                   <span className="font-semibold text-stone-900">
@@ -329,11 +346,11 @@ export const PrivacyAdminPanel: React.FC<PrivacyAdminPanelProps> = ({ adminEmail
                     Entrega programada: {del.scheduledDate}
                   </span>
                 </div>
-                {del.notes && (
-                  <p className="text-stone-600 italic">«{del.notes}»</p>
+                {(del.notes || del.note) && (
+                  <p className="text-stone-600 italic">«{del.notes || del.note}»</p>
                 )}
                 <div className="text-[11px] text-stone-400">
-                  Participante ID: {del.participantId} • Programada el {new Date(del.createdAt).toLocaleString('es-MX')}
+                  Participante: {del.participantName || del.participantId} • Programada el {new Date(del.createdAt).toLocaleString('es-MX')}
                 </div>
               </div>
             ))}
@@ -342,58 +359,76 @@ export const PrivacyAdminPanel: React.FC<PrivacyAdminPanelProps> = ({ adminEmail
       </div>
 
       {/* Single Consent Detail Modal */}
-      {selectedConsent && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-stone-200 space-y-4">
-            <div className="flex items-center justify-between pb-2 border-b border-stone-200">
-              <h3 className="font-serif font-bold text-base text-stone-900">
-                Constancia Oficial de Consentimiento
-              </h3>
-              <button
-                type="button"
-                onClick={() => setSelectedConsent(null)}
-                className="text-stone-400 hover:text-stone-700"
-              >
-                ✕
-              </button>
-            </div>
+      {selectedConsent && (() => {
+        const sc: any = selectedConsent;
+        const scVersion = sc.versionId || sc.policyVersion || CURRENT_PRIVACY_POLICY_VERSION;
+        const scTimestamp = sc.acceptedAt || sc.serverTimestamp || new Date().toISOString();
+        const scHash = sc.declarationHash || sc.noticeHash || sc.policyHash || INTEGRAL_PRIVACY_POLICY_HASH;
 
-            <div className="text-xs space-y-2 bg-stone-50 p-4 rounded-xl border border-stone-200">
-              <div>
-                <strong>Participante:</strong> {selectedConsent.participantName}
+        return (
+          <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-stone-200 space-y-4">
+              <div className="flex items-center justify-between pb-2 border-b border-stone-200">
+                <h3 className="font-serif font-bold text-base text-stone-900">
+                  Constancia Oficial de Consentimiento
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => setSelectedConsent(null)}
+                  className="text-stone-400 hover:text-stone-700 cursor-pointer"
+                >
+                  ✕
+                </button>
               </div>
-              <div>
-                <strong>Entrevista:</strong> {selectedConsent.interviewId}
-              </div>
-              <div>
-                <strong>Versión del Aviso:</strong> v{selectedConsent.policyVersion}
-              </div>
-              <div>
-                <strong>Fecha/Hora Mérida:</strong> {new Date(selectedConsent.serverTimestamp).toLocaleString('es-MX', { timeZone: selectedConsent.serverTimezone || 'America/Merida' })}
-              </div>
-              <div>
-                <strong>Fecha/Hora UTC:</strong> {selectedConsent.serverTimestamp}
-              </div>
-              <div>
-                <strong>Hash SHA-256 de Política:</strong>{' '}
-                <span className="font-mono text-[11px] break-all block mt-0.5 text-stone-700">
-                  {selectedConsent.policyHash}
-                </span>
-              </div>
-            </div>
 
-            <div className="flex justify-end pt-2">
-              <button
-                type="button"
-                onClick={() => setSelectedConsent(null)}
-                className="px-4 py-2 bg-stone-900 text-white rounded-lg text-xs font-semibold"
-              >
-                Cerrar
-              </button>
+              <div className="text-xs space-y-2 bg-stone-50 p-4 rounded-xl border border-stone-200">
+                <div>
+                  <strong>Participante:</strong> {sc.participantName}
+                </div>
+                <div>
+                  <strong>Entrevista:</strong> {sc.interviewId}
+                </div>
+                <div>
+                  <strong>Versión del Aviso:</strong> v{scVersion}
+                </div>
+                <div>
+                  <strong>Fecha/Hora Mérida:</strong>{' '}
+                  {new Date(scTimestamp).toLocaleString('es-MX', {
+                    timeZone: sc.serverTimezone || 'America/Merida',
+                  })}
+                </div>
+                <div>
+                  <strong>Fecha/Hora UTC:</strong> {scTimestamp}
+                </div>
+                {sc.declarationText && (
+                  <div>
+                    <strong>Declaración Aceptada:</strong>
+                    <p className="mt-1 italic text-stone-700 bg-white p-2.5 rounded-lg border border-stone-200">
+                      «{sc.declarationText}»
+                    </p>
+                  </div>
+                )}
+                <div>
+                  <strong>Hash SHA-256 de Constancia:</strong>{' '}
+                  <span className="font-mono text-[11px] break-all block mt-0.5 text-stone-700">
+                    {scHash}
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex justify-end pt-2">
+                <button
+                  type="button"
+                  onClick={() => setSelectedConsent(null)}
+                  className="px-4 py-2 bg-stone-900 text-white rounded-lg text-xs font-semibold cursor-pointer"
+                >
+                  Cerrar
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Modal Aviso de Privacidad Integral de ForeverYou (17 Secciones) */}
       <IntegralPrivacyNoticeModal

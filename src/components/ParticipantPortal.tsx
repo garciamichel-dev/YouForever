@@ -683,14 +683,37 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
           answers: updatedAnswers,
         });
 
-        // Clear any pending adaptive state
-        setAdaptiveQuestion(null);
-        setAdaptiveAnswerText('');
-        setAdaptivePhotos([]);
-        setAdaptiveAudio(null);
-
-        // Always advance to the next question in the questionnaire flow!
-        advanceInFlowAfterQuestion(currentQuestion.id, updatedAnswers);
+        // If the server generated an autonomous deepening question for this answer, show it before advancing
+        if (
+          !notRecalled &&
+          chosenBranch !== 'no' &&
+          data.data.adaptiveQuestion &&
+          data.data.adaptiveQuestion.text
+        ) {
+          setAdaptiveQuestion({
+            text: data.data.adaptiveQuestion.text,
+            parentQuestionId: currentQuestion.id,
+            reason: data.data.adaptiveQuestion.reason,
+            followUpIndex: data.data.adaptiveQuestion.followUpIndex || 1,
+            maxFollowUps:
+              data.data.adaptiveQuestion.maxFollowUps ||
+              sessionData.interview.maxFollowUpsAtCreation,
+          });
+          setAdaptiveAnswerText('');
+          setAdaptivePhotos([]);
+          setAdaptiveAudio(null);
+          setSaveSuccessNotice(
+            'Respuesta guardada. Hemos preparado una pregunta para profundizar en este recuerdo.'
+          );
+          setTimeout(() => setSaveSuccessNotice(null), 4000);
+        } else {
+          // Clear any pending adaptive state and advance to the next question in the flow
+          setAdaptiveQuestion(null);
+          setAdaptiveAnswerText('');
+          setAdaptivePhotos([]);
+          setAdaptiveAudio(null);
+          advanceInFlowAfterQuestion(currentQuestion.id, updatedAnswers);
+        }
       } else {
         setValidationNotice(data.error || 'Error al guardar la respuesta.');
       }
@@ -1154,7 +1177,8 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
 
             <div className="flex flex-wrap items-center gap-2 text-xs text-stone-600">
               <span className="font-semibold text-stone-800">
-                {answeredInFlowCount} de {flowQuestionsCount} preguntas respondidas
+                {answeredInFlowCount}{' '}
+                {answeredInFlowCount === 1 ? 'pregunta respondida' : 'preguntas respondidas'}
               </span>
               {silentAutosaveNotice && (
                 <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[11px] font-medium transition-all">
@@ -1180,7 +1204,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
             <div className="flex items-center space-x-1.5">
               <span className="font-medium text-stone-700">
                 {currentQuestion
-                  ? `Etapa actual: ${currentQuestion.lifeStage.replace('_', ' ')} (Pregunta ${currentIndex + 1} de ${flowQuestionsCount})`
+                  ? `Etapa actual: ${currentQuestion.lifeStage.replace('_', ' ')}`
                   : 'Cuestionario completado'}
               </span>
               {interview.sufficiencyStatus === 'sufficient' && (
@@ -1400,10 +1424,6 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                     </span>
                   )}
                 </div>
-
-                <div className="text-xs text-stone-500 font-medium">
-                  Pregunta {currentIndex + 1} de {flowSequence.length}
-                </div>
               </div>
 
               {/* Question Text */}
@@ -1542,6 +1562,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
 
               {/* 3. Optional Photo Uploader for Every Question */}
               <QuestionPhotoUploader
+                key={`photo_${currentQuestion.id}`}
                 photos={currentPhotos}
                 onChange={(updated) => {
                   setCurrentPhotos(updated);
@@ -1555,6 +1576,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
               {/* 4. Saved voice audios with transcriptions placed at the end below photos */}
               {currentAudios && currentAudios.length > 0 && (
                 <SavedVoiceAudiosList
+                  key={`audio_${currentQuestion.id}`}
                   audios={currentAudios}
                   disabled={!isInterviewOpen || Boolean(adaptiveQuestion)}
                   onDelete={handleDeletePersistedVoiceAudio}

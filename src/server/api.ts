@@ -1034,6 +1034,14 @@ apiRouter.post('/participant/photos/:photoId/delete', async (req: Request, res: 
 // Serve stored interview photograph by ID
 apiRouter.get('/photos/:photoId', async (req: Request, res: Response) => {
   try {
+    const photoBuffer = storage.getPhotoBuffer(req.params.photoId);
+    if (photoBuffer) {
+      res.setHeader('Content-Type', photoBuffer.mimeType);
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      res.send(photoBuffer.buffer);
+      return;
+    }
+
     const photo = await storage.getPhotoByIdAsync(req.params.photoId);
     if (!photo || !photo.dataUrl) {
       res.status(404).json({ success: false, error: 'Fotografía no encontrada.' });

@@ -46,7 +46,12 @@ const ai = new GoogleGenAI({
     },
   },
 });
-export const TEXT_MODEL = 'gemini-3.1-flash-lite';
+export const TEXT_MODEL = 'gemini-3-flash-preview';
+const TEXT_FALLBACK_MODELS = [
+  'gemini-3-flash-preview',
+  'gemini-flash-latest',
+  'gemini-3.1-flash-lite-preview',
+];
 
 /**
  * Executes a promise with a hard timeout to prevent server request freezes.
@@ -59,7 +64,6 @@ export async function withTimeout<T>(
   let timer: any;
   const timeoutPromise = new Promise<T>((resolve) => {
     timer = setTimeout(() => {
-      console.warn(`[Gemini Timeout] Operation exceeded ${ms}ms limit, using fallback.`);
       resolve(fallbackVal());
     }, ms);
   });
@@ -75,6 +79,38 @@ export async function withTimeout<T>(
     clearTimeout(timer);
     throw err;
   }
+}
+
+/**
+ * Calls Gemini generateContent across multiple fallback models so temporary 503/429 spikes
+ * on a single model automatically recover without failing the request.
+ */
+async function generateJsonWithFallback(params: {
+  prompt: string;
+  responseSchema: any;
+  timeoutMsPerModel?: number;
+}): Promise<string | null> {
+  const { prompt, responseSchema, timeoutMsPerModel = 8500 } = params;
+
+  for (const modelName of TEXT_FALLBACK_MODELS) {
+    try {
+      const callPromise = ai.models.generateContent({
+        model: modelName,
+        contents: prompt,
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema,
+        },
+      });
+      const response = await withTimeout(callPromise, timeoutMsPerModel, () => null);
+      if (response && response.text && response.text.trim().length > 0) {
+        return response.text.trim();
+      }
+    } catch (_err) {
+      // Try next model in fallback chain silently on 503 / 429 / transient error
+    }
+  }
+  return null;
 }
 
 /**
@@ -427,50 +463,46 @@ export async function generateAdaptiveFollowUp(params: {
   }
 
   const prompt = `Eres un entrevistador biográfico empático, perspicaz y respetuoso (${storyMode}).
-El entrevistado acaba de responder a la siguiente pregunta del cuestionario:
-- Pregunta original: "${currentQuestion.text}" (Etapa: ${currentQuestion.lifeStage}, Tema: ${currentQuestion.topic}, Flujo: ${currentQuestion.flowId || 'principal'})
+El entrevistado acaba de responder a la siguiente pregunta clave del cuestionario:
+- Pregunta original: "${currentQuestion.text}" (Etapa: ${currentQuestion.lifeStage}, Tema: ${currentQuestion.topic}, Prioridad: ${currentQuestion.priority || 'alta'}, Flujo: ${currentQuestion.flowId || 'principal'})
 - Respuesta del entrevistado: "${trimmed}"
 ${previousFollowUps.length > 0 ? `- Preguntas de profundización ya realizadas en este turno: ${JSON.stringify(previousFollowUps)}` : ''}
 
 Tu tarea:
-Genera de forma autónoma UNA pregunta de profundización que permita explorar un aspecto relevante que el entrevistado haya mencionado (una persona, un lugar, una emoción, una enseñanza, un detalle sensorial o una vivencia que merezca ampliarse).
+Genera de forma autónoma UNA pregunta de profundización que permita explorar un aspecto relevante o significativo que el entrevistado haya mencionado (una persona, un lugar, una emoción, una enseñanza, un detalle sensorial o una vivencia que merezca ampliarse).
 REGLAS:
-1. Si el entrevistado dio una respuesta válida con personas, lugares, vivencias, hijos, logros o emociones (o si dio una respuesta breve que conviene desglosar), establece "suggested": true y formula "questionText" y "reason".
-2. En "reason", explica brevemente en una frase qué aspecto relevante detectaste en su respuesta (ej. "Mencionaste el patio de naranjos en Quiroga y a tus padres; vale la pena profundizar en las vivencias cotidianas de ese lugar").
+1. Si el entrevistado dio una respuesta válida con personas, lugares, vivencias, hijos, logros, recuerdos o emociones (o si dio una respuesta breve en una pregunta importante que conviene desglosar), establece "suggested": true y formula "questionText" y "reason".
+2. En "reason", explica brevemente en una frase qué aspecto relevante detectaste en su respuesta (ej. "Mencionaste el patio de tu casa familiar y a tus padres; vale la pena profundizar en las vivencias cotidianas de ese lugar").
 3. En "questionText", redacta la pregunta de profundización en español cálido, cercano y directo al entrevistado. No repitas preguntas anteriores.`;
 
-  try {
-    const fallbackFn = () =>
-      buildAutonomousDeepeningFallback({
-        currentQuestion,
-        currentAnswerText: trimmed,
-        currentFollowUpCount,
-        previousFollowUps,
-      });
+  const fallbackFn = () =>
+    buildAutonomousDeepeningFallback({
+      currentQuestion,
+      currentAnswerText: trimmed,
+      currentFollowUpCount,
+      previousFollowUps,
+    });
 
-    const callPromise = ai.models.generateContent({
-      model: TEXT_MODEL,
-      contents: prompt,
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            suggested: { type: Type.BOOLEAN },
-            questionText: { type: Type.STRING },
-            reason: { type: Type.STRING },
-          },
-          required: ['suggested', 'questionText', 'reason'],
+  try {
+    const rawJsonText = await generateJsonWithFallback({
+      prompt,
+      timeoutMsPerModel: 8000,
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          suggested: { type: Type.BOOLEAN },
+          questionText: { type: Type.STRING },
+          reason: { type: Type.STRING },
         },
+        required: ['suggested', 'questionText', 'reason'],
       },
     });
 
-    const response = await withTimeout(callPromise, 3500, () => null);
-    if (!response || !response.text) {
+    if (!rawJsonText) {
       return fallbackFn();
     }
 
-    const parsed = safeJsonExtract<AdaptiveQuestionResult>(response.text, {
+    const parsed = safeJsonExtract<AdaptiveQuestionResult>(rawJsonText, {
       suggested: false,
     });
     if (parsed.suggested && parsed.questionText && parsed.questionText.trim().length > 5) {
@@ -488,14 +520,8 @@ REGLAS:
     }
 
     return parsed;
-  } catch (error) {
-    console.warn('Using autonomous context analyzer for deepening question:', error instanceof Error ? error.message : error);
-    return buildAutonomousDeepeningFallback({
-      currentQuestion,
-      currentAnswerText: trimmed,
-      currentFollowUpCount,
-      previousFollowUps,
-    });
+  } catch (_error) {
+    return fallbackFn();
   }
 }
 
@@ -580,40 +606,41 @@ DIRECTRICES PARA LA CREACIÓN DEL LIBRO COMPLETO DE HISTORIA Y LEGADO:
    - Desarrolla una prosa fluida, cálida, digna y emotiva en español, que honre la voz real del entrevistado sin mutilar sus vivencias.`;
 
   try {
-    const response = await ai.models.generateContent({
-      model: TEXT_MODEL,
-      contents: prompt,
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            title: { type: Type.STRING },
-            summary: { type: Type.STRING },
-            chapters: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  title: { type: Type.STRING },
-                  lifeStage: { type: Type.STRING },
-                  content: { type: Type.STRING },
-                  participantAttributions: {
-                    type: Type.ARRAY,
-                    items: { type: Type.STRING },
-                  },
+    const rawJsonText = await generateJsonWithFallback({
+      prompt,
+      timeoutMsPerModel: 25000,
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          title: { type: Type.STRING },
+          summary: { type: Type.STRING },
+          chapters: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                title: { type: Type.STRING },
+                lifeStage: { type: Type.STRING },
+                content: { type: Type.STRING },
+                participantAttributions: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
                 },
-                required: ['title', 'lifeStage', 'content', 'participantAttributions'],
               },
+              required: ['title', 'lifeStage', 'content', 'participantAttributions'],
             },
-            compiledMarkdown: { type: Type.STRING },
           },
-          required: ['title', 'summary', 'chapters', 'compiledMarkdown'],
+          compiledMarkdown: { type: Type.STRING },
         },
+        required: ['title', 'summary', 'chapters', 'compiledMarkdown'],
       },
     });
 
-    const parsed = safeJsonExtract<ManuscriptDraftResult>(response.text, {
+    if (!rawJsonText) {
+      throw new Error('No response from Gemini manuscript models');
+    }
+
+    const parsed = safeJsonExtract<ManuscriptDraftResult>(rawJsonText, {
       title: interview.title,
       summary: '',
       chapters: [],
@@ -631,8 +658,7 @@ DIRECTRICES PARA LA CREACIÓN DEL LIBRO COMPLETO DE HISTORIA Y LEGADO:
       compiledMarkdown: enrichedMarkdown,
       generatedAt: new Date().toISOString(),
     };
-  } catch (error) {
-    console.error('Error generating manuscript via Gemini:', error);
+  } catch (_error) {
     const stageTitles: Record<string, string> = {
       infancia: 'Capítulo: Infancia y Raíces Familiares',
       juventud: 'Capítulo: Juventud y Vocación',
@@ -749,36 +775,11 @@ Instrucciones de transcripción obligatorias:
     const AUDIO_TIMEOUT_MS = 90000;
 
     let rawText = '';
-    // 1. Primary multimodal transcription model: gemini-3.1-flash-lite (fast, robust audio processing)
-    try {
-      const callPromise = ai.models.generateContent({
-        model: 'gemini-3.1-flash-lite',
-        contents: [
-          {
-            inlineData: {
-              mimeType: normalizedMime,
-              data: cleanBase64,
-            },
-          },
-          {
-            text: transcribePrompt,
-          },
-        ],
-      });
-
-      const response = await withTimeout(callPromise, AUDIO_TIMEOUT_MS, () => null);
-      if (response && response.text) {
-        rawText = response.text.trim();
-      }
-    } catch (primaryErr) {
-      console.warn('gemini-3.1-flash-lite transcription error, trying gemini-3.8-flash:', primaryErr);
-    }
-
-    // 2. Fallback model: gemini-3.8-flash
-    if (!rawText) {
+    for (const modelName of TEXT_FALLBACK_MODELS) {
+      if (rawText) break;
       try {
-        const fallbackCall = ai.models.generateContent({
-          model: 'gemini-3.8-flash',
+        const callPromise = ai.models.generateContent({
+          model: modelName,
           contents: [
             {
               inlineData: {
@@ -791,38 +792,13 @@ Instrucciones de transcripción obligatorias:
             },
           ],
         });
-        const fallbackRes = await withTimeout(fallbackCall, AUDIO_TIMEOUT_MS, () => null);
-        if (fallbackRes && fallbackRes.text) {
-          rawText = fallbackRes.text.trim();
-        }
-      } catch (fbErr) {
-        console.warn('Fallback gemini-3.8-flash error, trying gemini-flash-latest:', fbErr);
-      }
-    }
 
-    // 3. Fallback model: gemini-flash-latest
-    if (!rawText) {
-      try {
-        const fallback2Call = ai.models.generateContent({
-          model: 'gemini-flash-latest',
-          contents: [
-            {
-              inlineData: {
-                mimeType: normalizedMime,
-                data: cleanBase64,
-              },
-            },
-            {
-              text: transcribePrompt,
-            },
-          ],
-        });
-        const fallback2Res = await withTimeout(fallback2Call, AUDIO_TIMEOUT_MS, () => null);
-        if (fallback2Res && fallback2Res.text) {
-          rawText = fallback2Res.text.trim();
+        const response = await withTimeout(callPromise, AUDIO_TIMEOUT_MS, () => null);
+        if (response && response.text) {
+          rawText = response.text.trim();
         }
-      } catch (fb2Err) {
-        console.warn('Fallback gemini-flash-latest error:', fb2Err);
+      } catch (_err) {
+        // Proceed to next fallback model silently
       }
     }
 
@@ -837,8 +813,7 @@ Instrucciones de transcripción obligatorias:
       .trim();
 
     return cleaned;
-  } catch (err) {
-    console.warn('Gemini audio transcription error:', err);
+  } catch (_err) {
     return '';
   }
 }

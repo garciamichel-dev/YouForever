@@ -96,6 +96,7 @@ export const QuestionPhotoUploader: React.FC<QuestionPhotoUploaderProps> = ({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const cameraInputRef = useRef<HTMLInputElement | null>(null);
 
+  const [isOpen, setIsOpen] = useState(false);
   const [processingFiles, setProcessingFiles] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -157,8 +158,7 @@ export const QuestionPhotoUploader: React.FC<QuestionPhotoUploaderProps> = ({
         await videoRef.current.play();
       }
       setCameraFacing(facing);
-    } catch (err: unknown) {
-      console.warn('Error accessing live camera stream:', err);
+    } catch (_err: unknown) {
       // Fallback: trigger native device camera input
       setIsCameraOpen(false);
       stopCameraStream();
@@ -277,6 +277,27 @@ export const QuestionPhotoUploader: React.FC<QuestionPhotoUploaderProps> = ({
     onChange(photos.filter((p) => p.tempId !== item.tempId));
   };
 
+  if (!isOpen) {
+    return (
+      <div className="pt-1">
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() => setIsOpen(true)}
+          className="inline-flex items-center gap-2 text-xs font-semibold text-amber-800 hover:text-amber-950 bg-amber-50/70 hover:bg-amber-100/80 border border-amber-200/90 px-3.5 py-2 rounded-lg transition cursor-pointer disabled:opacity-50"
+        >
+          <Camera className="w-3.5 h-3.5 text-amber-700" />
+          <span className="underline underline-offset-4">Cargar Fotografía</span>
+          {photos.length > 0 && (
+            <span className="px-1.5 py-0.5 rounded-full bg-amber-200/80 text-amber-950 text-[10px] font-bold">
+              {photos.length}
+            </span>
+          )}
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div
       className={`rounded-xl border border-stone-200 bg-stone-50/80 ${
@@ -317,34 +338,44 @@ export const QuestionPhotoUploader: React.FC<QuestionPhotoUploaderProps> = ({
           </div>
         </div>
 
-        {/* Dual Actions: Tomar Foto con Cámara y Subir Archivo */}
-        {!disabled && (
-          <div className="flex flex-wrap items-center gap-2 shrink-0">
-            {/* 1. Tomar Foto con la Cámara */}
-            <button
-              type="button"
-              disabled={processingFiles}
-              onClick={() => handleStartCamera('environment')}
-              className="inline-flex items-center space-x-1.5 px-3 py-1.5 bg-amber-700 hover:bg-amber-800 text-white rounded-lg text-xs font-semibold shadow-xs transition disabled:opacity-50 cursor-pointer"
-              title="Abrir cámara para tomar una foto en este momento"
-            >
-              <Camera className="w-3.5 h-3.5" />
-              <span>Tomar foto</span>
-            </button>
+        {/* Dual Actions: Tomar Foto con Cámara, Subir Archivo y Ocultar */}
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          {!disabled && (
+            <>
+              {/* 1. Tomar Foto con la Cámara */}
+              <button
+                type="button"
+                disabled={processingFiles}
+                onClick={() => handleStartCamera('environment')}
+                className="inline-flex items-center space-x-1.5 px-3 py-1.5 bg-amber-700 hover:bg-amber-800 text-white rounded-lg text-xs font-semibold shadow-xs transition disabled:opacity-50 cursor-pointer"
+                title="Abrir cámara para tomar una foto en este momento"
+              >
+                <Camera className="w-3.5 h-3.5" />
+                <span>Tomar foto</span>
+              </button>
 
-            {/* 2. Subir Archivo / Galería */}
-            <button
-              type="button"
-              disabled={processingFiles}
-              onClick={() => fileInputRef.current?.click()}
-              className="inline-flex items-center space-x-1.5 px-3 py-1.5 bg-white hover:bg-stone-100 text-stone-700 border border-stone-300 rounded-lg text-xs font-semibold shadow-2xs transition disabled:opacity-50 cursor-pointer"
-              title="Seleccionar archivos desde la galería o tu dispositivo"
-            >
-              <ImageIcon className="w-3.5 h-3.5 text-stone-500" />
-              <span>Subir archivo</span>
-            </button>
-          </div>
-        )}
+              {/* 2. Subir Archivo / Galería */}
+              <button
+                type="button"
+                disabled={processingFiles}
+                onClick={() => fileInputRef.current?.click()}
+                className="inline-flex items-center space-x-1.5 px-3 py-1.5 bg-white hover:bg-stone-100 text-stone-700 border border-stone-300 rounded-lg text-xs font-semibold shadow-2xs transition disabled:opacity-50 cursor-pointer"
+                title="Seleccionar archivos desde la galería o tu dispositivo"
+              >
+                <ImageIcon className="w-3.5 h-3.5 text-stone-500" />
+                <span>Subir archivo</span>
+              </button>
+            </>
+          )}
+
+          <button
+            type="button"
+            onClick={() => setIsOpen(false)}
+            className="text-xs font-semibold text-stone-500 hover:text-stone-800 underline underline-offset-2 px-1.5 py-1 cursor-pointer"
+          >
+            Ocultar
+          </button>
+        </div>
       </div>
 
       {uploadError && (

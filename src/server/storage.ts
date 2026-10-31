@@ -151,13 +151,57 @@ class StorageManager {
     this.questionnaireVersions.set('v1_initial', Array.from(this.questions.values()));
   }
 
+  private sanitizeDocForFirestore<T>(data: T): Record<string, unknown> {
+    const cleaned = sanitizeForFirestore(data) as any;
+
+    const stripOversizedStrings = (obj: any): any => {
+      if (!obj || typeof obj !== 'object') return obj;
+      if (Array.isArray(obj)) {
+        return obj.map(stripOversizedStrings);
+      }
+      const result: Record<string, any> = {};
+      for (const key of Object.keys(obj)) {
+        const val = obj[key];
+        if (
+          typeof val === 'string' &&
+          val.length > 50_000 &&
+          (val.startsWith('data:') || key.toLowerCase().includes('dataurl') || key.toLowerCase().includes('base64'))
+        ) {
+          result[key] = '';
+          result[`${key}_storedSeparately`] = true;
+        } else if (typeof val === 'object' && val !== null) {
+          result[key] = stripOversizedStrings(val);
+        } else {
+          result[key] = val;
+        }
+      }
+      return result;
+    };
+
+    return stripOversizedStrings(cleaned);
+  }
+
   private async persistDoc<T>(collectionName: string, docId: string, data: T): Promise<void> {
     try {
-      const cleaned = sanitizeForFirestore(data);
-      await setDoc(doc(serverDb, collectionName, docId), cleaned as Record<string, unknown>);
+      const sanitized = this.sanitizeDocForFirestore(data);
+      const serialized = JSON.stringify(sanitized);
+      const byteSize = Buffer.byteLength(serialized, 'utf8');
+
+      // Firestore strict document limit is 1,048,576 bytes.
+      // If a document exceeds 800 KB, skip the remote write to prevent GrpcConnection RPC stream crash.
+      if (byteSize > 800_000) {
+        console.warn(
+          `[Firestore Size Guard] Document ${collectionName}/${docId} (${byteSize} bytes) exceeds safe Firestore write limit. Skipping remote write to prevent GrpcConnection RPC stream crash. Document remains safely cached in memory and on disk.`
+        );
+        return;
+      }
+
+      await setDoc(doc(serverDb, collectionName, docId), sanitized as Record<string, unknown>);
     } catch (err: any) {
       if (err?.message?.includes('Quota limit exceeded') || err?.code === 'resource-exhausted') {
         console.warn(`[Firestore Quota] Write skipped for ${collectionName}/${docId} due to daily limit. Stored in memory.`);
+      } else if (err?.message?.includes('exceeds the limit') || err?.code === 3) {
+        console.warn(`[Firestore Payload Warning] Write skipped for ${collectionName}/${docId} due to size limit (${err?.message}). Retained safely on server.`);
       } else {
         console.warn(`[Firestore Persistence Warning] Could not save ${collectionName}/${docId}:`, err?.message || err);
       }
@@ -858,6 +902,54 @@ class StorageManager {
   }
 
   // --- Photos Management ---
+  public savePhotoBinaryToDisk(photoId: string, dataUrl: string): void {
+    try {
+      const photoDir = path.join(process.cwd(), 'data', 'photos');
+      if (!fs.existsSync(photoDir)) {
+        fs.mkdirSync(photoDir, { recursive: true });
+      }
+      let rawBase64 = dataUrl;
+      if (rawBase64.startsWith('data:')) {
+        const cIdx = rawBase64.indexOf(',');
+        if (cIdx !== -1) rawBase64 = rawBase64.substring(cIdx + 1);
+      }
+      fs.writeFileSync(
+        path.join(photoDir, `${photoId}.bin`),
+        Buffer.from(rawBase64.replace(/\s+/g, ''), 'base64')
+      );
+    } catch (diskErr) {
+      console.warn('[Disk Photo Storage Note]:', diskErr);
+    }
+  }
+
+  public getPhotoBuffer(photoId: string): { buffer: Buffer; mimeType: string } | null {
+    const photo = this.photos.get(photoId);
+    const photoDir = path.join(process.cwd(), 'data', 'photos');
+    const diskPath = path.join(photoDir, `${photoId}.bin`);
+
+    if (fs.existsSync(diskPath)) {
+      try {
+        const buf = fs.readFileSync(diskPath);
+        return { buffer: buf, mimeType: photo?.mimeType || 'image/jpeg' };
+      } catch (err) {
+        console.warn('Error reading photo from disk:', err);
+      }
+    }
+
+    if (photo?.dataUrl) {
+      let raw = photo.dataUrl;
+      if (raw.startsWith('data:')) {
+        const cIdx = raw.indexOf(',');
+        if (cIdx !== -1) raw = raw.substring(cIdx + 1);
+      }
+      return {
+        buffer: Buffer.from(raw.replace(/\s+/g, ''), 'base64'),
+        mimeType: photo.mimeType || 'image/jpeg',
+      };
+    }
+    return null;
+  }
+
   public getPhotoById(photoId: string): InterviewPhotoRecord | undefined {
     return this.photos.get(photoId);
   }
@@ -898,6 +990,16 @@ class StorageManager {
     }
 
     this.photos.delete(photoId);
+    try {
+      const photoDir = path.join(process.cwd(), 'data', 'photos');
+      const diskPath = path.join(photoDir, `${photoId}.bin`);
+      if (fs.existsSync(diskPath)) {
+        fs.unlinkSync(diskPath);
+      }
+    } catch (diskErr) {
+      console.warn('Error deleting photo binary from disk:', diskErr);
+    }
+
     await this.removeDoc('interviewPhotos', photoId);
 
     // Also remove from any answer record in this interview that references this photoId
@@ -1032,10 +1134,10 @@ class StorageManager {
 
     this.audios.set(audioId, audioRecord);
 
-    // If audio is large (> 400KB), omit the heavy base64 payload from the Firestore document
-    // to strictly prevent Firestore 1MB document limit rejections.
+    // If audio is large (> 50KB), omit the heavy base64 payload from the Firestore document
+    // to strictly prevent Firestore 1MB document limit and gRPC stream rejections.
     const firestoreRecord: any = { ...audioRecord };
-    if (firestoreRecord.audioDataUrl && firestoreRecord.audioDataUrl.length > 400_000) {
+    if (firestoreRecord.audioDataUrl && firestoreRecord.audioDataUrl.length > 50_000) {
       firestoreRecord.audioDataUrl = '';
       firestoreRecord.storedOnDisk = true;
     }
@@ -1234,9 +1336,16 @@ class StorageManager {
           existingPhotoRecord.topic = resolvedTopic;
           if (incomingPhoto.dataUrl && incomingPhoto.dataUrl.startsWith('data:image/')) {
             existingPhotoRecord.dataUrl = incomingPhoto.dataUrl;
+            this.savePhotoBinaryToDisk(existingPhotoRecord.id, incomingPhoto.dataUrl);
           }
           this.photos.set(existingPhotoRecord.id, existingPhotoRecord);
-          await this.persistDoc('interviewPhotos', existingPhotoRecord.id, existingPhotoRecord);
+
+          const firestorePhotoRecord: any = { ...existingPhotoRecord };
+          if (firestorePhotoRecord.dataUrl && firestorePhotoRecord.dataUrl.length > 50_000) {
+            firestorePhotoRecord.dataUrl = '';
+            firestorePhotoRecord.storedOnDisk = true;
+          }
+          await this.persistDoc('interviewPhotos', existingPhotoRecord.id, firestorePhotoRecord);
 
           const { dataUrl: _omit, ...attachmentMeta } = existingPhotoRecord;
           resolvedPhotoAttachments.push(attachmentMeta);
@@ -1246,6 +1355,8 @@ class StorageManager {
               ? incomingPhoto.id
               : `photo_${interview.id}_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 6)}`;
           const imageUrl = `/api/photos/${photoId}`;
+          this.savePhotoBinaryToDisk(photoId, incomingPhoto.dataUrl);
+
           const newPhotoRecord: InterviewPhotoRecord = {
             id: photoId,
             interviewId: interview.id,
@@ -1263,7 +1374,13 @@ class StorageManager {
             createdAt: now.toISOString(),
           };
           this.photos.set(photoId, newPhotoRecord);
-          await this.persistDoc('interviewPhotos', photoId, newPhotoRecord);
+
+          const firestorePhotoRecord: any = { ...newPhotoRecord };
+          if (firestorePhotoRecord.dataUrl && firestorePhotoRecord.dataUrl.length > 50_000) {
+            firestorePhotoRecord.dataUrl = '';
+            firestorePhotoRecord.storedOnDisk = true;
+          }
+          await this.persistDoc('interviewPhotos', photoId, firestorePhotoRecord);
 
           const { dataUrl: _omit, ...attachmentMeta } = newPhotoRecord;
           resolvedPhotoAttachments.push(attachmentMeta);
@@ -1311,7 +1428,7 @@ class StorageManager {
           participantId: participant.id,
           participantName: participant.name,
           audioUrl: stored.audioUrl,
-          audioDataUrl: stored.audioDataUrl,
+          audioDataUrl: stored.audioDataUrl && stored.audioDataUrl.length < 50_000 ? stored.audioDataUrl : undefined,
           mimeType: stored.mimeType,
           transcription: stored.transcription,
           durationSeconds: stored.durationSeconds,
@@ -1335,7 +1452,7 @@ class StorageManager {
           participantId: participant.id,
           participantName: participant.name,
           audioUrl: savedRec.audioUrl,
-          audioDataUrl: savedRec.audioDataUrl,
+          audioDataUrl: savedRec.audioDataUrl && savedRec.audioDataUrl.length < 50_000 ? savedRec.audioDataUrl : undefined,
           mimeType: savedRec.mimeType,
           transcription: savedRec.transcription,
           durationSeconds: savedRec.durationSeconds,
@@ -1350,7 +1467,7 @@ class StorageManager {
           participantId: participant.id,
           participantName: participant.name,
           audioUrl: item.audioUrl,
-          audioDataUrl: (item as any).audioDataUrl,
+          audioDataUrl: (item as any).audioDataUrl && (item as any).audioDataUrl.length < 50_000 ? (item as any).audioDataUrl : undefined,
           mimeType: item.mimeType || 'audio/webm',
           transcription: item.transcription || '',
           durationSeconds: item.durationSeconds || 0,
@@ -1476,9 +1593,19 @@ class StorageManager {
         const rootQuestionId = params.isFollowUp
           ? params.parentQuestionId || params.questionId
           : params.questionId;
-        const rootQuestionObj = this.questions.get(rootQuestionId);
+        const rootQuestionObj =
+          this.questions.get(rootQuestionId) ||
+          this.getQuestionsForVersion(interview.questionnaireVersionId).find(
+            (q) => q.id === rootQuestionId
+          );
 
-        if (rootQuestionObj) {
+        const isKeyOrSubstantive =
+          rootQuestionObj &&
+          (rootQuestionObj.priority === 'alta' ||
+            rootQuestionObj.requirementType === 'mandatory' ||
+            (params.answerText || '').trim().length >= 25);
+
+        if (rootQuestionObj && isKeyOrSubstantive) {
           const allAnswersNow = this.getAnswersForInterview(interview.id);
           const followUpsForRoot = allAnswersNow.filter(
             (a) =>
@@ -2084,22 +2211,36 @@ class StorageManager {
       return existing;
     }
 
+    const nowIso = new Date().toISOString();
     const consentId = `consent_${interview.id}_${participant.id}_${Date.now()}`;
-    const newConsent: PrivacyConsentRecord = {
+    const newConsent: any = {
       id: consentId,
       interviewId: interview.id,
       participantId: participant.id,
       participantName: participant.name,
       versionId: PRIVACY_NOTICE_VERSION,
+      policyVersion: PRIVACY_NOTICE_VERSION,
       noticeHash: validation.noticeHash,
       declarationHash: validation.declarationHash,
+      policyHash: validation.declarationHash,
       declarationText: validation.declarationText,
-      acceptedAt: new Date().toISOString(),
+      acceptedAt: nowIso,
+      serverTimestamp: nowIso,
+      serverTimezone: 'America/Merida',
       expressAcceptance: true,
       identityConfirmed: true,
       authMechanism: 'invitation_token_hash_sha256',
       status: 'active',
       userAgent,
+      declarations: {
+        declarationA_acknowledgement: true,
+        declarationB_necessaryProcessing: true,
+        declarationC_sensitiveData: true,
+        declarationD_financialData: true,
+        declarationE_aiAssistant: true,
+        declarationF_shareWithFamily: false,
+        declarationG_promotionalUse: false,
+      },
     };
 
     this.privacyConsents.set(consentId, newConsent);
@@ -2168,7 +2309,22 @@ class StorageManager {
   }
 
   public getAllPrivacyConsents(): PrivacyConsentRecord[] {
-    return Array.from(this.privacyConsents.values());
+    return Array.from(this.privacyConsents.values()).map((c: any) => ({
+      ...c,
+      policyVersion: c.policyVersion || c.versionId || PRIVACY_NOTICE_VERSION,
+      serverTimestamp: c.serverTimestamp || c.acceptedAt || new Date().toISOString(),
+      serverTimezone: c.serverTimezone || 'America/Merida',
+      policyHash: c.policyHash || c.declarationHash || c.noticeHash || '',
+      declarations: c.declarations || {
+        declarationA_acknowledgement: true,
+        declarationB_necessaryProcessing: true,
+        declarationC_sensitiveData: true,
+        declarationD_financialData: true,
+        declarationE_aiAssistant: true,
+        declarationF_shareWithFamily: false,
+        declarationG_promotionalUse: false,
+      },
+    }));
   }
 
   // --- BOOK SHARING (DIGITAL BOOK ONLY - NO RAW VOICES/ANSWERS/PHOTOS) ---

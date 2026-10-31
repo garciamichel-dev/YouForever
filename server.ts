@@ -42,11 +42,13 @@ async function startServer() {
     });
   } else {
     // Mount Vite dev server in middleware mode with HMR disabled
+    process.env.DISABLE_HMR = 'true';
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
         hmr: false,
+        watch: null,
       },
       appType: 'spa',
     });

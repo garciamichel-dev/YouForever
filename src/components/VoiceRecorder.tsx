@@ -648,7 +648,7 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
           ref={nativeAudioInputRef}
           type="file"
           accept="audio/*"
-          capture={true}
+          capture="user"
           onChange={handleAudioFileSelected}
           className="sr-only"
           aria-label="Grabar audio con el micrófono nativo del dispositivo"
@@ -811,18 +811,6 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
                       <span>Continuar</span>
                     </button>
                   )}
-
-                  {/* FINALIZAR PARA ESCUCHAR (detiene grabación y pasa a vista previa) */}
-                  <button
-                    type="button"
-                    onClick={handleStopAndFinalize}
-                    disabled={disabled}
-                    className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg bg-stone-100 text-stone-800 hover:bg-stone-200 border border-stone-300 transition-colors cursor-pointer"
-                    title="Detener grabación para escucharla antes de enviar"
-                  >
-                    <Square className="w-3.5 h-3.5 fill-stone-700" />
-                    <span>Finalizar y escuchar</span>
-                  </button>
 
                   {/* CANCELAR (cancela la grabación y descarta) */}
                   <button
@@ -998,6 +986,7 @@ export const SavedVoiceAudiosList: React.FC<SavedVoiceAudiosListProps> = ({
   disabled = false,
   onDelete,
 }) => {
+  const [isOpen, setIsOpen] = useState(false);
   const [confirmDeleteTarget, setConfirmDeleteTarget] = useState<AnswerVoiceAttachment | null>(null);
   const [deletingAudioId, setDeletingAudioId] = useState<string | null>(null);
 
@@ -1017,6 +1006,24 @@ export const SavedVoiceAudiosList: React.FC<SavedVoiceAudiosListProps> = ({
 
   if (!audios || audios.length === 0) return null;
 
+  if (!isOpen) {
+    return (
+      <div className="pt-1">
+        <button
+          type="button"
+          onClick={() => setIsOpen(true)}
+          className="inline-flex items-center gap-2 text-xs font-semibold text-emerald-800 hover:text-emerald-950 bg-emerald-50/80 hover:bg-emerald-100/80 border border-emerald-200 px-3.5 py-2 rounded-lg transition cursor-pointer"
+        >
+          <Mic className="w-3.5 h-3.5 text-emerald-700" />
+          <span className="underline underline-offset-4">Mostrar Archivos de voz</span>
+          <span className="px-1.5 py-0.5 rounded-full bg-emerald-200/80 text-emerald-950 text-[10px] font-bold">
+            {audios.length}
+          </span>
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-3 bg-white border border-emerald-200 rounded-xl p-4 shadow-xs">
       <div className="flex items-center justify-between pb-2 border-b border-emerald-100">
@@ -1026,9 +1033,18 @@ export const SavedVoiceAudiosList: React.FC<SavedVoiceAudiosListProps> = ({
             Archivos de voz guardados ({audios.length})
           </h5>
         </div>
-        <span className="text-[11px] text-emerald-700 font-medium">
-          Disponibles para reproducción permanente y consulta
-        </span>
+        <div className="flex items-center gap-3">
+          <span className="hidden sm:inline text-[11px] text-emerald-700 font-medium">
+            Disponibles para reproducción permanente y consulta
+          </span>
+          <button
+            type="button"
+            onClick={() => setIsOpen(false)}
+            className="text-xs font-semibold text-stone-500 hover:text-stone-800 underline underline-offset-2 cursor-pointer"
+          >
+            Ocultar
+          </button>
+        </div>
       </div>
 
       <div className="space-y-3">
