@@ -129,7 +129,7 @@ export const ParticipantAdminPanel: React.FC<ParticipantAdminPanelProps> = ({
     const certContent = `
 ================================================================================
           CONSTANCIA ELECTRÓNICA OFICIAL DE CONSENTIMIENTO INFORMADO
-                       PLATAFORMA FOREVERYOU / LEGADO DIGITAL
+                             PLATAFORMA FOREVERYOU
 ================================================================================
 
 Folio de Identificación: ${c.id}

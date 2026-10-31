@@ -1,5 +1,5 @@
 /**
- * Resilient API client for Legado Digital.
+ * Resilient API client for ForeverYou.
  * Prevents "JSON.parse: unexpected character at line 1 column 1" when responses
  * are not valid JSON (e.g. HTML 500/404 pages or server cold starts),
  * and provides retry logic for transient NetworkErrors.

@@ -931,6 +931,9 @@ apiRouter.post('/participant/audio/upload', async (req: Request, res: Response) 
         durationSeconds: savedAudio.durationSeconds,
         mimeType: savedAudio.mimeType,
         createdAt: savedAudio.createdAt,
+        audioQuality: (savedAudio as any).audioQuality || 'clear',
+        qualityWarning: (savedAudio as any).qualityWarning,
+        suggestion: (savedAudio as any).suggestion,
       },
     });
   } catch (err: unknown) {

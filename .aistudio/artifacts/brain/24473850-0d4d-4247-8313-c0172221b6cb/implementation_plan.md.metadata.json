@@ -1,0 +1,6 @@
+{
+  "summary":  "Plan de implementación para transcripción estricta sin alucinaciones, diagnóstico de calidad acústica (ruido/silencio/ininteligible), pausa preventiva a los 30 segundos y alertas con recordatorio de uso del teclado.",
+  "updatedAt":  "2026-10-31T18:48:24.039569804Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

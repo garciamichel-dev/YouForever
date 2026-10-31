@@ -847,7 +847,7 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-white rounded-xl max-w-xl w-full p-6 shadow-2xl border border-stone-200 max-h-[90vh] overflow-y-auto">
             <h3 className="font-serif text-lg font-bold text-stone-900 pb-3 border-b border-stone-200 mb-4">
-              Crear Nueva Entrevista de Legado Digital
+              Crear Nueva Entrevista en ForeverYou
             </h3>
 
             <form onSubmit={handleCreateInterview} className="space-y-4 text-xs">

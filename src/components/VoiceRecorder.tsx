@@ -27,6 +27,12 @@ import {
 import { AnswerVoiceAttachment } from '../logic/interviewRules.ts';
 import { AudioPlayer } from './AudioPlayer.tsx';
 
+export interface VoiceQualityDiagnosis {
+  audioQuality: 'clear' | 'noisy' | 'unintelligible' | 'silent';
+  qualityWarning?: string;
+  suggestion?: string;
+}
+
 export interface VoiceRecorderProps {
   token: string;
   questionId: string;
@@ -37,10 +43,12 @@ export interface VoiceRecorderProps {
   onVoiceSubmitted: (
     audio: AnswerVoiceAttachment,
     transcription: string,
-    allAudios: AnswerVoiceAttachment[]
+    allAudios: AnswerVoiceAttachment[],
+    diagnosis?: VoiceQualityDiagnosis
   ) => void;
   onVoiceDeleted?: (audioId: string) => void;
   onRecordingStatusChange?: (isRecording: boolean) => void;
+  onFocusKeyboard?: () => void;
   disabled?: boolean;
 }
 
@@ -63,6 +71,7 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
       onVoiceSubmitted,
       onVoiceDeleted,
       onRecordingStatusChange,
+      onFocusKeyboard,
       disabled = false,
     },
     ref
@@ -82,6 +91,16 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
     const [state, setState] = useState<RecorderState>('idle');
     const [timerSeconds, setTimerSeconds] = useState(0);
     const [errorMsg, setErrorMsg] = useState<string | null>(null);
+    const [thirtySecAlert, setThirtySecAlert] = useState<{
+      title: string;
+      message: string;
+      suggestion: string;
+    } | null>(null);
+    const [qualityAlert, setQualityAlert] = useState<{
+      audioQuality: 'noisy' | 'unintelligible' | 'silent';
+      warning: string;
+      suggestion: string;
+    } | null>(null);
     const [previewAudioUrl, setPreviewAudioUrl] = useState<string | null>(null);
     const [previewAudioName, setPreviewAudioName] = useState<string | null>(null);
     const [deletingAudioId, setDeletingAudioId] = useState<string | null>(null);
@@ -98,6 +117,15 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
     const [volumeLevel, setVolumeLevel] = useState<number>(0);
     const finalRecordedBlobRef = useRef<Blob | null>(null);
 
+    // Live Speech & Acoustic Intelligibility Monitors (for 30-second check)
+    const speechRecognitionRef = useRef<any>(null);
+    const speechRecognitionSupportedRef = useRef<boolean>(false);
+    const legibleWordsCountRef = useRef<number>(0);
+    const liveClientTranscriptRef = useRef<string>('');
+    const vocalModulationFramesRef = useRef<number>(0);
+    const backgroundNoiseFramesRef = useRef<number>(0);
+    const thirtySecCheckTriggeredRef = useRef<boolean>(false);
+
     const audioFileInputRef = useRef<HTMLInputElement | null>(null);
     const nativeAudioInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -109,6 +137,8 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
       setState('idle');
       setTimerSeconds(0);
       setErrorMsg(null);
+      setThirtySecAlert(null);
+      setQualityAlert(null);
       setPreviewAudioName(null);
       if (previewAudioUrl) {
         URL.revokeObjectURL(previewAudioUrl);
@@ -131,7 +161,67 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
       };
     }, [questionId]);
 
+    const stopLiveSpeechMonitor = () => {
+      if (speechRecognitionRef.current) {
+        try {
+          speechRecognitionRef.current.onend = null;
+          speechRecognitionRef.current.stop();
+        } catch {
+          // ignore
+        }
+        speechRecognitionRef.current = null;
+      }
+    };
+
+    const startLiveSpeechMonitor = () => {
+      if (typeof window === 'undefined') return;
+      const SpeechRec =
+        (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      if (!SpeechRec) {
+        speechRecognitionSupportedRef.current = false;
+        return;
+      }
+
+      try {
+        stopLiveSpeechMonitor();
+        const recognition = new SpeechRec();
+        recognition.lang = 'es-MX';
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        speechRecognitionSupportedRef.current = true;
+
+        recognition.onresult = (event: any) => {
+          let fullTranscript = '';
+          for (let i = 0; i < event.results.length; i++) {
+            const piece = event.results[i][0]?.transcript || '';
+            fullTranscript += ' ' + piece;
+          }
+          const clean = fullTranscript.trim();
+          const words = clean
+            .split(/\s+/)
+            .map((w: string) => w.replace(/[^a-záéíóúüñA-ZÁÉÍÓÚÜÑ]/g, ''))
+            .filter((w: string) => w.length >= 2);
+
+          if (words.length > 0) {
+            legibleWordsCountRef.current = Math.max(legibleWordsCountRef.current, words.length);
+            liveClientTranscriptRef.current = clean;
+          }
+        };
+
+        recognition.onerror = () => {
+          // If browser blocks or fails speech recognition, fall back to spectral modulation check
+          speechRecognitionSupportedRef.current = false;
+        };
+
+        recognition.start();
+        speechRecognitionRef.current = recognition;
+      } catch {
+        speechRecognitionSupportedRef.current = false;
+      }
+    };
+
     const cleanupResources = () => {
+      stopLiveSpeechMonitor();
       if (timerIntervalRef.current) {
         clearInterval(timerIntervalRef.current);
         timerIntervalRef.current = null;
@@ -158,7 +248,7 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
       }
     };
 
-    // Setup sound level analyzer
+    // Setup sound level and voice intelligibility analyzer
     const setupAudioAnalyzer = (stream: MediaStream) => {
       try {
         const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
@@ -179,17 +269,37 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
           if (!analyserRef.current) return;
           analyserRef.current.getByteFrequencyData(dataArray);
           let sum = 0;
-          for (let i = 0; i < dataArray.length; i++) {
-            sum += dataArray[i];
+          let voiceBandSum = 0;
+          let edgeNoiseSum = 0;
+          const len = dataArray.length;
+
+          for (let i = 0; i < len; i++) {
+            const val = dataArray[i];
+            sum += val;
+            if (i >= 2 && i <= 14) {
+              voiceBandSum += val;
+            } else {
+              edgeNoiseSum += val;
+            }
           }
-          const avg = sum / dataArray.length;
+          const avg = sum / len;
+          const voiceAvg = voiceBandSum / 13;
+          const noiseAvg = edgeNoiseSum / Math.max(1, len - 13);
+
+          // Detect modulated human voice vs flat background noise or silence
+          if (voiceAvg > 28 && voiceAvg - noiseAvg > 14) {
+            vocalModulationFramesRef.current += 1;
+          } else if (noiseAvg > 32) {
+            backgroundNoiseFramesRef.current += 1;
+          }
+
           setVolumeLevel(Math.min(100, Math.round((avg / 128) * 100)));
           animFrameRef.current = requestAnimationFrame(updateVolume);
         };
 
         updateVolume();
-      } catch (err) {
-        console.warn('Audio analyzer not supported:', err);
+      } catch (_err) {
+        // Audio analyzer not supported
       }
     };
 
@@ -217,9 +327,17 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
     // Start Voice Recording with progressive constraints and non-fatal fallback
     const handleStartRecording = async () => {
       setErrorMsg(null);
+      setThirtySecAlert(null);
+      setQualityAlert(null);
       setPreviewAudioName(null);
       audioChunksRef.current = [];
       finalRecordedBlobRef.current = null;
+      legibleWordsCountRef.current = 0;
+      liveClientTranscriptRef.current = '';
+      vocalModulationFramesRef.current = 0;
+      backgroundNoiseFramesRef.current = 0;
+      thirtySecCheckTriggeredRef.current = false;
+
       if (previewAudioUrl) {
         URL.revokeObjectURL(previewAudioUrl);
         setPreviewAudioUrl(null);
@@ -227,7 +345,7 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
 
       if (typeof window === 'undefined' || !navigator?.mediaDevices?.getUserMedia) {
         setErrorMsg(
-          'Tu navegador o dispositivo no soporta grabación en vivo de audio. Puedes subir un archivo de audio o nota de voz directamente.'
+          'Tu navegador o dispositivo no soporta grabación en vivo de audio. Puedes subir un archivo de audio o escribir tu respuesta directamente usando el teclado.'
         );
         return;
       }
@@ -257,6 +375,7 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
 
         audioStreamRef.current = stream;
         setupAudioAnalyzer(stream);
+        startLiveSpeechMonitor();
 
         if (typeof MediaRecorder === 'undefined') {
           throw new Error('MediaRecorder no está disponible en este navegador.');
@@ -302,19 +421,16 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
           errMsg.toLowerCase().includes('not allowed');
 
         if (isNotAllowed) {
-          console.warn('[VoiceRecorder] Permiso de micrófono no otorgado o restringido por la plataforma:', errMsg);
           setErrorMsg(
-            'El acceso al micrófono no está permitido en este navegador o entorno (por ejemplo, en un marco embebido o permisos bloqueados). Puedes subir directamente una nota de voz o archivo de audio (.mp3, .m4a, .wav, .webm, .ogg) desde tu dispositivo.'
+            'El acceso al micrófono no está permitido en este navegador. Puedes subir un archivo de audio o escribir tu respuesta por tu cuenta usando el teclado.'
           );
         } else if (err?.name === 'NotFoundError' || err?.name === 'DevicesNotFoundError') {
-          console.warn('[VoiceRecorder] No se encontró micrófono en el dispositivo:', errMsg);
           setErrorMsg(
-            'No se encontró ningún micrófono conectado en tu dispositivo. Puedes subir una nota de voz o archivo de audio grabado previamente.'
+            'No se encontró ningún micrófono conectado en tu dispositivo. Puedes subir una nota de voz o escribir tu respuesta por tu cuenta usando el teclado.'
           );
         } else {
-          console.warn('[VoiceRecorder] Error al iniciar grabador:', errMsg);
           setErrorMsg(
-            `No se pudo iniciar la grabación con micrófono (${errMsg || 'error del navegador'}). Puedes subir tu archivo de audio directamente.`
+            `No se pudo iniciar la grabación con micrófono (${errMsg || 'error del navegador'}). Puedes subir tu archivo de audio o escribir tu respuesta usando el teclado.`
           );
         }
       }
@@ -326,6 +442,8 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
       if (!file) return;
 
       setErrorMsg(null);
+      setThirtySecAlert(null);
+      setQualityAlert(null);
       // Maximum 50MB (supports recordings of 10-30+ minutes)
       if (file.size > 50 * 1024 * 1024) {
         setErrorMsg(
@@ -375,14 +493,17 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
       if (!mediaRecorderRef.current || state !== 'recording') return;
 
       try {
-        mediaRecorderRef.current.pause();
+        stopLiveSpeechMonitor();
+        if (mediaRecorderRef.current.state === 'recording') {
+          mediaRecorderRef.current.pause();
+        }
         if (timerIntervalRef.current) {
           clearInterval(timerIntervalRef.current);
           timerIntervalRef.current = null;
         }
         setState('paused');
-      } catch (err) {
-        console.warn('Error pausing recorder:', err);
+      } catch (_err) {
+        // ignore
       }
     };
 
@@ -391,14 +512,18 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
       if (!mediaRecorderRef.current || state !== 'paused') return;
 
       try {
-        mediaRecorderRef.current.resume();
+        setThirtySecAlert(null);
+        if (mediaRecorderRef.current.state === 'paused') {
+          mediaRecorderRef.current.resume();
+        }
+        startLiveSpeechMonitor();
         timerIntervalRef.current = window.setInterval(() => {
           setTimerSeconds((prev) => prev + 1);
         }, 1000);
 
         setState('recording');
-      } catch (err) {
-        console.warn('Error resuming recorder:', err);
+      } catch (_err) {
+        // ignore
       }
     };
 
@@ -414,12 +539,45 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
       setPreviewAudioName(null);
       setTimerSeconds(0);
       setErrorMsg(null);
+      setThirtySecAlert(null);
       setState('idle');
     };
+
+    // 30-Second Live Speech & Intelligibility Check:
+    // If ~30 seconds of recording have elapsed and no legible word or clear voice was detected,
+    // automatically pause recording and alert the participant.
+    useEffect(() => {
+      if (
+        state === 'recording' &&
+        timerSeconds >= 30 &&
+        !thirtySecCheckTriggeredRef.current
+      ) {
+        thirtySecCheckTriggeredRef.current = true;
+        const noWordsRecognized = legibleWordsCountRef.current === 0;
+        const noClearVoiceSignal =
+          speechRecognitionSupportedRef.current || vocalModulationFramesRef.current < 25;
+
+        if (noWordsRecognized && noClearVoiceSignal) {
+          handlePause();
+          const hasHighBackgroundNoise = backgroundNoiseFramesRef.current > 90;
+          setThirtySecAlert({
+            title: hasHighBackgroundNoise
+              ? 'Grabación en pausa: detectamos mucho ruido de fondo y no hemos logrado comprender palabras claras'
+              : 'Grabación en pausa: tras 30 segundos no hemos logrado escuchar ninguna palabra legible',
+            message: hasHighBackgroundNoise
+              ? 'Llevas 30 segundos grabando, pero el ruido ambiental impide que el sistema comprenda lo que estás diciendo.'
+              : 'Llevas 30 segundos de grabación y el sistema aún no ha logrado identificar ninguna palabra comprensible.',
+            suggestion:
+              'Te sugerimos cancelar esta grabación y revisar tu micrófono o moverte a un lugar tranquilo sin ruido de fondo. Recuerda que también tienes la opción de escribir tu respuesta por tu cuenta usando el teclado.',
+          });
+        }
+      }
+    }, [timerSeconds, state]);
 
     // Stops recording cleanly and returns Promise that resolves with final Blob
     const stopRecordingAndGetBlob = (): Promise<Blob | null> => {
       return new Promise((resolve) => {
+        stopLiveSpeechMonitor();
         const rec = mediaRecorderRef.current;
         if (!rec || rec.state === 'inactive') {
           resolve(finalRecordedBlobRef.current);
@@ -441,34 +599,6 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
           resolve(finalRecordedBlobRef.current);
         }
       });
-    };
-
-    // 4. Control: FINALIZAR (Stop and allow preview)
-    const handleStopAndFinalize = async () => {
-      if (state !== 'recording' && state !== 'paused') return;
-
-      if (timerIntervalRef.current) {
-        clearInterval(timerIntervalRef.current);
-        timerIntervalRef.current = null;
-      }
-      if (animFrameRef.current) {
-        cancelAnimationFrame(animFrameRef.current);
-        animFrameRef.current = null;
-      }
-      setVolumeLevel(0);
-
-      await stopRecordingAndGetBlob();
-
-      if (audioStreamRef.current) {
-        try {
-          audioStreamRef.current.getTracks().forEach((t) => t.stop());
-        } catch {
-          // ignore
-        }
-        audioStreamRef.current = null;
-      }
-
-      setState('stopped');
     };
 
     // 5. Control: ENVIAR & TRANSCRIBIR (works while recording, paused, or stopped)
@@ -507,6 +637,8 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
       try {
         setState('uploading');
         setErrorMsg(null);
+        setThirtySecAlert(null);
+        setQualityAlert(null);
 
         // Convert blob to Base64
         const reader = new FileReader();
@@ -522,7 +654,7 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
 
         const duration = timerSeconds > 0 ? timerSeconds : 1;
 
-        // Send to server: persists voice recording, transcribes with Gemini, saves in Firestore
+        // Send to server: persists voice recording, strictly transcribes without hallucinating, saves in Firestore
         const res = await fetch('/api/participant/audio/upload', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -533,6 +665,7 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
             audioBase64,
             mimeType: audioBlob.type || 'audio/webm',
             durationSeconds: duration,
+            clientTranscription: liveClientTranscriptRef.current || undefined,
           }),
         });
 
@@ -542,6 +675,10 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
         }
 
         const returnedTranscription = (data.data.transcription || '').trim();
+        const returnedQuality: 'clear' | 'noisy' | 'unintelligible' | 'silent' =
+          data.data.audioQuality || (returnedTranscription.length > 0 ? 'clear' : 'unintelligible');
+        const returnedWarning: string | undefined = data.data.qualityWarning;
+        const returnedSuggestion: string | undefined = data.data.suggestion;
 
         const audioAttachment: AnswerVoiceAttachment = {
           id: data.data.id,
@@ -562,6 +699,35 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
         const nextAudios = [...savedAudios.filter((a) => a.id !== audioAttachment.id), audioAttachment];
         setSavedAudios(nextAudios);
 
+        // Show quality alert banner if audio was unintelligible, silent, or had high background noise
+        if (
+          returnedQuality === 'unintelligible' ||
+          returnedQuality === 'silent' ||
+          returnedTranscription.length === 0
+        ) {
+          setQualityAlert({
+            audioQuality: returnedQuality === 'silent' ? 'silent' : 'unintelligible',
+            warning:
+              returnedWarning ||
+              'No hemos logrado escucharte correctamente ni identificar ninguna palabra legible en tu grabación.',
+            suggestion:
+              returnedSuggestion ||
+              'Si hay mucho ruido de fondo, te sugerimos moverte a un lugar sin ruido y revisar tu micrófono. Tu archivo de voz se guardó, pero recuerda que también tienes la opción de escribir tu respuesta por tu cuenta usando el teclado.',
+          });
+        } else if (returnedQuality === 'noisy') {
+          setQualityAlert({
+            audioQuality: 'noisy',
+            warning:
+              returnedWarning ||
+              'Detectamos bastante ruido de fondo en tu grabación. Se transcribieron únicamente las palabras que lograron escucharse con claridad.',
+            suggestion:
+              returnedSuggestion ||
+              'Te sugerimos moverte a un lugar sin ruido de fondo para tus próximas grabaciones, o bien revisar y completar tu respuesta directamente usando el teclado.',
+          });
+        } else {
+          setQualityAlert(null);
+        }
+
         // Reset recorder state to idle ready to record another note if desired
         setState('idle');
         setTimerSeconds(0);
@@ -573,12 +739,15 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
           setPreviewAudioUrl(null);
         }
 
-        // Notify parent callback with newly created audio and the updated list
-        onVoiceSubmitted(audioAttachment, returnedTranscription, nextAudios);
+        // Notify parent callback with newly created audio, transcription, and quality diagnosis
+        onVoiceSubmitted(audioAttachment, returnedTranscription, nextAudios, {
+          audioQuality: returnedQuality,
+          qualityWarning: returnedWarning,
+          suggestion: returnedSuggestion,
+        });
 
         return audioAttachment;
       } catch (err: any) {
-        console.warn('Error uploading voice recording:', err);
         setErrorMsg(err.message || 'Error de conexión al enviar el archivo de voz.');
         setState('stopped');
         return null;
@@ -681,6 +850,135 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
             </div>
           )}
 
+          {/* 30-Second Auto-Pause Alert when no legible words are detected */}
+          {thirtySecAlert && (
+            <div
+              role="alert"
+              className="mb-4 p-4 bg-amber-50 border-2 border-amber-300 rounded-xl space-y-2.5 shadow-xs"
+            >
+              <div className="flex items-start gap-2.5">
+                <AlertCircle className="w-5 h-5 shrink-0 text-amber-700 mt-0.5" />
+                <div className="flex-1 space-y-1">
+                  <h5 className="font-serif font-bold text-sm text-amber-950">
+                    {thirtySecAlert.title}
+                  </h5>
+                  <p className="text-xs text-amber-900 leading-relaxed">
+                    {thirtySecAlert.message}
+                  </p>
+                  <p className="text-xs font-medium text-stone-800 bg-white/80 p-2.5 rounded-lg border border-amber-200 leading-relaxed">
+                    {thirtySecAlert.suggestion}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setThirtySecAlert(null)}
+                  className="text-amber-600 hover:text-amber-900 p-0.5 rounded cursor-pointer"
+                  title="Cerrar alerta"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 pt-1 pl-7">
+                <button
+                  type="button"
+                  onClick={handleCancel}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-rose-700 hover:bg-rose-800 text-white text-xs font-semibold rounded-lg shadow-xs transition cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                  <span>Cancelar grabación</span>
+                </button>
+
+                {onFocusKeyboard && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      handleCancel();
+                      onFocusKeyboard();
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-amber-800 hover:bg-amber-900 text-white text-xs font-semibold rounded-lg shadow-xs transition cursor-pointer"
+                  >
+                    <FileText className="w-3.5 h-3.5" />
+                    <span>Escribir con el teclado</span>
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  onClick={handleResume}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-white hover:bg-emerald-50 text-emerald-900 border border-emerald-300 text-xs font-semibold rounded-lg transition cursor-pointer"
+                >
+                  <Play className="w-3.5 h-3.5" />
+                  <span>Continuar grabando</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Post-Upload Audio Quality / Unintelligible Speech Alert */}
+          {qualityAlert && (
+            <div
+              role="alert"
+              className={`mb-4 p-4 rounded-xl border-2 space-y-2.5 shadow-xs ${
+                qualityAlert.audioQuality === 'noisy'
+                  ? 'bg-amber-50 border-amber-300 text-amber-950'
+                  : 'bg-rose-50 border-rose-300 text-rose-950'
+              }`}
+            >
+              <div className="flex items-start gap-2.5">
+                <AlertCircle
+                  className={`w-5 h-5 shrink-0 mt-0.5 ${
+                    qualityAlert.audioQuality === 'noisy' ? 'text-amber-700' : 'text-rose-700'
+                  }`}
+                />
+                <div className="flex-1 space-y-1">
+                  <h5 className="font-serif font-bold text-sm">
+                    {qualityAlert.audioQuality === 'noisy'
+                      ? 'Aviso: Se detectó mucho ruido de fondo en tu audio'
+                      : 'Alerta: No hemos logrado escucharte correctamente'}
+                  </h5>
+                  <p className="text-xs leading-relaxed">{qualityAlert.warning}</p>
+                  <p className="text-xs font-medium bg-white/85 p-2.5 rounded-lg border border-stone-200/80 text-stone-800 leading-relaxed">
+                    {qualityAlert.suggestion}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setQualityAlert(null)}
+                  className="text-stone-500 hover:text-stone-800 p-0.5 rounded cursor-pointer"
+                  title="Cerrar alerta"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 pt-1 pl-7">
+                {onFocusKeyboard && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onFocusKeyboard();
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-amber-800 hover:bg-amber-900 text-white text-xs font-semibold rounded-lg shadow-xs transition cursor-pointer"
+                  >
+                    <FileText className="w-3.5 h-3.5" />
+                    <span>Escribir mi respuesta con el teclado</span>
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  onClick={handleStartRecording}
+                  disabled={disabled}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-white hover:bg-stone-100 text-stone-800 border border-stone-300 text-xs font-semibold rounded-lg transition cursor-pointer"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Intentar grabar de nuevo en un lugar sin ruido</span>
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Error notification banner with recovery actions */}
           {errorMsg && (
             <div className="mb-4 p-3.5 bg-amber-50 border border-amber-300 rounded-xl space-y-2">
@@ -706,6 +1004,16 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
                   <Upload className="w-3.5 h-3.5" />
                   Subir archivo de audio o nota de voz
                 </button>
+                {onFocusKeyboard && (
+                  <button
+                    type="button"
+                    onClick={onFocusKeyboard}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-stone-100 text-stone-800 border border-stone-300 text-xs font-semibold rounded-lg transition cursor-pointer"
+                  >
+                    <FileText className="w-3.5 h-3.5" />
+                    Escribir con el teclado
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={handleStartRecording}
@@ -757,7 +1065,7 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
             </div>
           )}
 
-          {/* 2. STATE: RECORDING or PAUSED (Controls: Pausar/Continuar, Finalizar, Cancelar, Enviar y Transcribir) */}
+          {/* 2. STATE: RECORDING or PAUSED (Controls: Pausar/Continuar, Cancelar, Enviar y Transcribir) */}
           {(state === 'recording' || state === 'paused') && (
             <div className="space-y-4 py-2">
               {/* Sound Wave Visualizer */}
@@ -781,7 +1089,7 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
                 )}
               </div>
 
-              {/* CONTROLES: Pausar / Continuar, Finalizar, Cancelar, Enviar y Transcribir */}
+              {/* CONTROLES: Pausar / Continuar, Cancelar, Enviar y Transcribir */}
               <div className="bg-white p-3 rounded-xl border border-stone-200 flex flex-wrap items-center justify-between gap-2 shadow-xs">
                 <div className="flex flex-wrap items-center gap-2">
                   {/* PAUSAR (visible al estar grabando) */}

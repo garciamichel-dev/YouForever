@@ -1,6 +1,6 @@
 {
-  "name": "Legado Digital - Entrevistas de Vida Asistidas por IA",
-  "description": "Plataforma full-stack para recopilar y preservar historias de vida y legado digital mediante entrevistas éticas asistidas por Gemini y Firebase.",
+  "name": "ForeverYou - Entrevistas de Vida Asistidas por IA",
+  "description": "ForeverYou: Plataforma full-stack para recopilar y preservar historias de vida y patrimonio familiar mediante entrevistas éticas asistidas por IA.",
   "requestFramePermissions": ["microphone", "camera"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

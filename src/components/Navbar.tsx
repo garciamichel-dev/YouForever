@@ -34,7 +34,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             </div>
             <div>
               <span className="font-serif text-lg font-bold tracking-tight text-amber-50">
-                Legado Digital
+                ForeverYou
               </span>
               <span className="block text-[11px] text-stone-400 font-sans tracking-wide">
                 Entrevistas de Vida &amp; Patrimonio Familiar

@@ -91,6 +91,9 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
   const [currentAudios, setCurrentAudios] = useState<AnswerVoiceAttachment[]>([]);
   const currentAudio = currentAudios.length > 0 ? currentAudios[currentAudios.length - 1] : null;
   const voiceRecorderRef = useRef<VoiceRecorderHandle | null>(null);
+  const answerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const adaptiveTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const additionalTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const [branchChoice, setBranchChoice] = useState<'yes' | 'no' | null>(null);
   const [savingAnswer, setSavingAnswer] = useState(false);
   const [saveSuccessNotice, setSaveSuccessNotice] = useState<string | null>(null);
@@ -1515,10 +1518,14 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                 initialAudio={currentAudio}
                 initialAudios={currentAudios}
                 hideSavedList={true}
-                onVoiceSubmitted={(audio, transcription, allAudios) => {
+                onFocusKeyboard={() => {
+                  answerTextareaRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                  answerTextareaRef.current?.focus();
+                }}
+                onVoiceSubmitted={(audio, transcription, allAudios, diagnosis) => {
                   setCurrentAudios(allAudios);
-                  if (transcription && transcription.trim().length > 0) {
-                    const cleanTranscript = transcription.trim();
+                  const cleanTranscript = (transcription || '').trim();
+                  if (cleanTranscript.length > 0) {
                     setCurrentAnswerText((prev) => {
                       const cleanPrev = prev.trim();
                       if (!cleanPrev || cleanPrev === 'No aplica a mi historia.') {
@@ -1529,11 +1536,13 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                       }
                       return `${cleanPrev}\n\n[Nota de voz]: ${cleanTranscript}`;
                     });
+                    if (diagnosis?.audioQuality !== 'noisy') {
+                      setSaveSuccessNotice(
+                        'Archivo de voz y transcripción guardados con éxito en la base de datos.'
+                      );
+                      setTimeout(() => setSaveSuccessNotice(null), 3500);
+                    }
                   }
-                  setSaveSuccessNotice(
-                    'Archivo de voz y transcripción guardados con éxito en la base de datos.'
-                  );
-                  setTimeout(() => setSaveSuccessNotice(null), 3500);
                 }}
                 onVoiceDeleted={(delId) => {
                   setCurrentAudios((prev) => prev.filter((a) => a.id !== delId));
@@ -1547,6 +1556,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                   Tu recuerdo o testimonio personal:
                 </label>
                 <textarea
+                  ref={answerTextareaRef}
                   rows={5}
                   disabled={!isInterviewOpen || Boolean(adaptiveQuestion)}
                   placeholder={
@@ -1693,6 +1703,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                   </p>
 
                   <textarea
+                    ref={adaptiveTextareaRef}
                     rows={4}
                     placeholder="Profundiza en este recuerdo con los detalles, emociones o anécdotas que desees compartir..."
                     value={adaptiveAnswerText}
@@ -1706,17 +1717,26 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                     questionId={`adapt_${adaptiveQuestion.parentQuestionId}`}
                     questionText={adaptiveQuestion.text}
                     initialAudio={adaptiveAudio}
-                    onVoiceSubmitted={(audio, transcription) => {
+                    onFocusKeyboard={() => {
+                      adaptiveTextareaRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                      adaptiveTextareaRef.current?.focus();
+                    }}
+                    onVoiceSubmitted={(audio, transcription, _allAudios, diagnosis) => {
                       setAdaptiveAudio(audio);
-                      setAdaptiveAnswerText((prev) => {
-                        const cleanPrev = prev.trim();
-                        if (!cleanPrev) return transcription;
-                        return `${cleanPrev}\n\n[Nota de voz]: ${transcription}`;
-                      });
-                      setSaveSuccessNotice(
-                        'Archivo de voz para profundización guardado con éxito en la base de datos.'
-                      );
-                      setTimeout(() => setSaveSuccessNotice(null), 3500);
+                      const cleanTranscript = (transcription || '').trim();
+                      if (cleanTranscript.length > 0) {
+                        setAdaptiveAnswerText((prev) => {
+                          const cleanPrev = prev.trim();
+                          if (!cleanPrev) return cleanTranscript;
+                          return `${cleanPrev}\n\n[Nota de voz]: ${cleanTranscript}`;
+                        });
+                        if (diagnosis?.audioQuality !== 'noisy') {
+                          setSaveSuccessNotice(
+                            'Archivo de voz para profundización guardado con éxito en la base de datos.'
+                          );
+                          setTimeout(() => setSaveSuccessNotice(null), 3500);
+                        }
+                      }
                     }}
                     onVoiceDeleted={(_id) => setAdaptiveAudio(null)}
                   />
@@ -1985,6 +2005,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
             </p>
 
             <textarea
+              ref={additionalTextareaRef}
               rows={4}
               placeholder="Escribe aquí la información adicional que deseas incorporar..."
               value={additionalMemoryText}
@@ -1998,17 +2019,26 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
               questionId={`free_info_${Date.now()}`}
               questionText="Información adicional incorporada por el entrevistado"
               initialAudio={additionalAudio}
-              onVoiceSubmitted={(audio, transcription) => {
+              onFocusKeyboard={() => {
+                additionalTextareaRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                additionalTextareaRef.current?.focus();
+              }}
+              onVoiceSubmitted={(audio, transcription, _allAudios, diagnosis) => {
                 setAdditionalAudio(audio);
-                setAdditionalMemoryText((prev) => {
-                  const cleanPrev = prev.trim();
-                  if (!cleanPrev) return transcription;
-                  return `${cleanPrev}\n\n[Nota de voz]: ${transcription}`;
-                });
-                setSaveSuccessNotice(
-                  'Archivo de voz para información adicional guardado en la base de datos.'
-                );
-                setTimeout(() => setSaveSuccessNotice(null), 3500);
+                const cleanTranscript = (transcription || '').trim();
+                if (cleanTranscript.length > 0) {
+                  setAdditionalMemoryText((prev) => {
+                    const cleanPrev = prev.trim();
+                    if (!cleanPrev) return cleanTranscript;
+                    return `${cleanPrev}\n\n[Nota de voz]: ${cleanTranscript}`;
+                  });
+                  if (diagnosis?.audioQuality !== 'noisy') {
+                    setSaveSuccessNotice(
+                      'Archivo de voz para información adicional guardado en la base de datos.'
+                    );
+                    setTimeout(() => setSaveSuccessNotice(null), 3500);
+                  }
+                }
               }}
               onVoiceDeleted={(_id) => setAdditionalAudio(null)}
             />

@@ -669,7 +669,7 @@ DIRECTRICES PARA LA CREACIÓN DEL LIBRO COMPLETO DE HISTORIA Y LEGADO:
 
     const markdownLines: string[] = [
       `# ${interview.title}`,
-      `*Manuscrito de Legado Digital - Compilación Fidedigna*`,
+      `*Manuscrito de ForeverYou - Compilación Fidedigna*`,
       `\n## Introducción y Participantes\n`,
       ...participants.map((p) => `- **${p.name}** (${p.relationship})`),
     ];
@@ -733,20 +733,46 @@ DIRECTRICES PARA LA CREACIÓN DEL LIBRO COMPLETO DE HISTORIA Y LEGADO:
   }
 }
 
+export type AudioQualityStatus = 'clear' | 'noisy' | 'unintelligible' | 'silent';
+
+export interface AudioTranscriptionDiagnosis {
+  transcription: string;
+  audioQuality: AudioQualityStatus;
+  hasLegibleSpeech: boolean;
+  qualityWarning?: string;
+  suggestion?: string;
+}
+
+const HALLUCINATION_PATTERNS = [
+  /^\[?\s*(silencio|ruido|inaudible|m[uú]sica|sin audio|no se escucha|audio ininteligible)\s*\]?\.?$/i,
+  /subt[ií]tulos realizados por/i,
+  /amara\.org/i,
+  /gracias por ver el video/i,
+  /suscr[ií]bete al canal/i,
+];
+
 /**
- * Transcribes user voice recording with Gemini Multimodal Audio model.
- * Returns faithful Spanish transcription with proper punctuation and accents.
+ * Strictly analyzes and transcribes user voice recording without question context
+ * to prevent any hallucinated or invented stories when audio is noisy, low-quality, or silent.
  */
-export async function transcribeAudioWithGemini(params: {
+export async function analyzeAndTranscribeAudioWithGemini(params: {
   audioBase64: string;
   mimeType?: string;
-  questionContext?: string;
-  participantName?: string;
-}): Promise<string> {
-  const { audioBase64, mimeType = 'audio/webm', questionContext, participantName } = params;
+}): Promise<AudioTranscriptionDiagnosis> {
+  const { audioBase64, mimeType = 'audio/webm' } = params;
+
+  const unintelligibleDefault: AudioTranscriptionDiagnosis = {
+    transcription: '',
+    audioQuality: 'unintelligible',
+    hasLegibleSpeech: false,
+    qualityWarning:
+      'No hemos logrado escucharte correctamente ni identificar palabras legibles en tu grabación.',
+    suggestion:
+      'Si hay ruido de fondo, te sugerimos moverte a un lugar sin ruido y revisar tu micrófono. Recuerda que también tienes la opción de escribir tu respuesta por tu cuenta usando el teclado.',
+  };
 
   try {
-    let cleanBase64 = audioBase64;
+    let cleanBase64 = audioBase64 || '';
     if (cleanBase64.startsWith('data:')) {
       const commaIdx = cleanBase64.indexOf(',');
       if (commaIdx !== -1) {
@@ -755,28 +781,48 @@ export async function transcribeAudioWithGemini(params: {
     }
     cleanBase64 = cleanBase64.replace(/\s+/g, '');
 
-    // Clean mimeType string (e.g. "audio/webm;codecs=opus" -> "audio/webm")
+    // If payload is empty or too small to contain any human speech frame
+    if (cleanBase64.length < 1200) {
+      return {
+        transcription: '',
+        audioQuality: 'silent',
+        hasLegibleSpeech: false,
+        qualityWarning:
+          'No hemos logrado escuchar tu voz ni identificar ninguna palabra legible en la grabación.',
+        suggestion:
+          'Por favor revisa que tu micrófono funcione correctamente y acércate un poco más al hablar, o escribe tu respuesta por tu cuenta usando el teclado.',
+      };
+    }
+
     let normalizedMime = mimeType || 'audio/webm';
     if (normalizedMime.includes(';')) {
       normalizedMime = normalizedMime.split(';')[0].trim();
     }
 
-    const transcribePrompt = `Eres un asistente especializado en transcripción fidedigna e íntegra de archivos de voz para historias de vida y legados biográficos en español.
-El audio fue grabado por el entrevistado "${participantName || 'Participante'}" en respuesta a: "${questionContext || 'Pregunta sobre su historia de vida y recuerdos'}".
+    // IMPORTANT: Do NOT pass question text or participant name to the transcription model.
+    // Providing the interview question when audio is noisy/inaudible causes the model to invent a story answering the question.
+    const strictAcousticPrompt = `Eres un transcriptor acústico forense estricto en español.
+Tu única tarea es escuchar el archivo de audio adjunto, evaluar su calidad acústica y transcribir EXCLUSIVAMENTE las palabras reales que pronuncie la persona.
 
-Instrucciones de transcripción obligatorias:
-1. Transcribe la totalidad de lo que el entrevistado expresa en el audio de principio a fin, sin resumir, sin omitir tramos y sin truncar el contenido, incluso en grabaciones largas de 5 minutos o más.
-2. Emplea ortografía, acentuación y puntuación natural y adecuada en español (puntos, comas, signos de interrogación o exclamación).
-3. Devuelve ÚNICAMENTE el texto transcrito.
-4. No agregues introducciones, prefacios, explicaciones, timestamps ni etiquetas como "Transcripción:".
-5. Si no se escucha voz perceptible o solo hay silencio/ruido ininteligible, responde con una cadena vacía.`;
+REGLAS ESTRICTAS CONTRA INVENCIONES (CERO ALUCINACIONES):
+1. NUNCA inventes historias, nombres, lugares, fechas ni frases que no se escuchen claramente en el audio.
+2. NUNCA intentes adivinar, completar ni suponer lo que la persona quiso decir si el audio es confuso, muy bajo o tiene interferencia.
+3. Clasifica el campo "audioQuality" en uno de estos 4 valores:
+   - "silent": Solo hay silencio, soplidos al micrófono o volumen tan bajo que no se distingue voz humana. En este caso establece "hasLegibleSpeech": false y "transcription": "".
+   - "unintelligible": Se percibe ruido, murmullos lejanos o distorsión, pero NO se logra comprender ninguna palabra legible con certeza. En este caso establece "hasLegibleSpeech": false y "transcription": "".
+   - "noisy": Hay mucho ruido de fondo (televisión, calle, viento, eco o interferencia), pero SÍ se logran comprender algunas palabras o frases reales con certeza. En este caso establece "hasLegibleSpeech": true y escribe en "transcription" ÚNICAMENTE las palabras que realmente escuchaste sin inventar el resto.
+   - "clear": La voz del participante se escucha clara y comprensible. Establece "hasLegibleSpeech": true y transcribe con fidelidad todo lo expresado en español con puntuación adecuada.
+4. No incluyas etiquetas como "[Ruido]", "[Inaudible]" ni explicaciones dentro de "transcription".`;
 
-    // Audio transcription timeout: 90 seconds
     const AUDIO_TIMEOUT_MS = 90000;
+    let parsedResult: {
+      audioQuality?: AudioQualityStatus;
+      hasLegibleSpeech?: boolean;
+      transcription?: string;
+    } | null = null;
 
-    let rawText = '';
     for (const modelName of TEXT_FALLBACK_MODELS) {
-      if (rawText) break;
+      if (parsedResult) break;
       try {
         const callPromise = ai.models.generateContent({
           model: modelName,
@@ -788,33 +834,124 @@ Instrucciones de transcripción obligatorias:
               },
             },
             {
-              text: transcribePrompt,
+              text: strictAcousticPrompt,
             },
           ],
+          config: {
+            temperature: 0,
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                audioQuality: {
+                  type: Type.STRING,
+                  enum: ['clear', 'noisy', 'unintelligible', 'silent'],
+                },
+                hasLegibleSpeech: {
+                  type: Type.BOOLEAN,
+                },
+                transcription: {
+                  type: Type.STRING,
+                },
+              },
+              required: ['audioQuality', 'hasLegibleSpeech', 'transcription'],
+            },
+          },
         });
 
         const response = await withTimeout(callPromise, AUDIO_TIMEOUT_MS, () => null);
         if (response && response.text) {
-          rawText = response.text.trim();
+          const extracted = safeJsonExtract<{
+            audioQuality?: AudioQualityStatus;
+            hasLegibleSpeech?: boolean;
+            transcription?: string;
+          } | null>(response.text, null);
+          if (extracted && extracted.audioQuality) {
+            parsedResult = extracted;
+          }
         }
       } catch (_err) {
-        // Proceed to next fallback model silently
+        // Proceed to next model in fallback chain silently
       }
     }
 
-    if (!rawText) {
-      return '';
+    if (!parsedResult) {
+      return unintelligibleDefault;
     }
 
-    // Strip any accidental markdown formatting or prefixes like "Transcripción:"
-    const cleaned = rawText
+    let cleanedText = (parsedResult.transcription || '')
       .replace(/^[\*\#\s]*transcripci[oó]n[\:\s\-]*/i, '')
+      .replace(/\[(?:inaudible|ruido|silencio|m[uú]sica)\]/gi, '')
       .replace(/^\"+|\"+$/g, '')
       .trim();
 
-    return cleaned;
+    // Check against known non-speech hallucination phrases
+    if (HALLUCINATION_PATTERNS.some((regex) => regex.test(cleanedText))) {
+      cleanedText = '';
+    }
+
+    // Count actual legible words (at least 2 letters)
+    const legibleWords = cleanedText
+      .split(/\s+/)
+      .map((w) => w.replace(/[^a-záéíóúüñA-ZÁÉÍÓÚÜÑ]/g, ''))
+      .filter((w) => w.length >= 2);
+
+    const hasValidWords = legibleWords.length > 0 && parsedResult.hasLegibleSpeech !== false;
+    const rawQuality = parsedResult.audioQuality || 'unintelligible';
+
+    if (!hasValidWords || rawQuality === 'silent' || rawQuality === 'unintelligible') {
+      const finalQuality: AudioQualityStatus = rawQuality === 'silent' ? 'silent' : 'unintelligible';
+      return {
+        transcription: '',
+        audioQuality: finalQuality,
+        hasLegibleSpeech: false,
+        qualityWarning:
+          finalQuality === 'silent'
+            ? 'No hemos logrado escuchar tu voz ni identificar ninguna palabra legible en la grabación.'
+            : 'No hemos logrado escucharte correctamente ni identificar palabras legibles debido al ruido o la calidad del audio.',
+        suggestion:
+          finalQuality === 'silent'
+            ? 'Por favor revisa que tu micrófono esté encendido y sin obstrucciones, o acércate un poco más al hablar. Recuerda que también tienes la opción de escribir tu respuesta por tu cuenta usando el teclado.'
+            : 'Si hay mucho ruido de fondo, te sugerimos moverte a un lugar tranquilo sin ruido y volver a intentarlo. Recuerda que también tienes la opción de escribir tu respuesta por tu cuenta usando el teclado.',
+      };
+    }
+
+    if (rawQuality === 'noisy') {
+      return {
+        transcription: cleanedText,
+        audioQuality: 'noisy',
+        hasLegibleSpeech: true,
+        qualityWarning:
+          'Detectamos bastante ruido de fondo en tu grabación. Se transcribieron únicamente las palabras que lograron escucharse con claridad.',
+        suggestion:
+          'Te sugerimos moverte a un lugar sin ruido de fondo para que tu voz se escuche con mayor nitidez, o bien revisar y complementar tu texto directamente usando el teclado.',
+      };
+    }
+
+    return {
+      transcription: cleanedText,
+      audioQuality: 'clear',
+      hasLegibleSpeech: true,
+    };
   } catch (_err) {
-    return '';
+    return unintelligibleDefault;
   }
+}
+
+/**
+ * Backwards-compatible wrapper that returns only the faithful transcription string
+ * (or empty string if unintelligible/silent).
+ */
+export async function transcribeAudioWithGemini(params: {
+  audioBase64: string;
+  mimeType?: string;
+  questionContext?: string;
+  participantName?: string;
+}): Promise<string> {
+  const result = await analyzeAndTranscribeAudioWithGemini({
+    audioBase64: params.audioBase64,
+    mimeType: params.mimeType,
+  });
+  return result.transcription;
 }
 

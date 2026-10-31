@@ -60,7 +60,7 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({
                 {adminEmail}
               </div>
               <p className="text-xs text-stone-500 pt-1">
-                Esta cuenta no figura en la lista de administradores autorizados para gestionar la plataforma Legado Digital.
+                Esta cuenta no figura en la lista de administradores autorizados para gestionar la plataforma ForeverYou.
               </p>
             </div>
 

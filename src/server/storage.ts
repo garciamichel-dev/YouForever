@@ -61,7 +61,8 @@ import {
   evaluateNarrativeSufficiency,
   generateAdaptiveFollowUp,
   generateManuscriptDraft,
-  transcribeAudioWithGemini,
+  analyzeAndTranscribeAudioWithGemini,
+  AudioQualityStatus,
 } from './geminiService.ts';
 
 const firebaseApp = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
@@ -1068,23 +1069,39 @@ class StorageManager {
 
     const mimeType = params.mimeType || 'audio/webm';
     let transcription = '';
+    let audioQuality: AudioQualityStatus = 'clear';
+    let qualityWarning: string | undefined;
+    let suggestion: string | undefined;
 
-    // Generate high-fidelity Spanish transcription with Gemini
+    // Generate strict non-hallucinating Spanish transcription & acoustic quality diagnosis with Gemini
     try {
-      transcription = await transcribeAudioWithGemini({
+      const diagnosis = await analyzeAndTranscribeAudioWithGemini({
         audioBase64: params.audioBase64,
         mimeType,
-        questionContext: resolvedQuestionText,
-        participantName: participant.name,
       });
-    } catch (err) {
-      console.warn('Error during Gemini audio transcription:', err);
+      transcription = diagnosis.transcription || '';
+      audioQuality = diagnosis.audioQuality;
+      qualityWarning = diagnosis.qualityWarning;
+      suggestion = diagnosis.suggestion;
+    } catch (_err) {
+      audioQuality = 'unintelligible';
+      qualityWarning =
+        'No hemos logrado escucharte correctamente ni identificar palabras legibles en tu grabación.';
+      suggestion =
+        'Si hay ruido de fondo, te sugerimos moverte a un lugar sin ruido y revisar tu micrófono. Recuerda que también tienes la opción de escribir tu respuesta por tu cuenta usando el teclado.';
     }
 
-    // Fall back to client-provided speech recognition transcription if Gemini produced nothing
+    // Only use client-provided live speech recognition if it captured real words and Gemini returned empty
     if (!transcription || transcription.trim().length === 0) {
-      if (params.clientTranscription && params.clientTranscription.trim().length > 0) {
+      if (params.clientTranscription && params.clientTranscription.trim().length >= 3) {
         transcription = params.clientTranscription.trim();
+        if (audioQuality === 'unintelligible' || audioQuality === 'silent') {
+          audioQuality = 'noisy';
+          qualityWarning =
+            'Detectamos ruido o baja señal en la grabación, por lo que solo se transcribieron las palabras identificadas en vivo.';
+          suggestion =
+            'Te sugerimos revisar el texto o moverte a un lugar sin ruido de fondo. También puedes completar tu respuesta directamente usando el teclado.';
+        }
       } else {
         transcription = '';
       }
@@ -1113,11 +1130,15 @@ class StorageManager {
         path.join(audioDir, `${audioId}.bin`),
         Buffer.from(rawBase64.replace(/\s+/g, ''), 'base64')
       );
-    } catch (diskErr) {
-      console.warn('[Disk Audio Storage Note]:', diskErr);
+    } catch (_diskErr) {
+      // Non-fatal
     }
 
-    const audioRecord: InterviewAudioRecord = {
+    const audioRecord: InterviewAudioRecord & {
+      audioQuality?: AudioQualityStatus;
+      qualityWarning?: string;
+      suggestion?: string;
+    } = {
       id: audioId,
       interviewId: interview.id,
       questionId: params.questionId,
@@ -1130,6 +1151,9 @@ class StorageManager {
       durationSeconds: params.durationSeconds || 0,
       mimeType,
       createdAt: new Date().toISOString(),
+      audioQuality,
+      qualityWarning,
+      suggestion,
     };
 
     this.audios.set(audioId, audioRecord);
@@ -1148,6 +1172,7 @@ class StorageManager {
       questionId: params.questionId,
       durationSeconds: params.durationSeconds,
       transcriptionLength: transcription.length,
+      audioQuality,
     });
 
     return audioRecord;

@@ -56,7 +56,7 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Legado Digital full-stack dev server running on port ${PORT}`);
+    console.log(`ForeverYou full-stack dev server running on port ${PORT}`);
   });
 }
 
