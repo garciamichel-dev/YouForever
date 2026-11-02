@@ -169,9 +169,9 @@ export const PrivacyConsentScreen: React.FC<PrivacyConsentScreenProps> = ({
           </div>
         </div>
 
-        {/* Casilla única y declaración completa (REGLA FUNDAMENTAL) */}
+        {/* Casilla única y declaración breve de aceptación */}
         <div className="space-y-3 pt-1">
-          <label className="flex items-start gap-3.5 p-4 sm:p-5 rounded-2xl border-2 border-amber-400/80 bg-amber-50/30 hover:bg-amber-50/60 cursor-pointer transition-colors">
+          <label className="flex items-center gap-3.5 p-4 sm:p-5 rounded-2xl border-2 border-amber-400/80 bg-amber-50/30 hover:bg-amber-50/60 cursor-pointer transition-colors">
             <input
               type="checkbox"
               checked={isChecked}
@@ -179,9 +179,9 @@ export const PrivacyConsentScreen: React.FC<PrivacyConsentScreenProps> = ({
                 setIsChecked(e.target.checked);
                 if (rejectedNotice) setRejectedNotice(false);
               }}
-              className="w-5 h-5 mt-1 rounded border-stone-400 text-amber-700 focus:ring-amber-500 shrink-0 cursor-pointer"
+              className="w-5 h-5 rounded border-stone-400 text-amber-700 focus:ring-amber-500 shrink-0 cursor-pointer"
             />
-            <div className="text-xs sm:text-sm text-stone-800 leading-relaxed font-sans text-justify select-none">
+            <div className="text-xs sm:text-sm font-medium text-stone-900 leading-relaxed font-sans text-left select-none">
               {declarationText}
             </div>
           </label>

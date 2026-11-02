@@ -104,7 +104,7 @@ export function computeSha256(content: string): string {
  */
 export function buildConsentDeclarationText(participantFullName: string): string {
   const cleanName = participantFullName.trim();
-  return `Confirmo que soy ${cleanName}, la persona identificada en esta entrevista. Declaro que he tenido acceso al Aviso de Privacidad Simplificado y al Aviso de Privacidad Integral de ForeverYou, que he leído o podido consultar sus secciones, que conozco y acepto íntegramente sus condiciones y que autorizo expresamente el tratamiento de los datos personales que voluntariamente proporcione, incluidos testimonios, grabaciones, fotografías y, cuando corresponda, datos sensibles, financieros o patrimoniales, para las finalidades necesarias de recopilación, conservación, procesamiento mediante inteligencia artificial y elaboración de mi libro autobiográfico, conforme a lo establecido en dichos avisos. Entiendo que las finalidades opcionales que requieren una autorización independiente no se activan automáticamente con esta aceptación, y que conservo los derechos y mecanismos de revocación establecidos en el Aviso de Privacidad.`;
+  return `Confirmo que soy ${cleanName} y he leído y acepto el aviso de privacidad`;
 }
 
 /**

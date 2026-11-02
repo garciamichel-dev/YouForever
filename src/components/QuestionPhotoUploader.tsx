@@ -279,15 +279,15 @@ export const QuestionPhotoUploader: React.FC<QuestionPhotoUploaderProps> = ({
 
   if (!isOpen) {
     return (
-      <div className="pt-1">
+      <div className="pt-1 flex justify-center">
         <button
           type="button"
           disabled={disabled}
           onClick={() => setIsOpen(true)}
-          className="inline-flex items-center gap-2 text-xs font-semibold text-amber-800 hover:text-amber-950 bg-amber-50/70 hover:bg-amber-100/80 border border-amber-200/90 px-3.5 py-2 rounded-lg transition cursor-pointer disabled:opacity-50"
+          className="inline-flex items-center justify-center gap-2 text-xs font-semibold text-amber-800 hover:text-amber-950 bg-amber-50/70 hover:bg-amber-100/80 border border-amber-200/90 px-4 py-2 rounded-lg transition cursor-pointer disabled:opacity-50"
         >
           <Camera className="w-3.5 h-3.5 text-amber-700" />
-          <span className="underline underline-offset-4">Cargar Fotografía</span>
+          <span>Añadir fotografías o recuerdos</span>
           {photos.length > 0 && (
             <span className="px-1.5 py-0.5 rounded-full bg-amber-200/80 text-amber-950 text-[10px] font-bold">
               {photos.length}

@@ -1,9 +1,9 @@
 import React from 'react';
-import { BookOpen, ShieldCheck, LogOut, HelpCircle } from 'lucide-react';
+import { BookOpen, ShieldCheck, LogOut, Sparkles } from 'lucide-react';
 
 interface NavbarProps {
-  currentView: 'admin' | 'participant';
-  onSelectView: (view: 'admin' | 'participant') => void;
+  currentView: 'admin' | 'participant' | 'conoceme';
+  onSelectView: (view: 'admin' | 'participant' | 'conoceme') => void;
   adminEmail: string | null;
   isAuthorizedAdmin: boolean;
   onLogout: () => void;
@@ -64,6 +64,18 @@ export const Navbar: React.FC<NavbarProps> = ({
                 }`}
               >
                 Portal del Participante
+              </button>
+              <button
+                onClick={() => onSelectView('conoceme')}
+                className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs sm:text-sm font-medium transition-colors cursor-pointer ${
+                  currentView === 'conoceme'
+                    ? 'bg-amber-800/80 text-amber-100 border border-amber-600/40 shadow-xs'
+                    : 'text-amber-300 hover:text-amber-100 hover:bg-stone-800'
+                }`}
+                title="Ir a la sección comercial Conóceme (/conoceme)"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                <span>Conóceme</span>
               </button>
             </nav>
           )}

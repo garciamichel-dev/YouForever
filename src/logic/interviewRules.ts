@@ -440,19 +440,175 @@ export function hashToken(token: string): string {
 }
 
 /**
- * Generate a cryptographically secure random invitation token, its SHA-256 hash, and a friendly 6-char access code.
+ * Deterministically derive an 8-character friendly access code (e.g. "LEG-8F4A") from a seed string.
+ */
+export function deriveDeterministicAccessCode(seed: string): string {
+  const hash = hashToken(seed || 'foreveryou_default_seed').toUpperCase();
+  const codePart = hash.replace(/[^A-Z0-9]/g, '').substring(0, 4).padEnd(4, '0');
+  return `LEG-${codePart}`;
+}
+
+/**
+ * Deterministically derive a 64-character hex plainToken from a seed string.
+ */
+export function deriveDeterministicPlainToken(seed: string): string {
+  return hashToken(`plain_token_${seed || 'foreveryou_default_seed'}`).toLowerCase();
+}
+
+/**
+ * Extract a clean token or access code from any user input (including full URLs,
+ * "Código: LEG-XXXX" badges, WhatsApp invitation messages, or spaced/unhyphenated codes).
+ */
+export function extractCleanTokenOrCode(rawInput: string): string {
+  if (!rawInput) return '';
+  let cleaned = rawInput.trim();
+  try {
+    if (cleaned.includes('%')) {
+      cleaned = decodeURIComponent(cleaned).trim();
+    }
+  } catch {
+    // Keep original if malformed URI encoding
+  }
+
+  // Extract from query or hash parameters if a URL was pasted
+  if (cleaned.includes('token=')) {
+    cleaned = cleaned.split('token=')[1].split('&')[0].split('#')[0].split(/\s/)[0];
+  } else if (cleaned.includes('code=')) {
+    cleaned = cleaned.split('code=')[1].split('&')[0].split('#')[0].split(/\s/)[0];
+  } else if (cleaned.includes('#token=')) {
+    cleaned = cleaned.split('#token=')[1].split('&')[0].split(/\s/)[0];
+  } else if (cleaned.includes('#code=')) {
+    cleaned = cleaned.split('#code=')[1].split('&')[0].split(/\s/)[0];
+  }
+
+  // Strip common labels copied from Admin Panel badges or WhatsApp messages
+  cleaned = cleaned
+    .replace(/^(c[oó]digo\s*(de\s*acceso)?|access\s*code|code|token|enlace)\s*[:\-]?\s*/i, '')
+    .replace(/^[👉▶️•\-\s]+/, '')
+    .replace(/["'«»]/g, '')
+    .trim();
+
+  // If the pasted text contains a LEG-XXXX pattern inside a longer message, extract it
+  const embeddedLegMatch = cleaned.match(/\bLEG[\s\-_]*([A-Z0-9]{4,8})\b/i);
+  if (embeddedLegMatch) {
+    return `LEG-${embeddedLegMatch[1].toUpperCase()}`;
+  }
+
+  // If user typed "LEG" followed by 4-8 alphanumeric chars without hyphen or with spaces (e.g. "LEG8492" or "LEG 8492")
+  const compactLegMatch = cleaned.match(/^LEG[\s\-_]*([A-Z0-9]{4,8})$/i);
+  if (compactLegMatch) {
+    return `LEG-${compactLegMatch[1].toUpperCase()}`;
+  }
+
+  return cleaned;
+}
+
+/**
+ * Resolve a token record from a collection of tokens using flexible matching across:
+ * - Access code (case-insensitive, with or without hyphen/spaces, or 4-char suffix after LEG-)
+ * - Plain token (case-insensitive to support uppercase inputs)
+ * - SHA-256 tokenHash (both exact case and lowercase hex input)
+ * - Direct token ID, participantId, or interviewId
+ */
+export function matchTokenRecord<T extends InterviewTokenRecord & { plainToken?: string }>(
+  rawInput: string,
+  tokens: Iterable<T>
+): T | undefined {
+  const cleaned = extractCleanTokenOrCode(rawInput);
+  if (!cleaned) return undefined;
+
+  const upperInput = cleaned.toUpperCase();
+  const lowerInput = cleaned.toLowerCase();
+  const alphaNumInput = upperInput.replace(/[^A-Z0-9]/g, '');
+  const legPrefixedInput =
+    alphaNumInput.length === 4 ? `LEG${alphaNumInput}` : alphaNumInput;
+
+  const hashedExact = hashToken(cleaned).toLowerCase();
+  const hashedLower = hashToken(lowerInput).toLowerCase();
+  const hashedUpper = hashToken(upperInput).toLowerCase();
+
+  const tokenList = Array.from(tokens);
+  // Prefer non-revoked tokens first
+  const orderedTokens = [
+    ...tokenList.filter((t) => !t.revoked),
+    ...tokenList.filter((t) => t.revoked),
+  ];
+
+  // Pass 1: Exact / normalized accessCode, plainToken, or tokenHash match
+  for (const tok of orderedTokens) {
+    const tokAccessUpper = (tok.accessCode || '').trim().toUpperCase();
+    const tokAccessAlphaNum = tokAccessUpper.replace(/[^A-Z0-9]/g, '');
+    const derivedByPartUpper = deriveDeterministicAccessCode(tok.participantId || tok.tokenHash).toUpperCase();
+    const derivedByPartAlphaNum = derivedByPartUpper.replace(/[^A-Z0-9]/g, '');
+    const derivedByHashUpper = deriveDeterministicAccessCode(tok.tokenHash || tok.participantId).toUpperCase();
+    const derivedByHashAlphaNum = derivedByHashUpper.replace(/[^A-Z0-9]/g, '');
+
+    if (
+      tokAccessUpper &&
+      (tokAccessUpper === upperInput ||
+        tokAccessAlphaNum === alphaNumInput ||
+        tokAccessAlphaNum === legPrefixedInput)
+    ) {
+      return tok;
+    }
+
+    if (
+      derivedByPartUpper === upperInput ||
+      derivedByPartAlphaNum === alphaNumInput ||
+      derivedByPartAlphaNum === legPrefixedInput ||
+      derivedByHashUpper === upperInput ||
+      derivedByHashAlphaNum === alphaNumInput ||
+      derivedByHashAlphaNum === legPrefixedInput
+    ) {
+      return tok;
+    }
+
+    if (tok.plainToken) {
+      const tokPlainLower = tok.plainToken.trim().toLowerCase();
+      if (tokPlainLower === lowerInput) {
+        return tok;
+      }
+    }
+
+    const tokHashLower = (tok.tokenHash || '').trim().toLowerCase();
+    if (
+      tokHashLower &&
+      (tokHashLower === lowerInput ||
+        tokHashLower === hashedExact ||
+        tokHashLower === hashedLower ||
+        tokHashLower === hashedUpper)
+    ) {
+      return tok;
+    }
+  }
+
+  // Pass 2: Direct token.id, participantId, or interviewId match
+  for (const tok of orderedTokens) {
+    if (
+      tok.id.toLowerCase() === lowerInput ||
+      tok.participantId.toLowerCase() === lowerInput ||
+      tok.interviewId.toLowerCase() === lowerInput
+    ) {
+      return tok;
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * Generate a cryptographically secure random invitation token, its SHA-256 hash, and a deterministic 8-char access code.
  */
 export function generateInvitationToken(): { plainToken: string; tokenHash: string; accessCode: string } {
   try {
     const plainToken = crypto.randomBytes(32).toString('hex');
     const tokenHash = hashToken(plainToken);
-    const randomDigits = Math.floor(1000 + Math.random() * 9000);
-    const randomChars = crypto.randomBytes(2).toString('hex').toUpperCase();
-    const accessCode = `LEG-${randomChars}${randomDigits}`.substring(0, 8);
+    const accessCode = deriveDeterministicAccessCode(tokenHash);
     return { plainToken, tokenHash, accessCode };
   } catch {
     const plainToken = Math.random().toString(36).substring(2) + Math.random().toString(36).substring(2);
-    return { plainToken, tokenHash: plainToken, accessCode: 'LEG-1234' };
+    const tokenHash = hashToken(plainToken);
+    return { plainToken, tokenHash, accessCode: deriveDeterministicAccessCode(tokenHash) };
   }
 }
 

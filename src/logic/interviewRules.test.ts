@@ -18,6 +18,9 @@ import {
   ensurePhotosPlacedInManuscript,
   isConsentValid,
   computeDocumentSha256,
+  deriveDeterministicAccessCode,
+  extractCleanTokenOrCode,
+  matchTokenRecord,
   PrivacyConsentRecord,
   InterviewRecord,
   AnswerRecord,
@@ -898,6 +901,59 @@ test('25. Criptografía SHA-256 de Constancia Oficial de Consentimiento', () => 
   const hashDifferent = computeDocumentSha256({ ...testPayload, policyVersion: '1.1' });
   assert.notEqual(hash1, hashDifferent);
 });
+
+test('26. Normalización y coincidencia flexible de códigos de acceso y tokens del panel administrador', () => {
+  const { plainToken, tokenHash, accessCode } = generateInvitationToken();
+  const sampleToken: InterviewTokenRecord & { plainToken?: string } = {
+    id: 'tok_test_26',
+    tokenHash,
+    plainToken,
+    accessCode: 'LEG-8F4A',
+    interviewId: 'int_test_26',
+    participantId: 'part_test_26',
+    expiresAt: new Date(Date.now() + 86400000).toISOString(),
+    revoked: false,
+    createdAt: new Date().toISOString(),
+  };
+
+  // 1. Exact access code
+  assert.equal(matchTokenRecord('LEG-8F4A', [sampleToken])?.id, 'tok_test_26');
+  // 2. Lowercase access code
+  assert.equal(matchTokenRecord('leg-8f4a', [sampleToken])?.id, 'tok_test_26');
+  // 3. Access code without hyphen or with spaces
+  assert.equal(matchTokenRecord('LEG8F4A', [sampleToken])?.id, 'tok_test_26');
+  assert.equal(matchTokenRecord('LEG 8F4A', [sampleToken])?.id, 'tok_test_26');
+  // 4. Access code copied with "Código: " prefix from Admin Panel badge
+  assert.equal(matchTokenRecord('Código: LEG-8F4A', [sampleToken])?.id, 'tok_test_26');
+  // 5. Access code copied with WhatsApp emoji prefix
+  assert.equal(matchTokenRecord('👉 LEG-8F4A', [sampleToken])?.id, 'tok_test_26');
+  // 6. Just the 4-char suffix after LEG-
+  assert.equal(matchTokenRecord('8F4A', [sampleToken])?.id, 'tok_test_26');
+  // 7. Plain token (both lowercase and uppercase from CSS uppercase input)
+  assert.equal(matchTokenRecord(plainToken, [sampleToken])?.id, 'tok_test_26');
+  assert.equal(matchTokenRecord(plainToken.toUpperCase(), [sampleToken])?.id, 'tok_test_26');
+  // 8. Full invite URL with ?token= or ?code=
+  assert.equal(
+    matchTokenRecord(`https://example.com/interview?token=${plainToken}`, [sampleToken])?.id,
+    'tok_test_26'
+  );
+  assert.equal(
+    matchTokenRecord(`https://example.com/interview?code=LEG-8F4A`, [sampleToken])?.id,
+    'tok_test_26'
+  );
+  // 9. Deterministic fallback access code when accessCode field was empty on legacy token
+  const legacyToken: InterviewTokenRecord & { plainToken?: string } = {
+    ...sampleToken,
+    id: 'tok_legacy',
+    accessCode: '',
+    participantId: 'part_legacy_99',
+  };
+  const derivedCode = deriveDeterministicAccessCode('part_legacy_99');
+  assert.match(derivedCode, /^LEG-[A-Z0-9]{4}$/);
+  assert.equal(matchTokenRecord(derivedCode, [legacyToken])?.id, 'tok_legacy');
+  assert.equal(extractCleanTokenOrCode('Código: leg-8f4a'), 'LEG-8F4A');
+});
+
 
 
 

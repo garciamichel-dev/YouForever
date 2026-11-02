@@ -772,16 +772,47 @@ apiRouter.post('/tokens/revoke', requireAdmin, async (req: Request, res: Respons
   }
 });
 
+// Restore browser-cached interviews if server restarted while Firestore quota was exhausted
+apiRouter.post('/interviews/restore-cache', requireAdmin, (req: Request, res: Response) => {
+  try {
+    const { interviews } = req.body;
+    if (Array.isArray(interviews) && interviews.length > 0) {
+      storage.restoreFromClientCache(interviews);
+    }
+    const list = storage.getInterviews();
+    const enriched = list.map((inv) => {
+      const participants = storage.getParticipantsForInterview(inv.id);
+      const answers = storage.getAnswersForInterview(inv.id);
+      const manuscripts = storage.getManuscriptsForInterview(inv.id);
+      return {
+        ...inv,
+        participants,
+        answersCount: answers.length,
+        photosCount: answers.reduce((sum, a) => sum + (a.photos?.length || 0), 0),
+        manuscriptsCount: manuscripts.length,
+        latestManuscriptVersion: manuscripts[0]?.version || 0,
+      };
+    });
+    res.json({ success: true, data: enriched });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
 // 7. Participant Portal Endpoints
 apiRouter.post('/participant/session', (req: Request, res: Response) => {
   try {
-    const { token } = req.body;
+    const { token, cachedInterviews } = req.body;
     if (!token) {
       res.status(400).json({ success: false, error: 'Token de invitación requerido.' });
       return;
     }
 
-    const { interview, participant } = storage.resolveToken(token);
+    if (Array.isArray(cachedInterviews) && cachedInterviews.length > 0) {
+      storage.restoreFromClientCache(cachedInterviews);
+    }
+
+    const { token: resolvedTokenDoc, interview, participant } = storage.resolveToken(token);
     const questions = storage.getQuestionsForVersion(interview.questionnaireVersionId);
     const answers = storage.getAnswersForInterview(interview.id);
     const otherParticipants = storage.getParticipantsForInterview(interview.id);
@@ -796,6 +827,8 @@ apiRouter.post('/participant/session', (req: Request, res: Response) => {
     res.json({
       success: true,
       data: {
+        resolvedToken: (resolvedTokenDoc as any).plainToken || resolvedTokenDoc.accessCode || token,
+        accessCode: resolvedTokenDoc.accessCode,
         interview,
         participant,
         questions,

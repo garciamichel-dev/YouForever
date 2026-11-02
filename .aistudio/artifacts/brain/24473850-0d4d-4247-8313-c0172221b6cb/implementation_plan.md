@@ -1,92 +1,106 @@
-# Transcripción Fidedigna sin Invenciones y Diagnóstico de Calidad de Audio
+# Portal del Entrevistado: Sesión Persistente, Cierre de Sesión, Botón de Fotografías y Aceptación Breve de Privacidad
 
-Este plan implementa un sistema de protección contra invenciones (alucinaciones) en la transcripción de voz, monitoreo en tiempo real durante los primeros 30 segundos de grabación y alertas claras con recomendaciones acústicas y recordatorio del uso del teclado cuando el audio presenta ruido de fondo, volumen insuficiente o voz ininteligible.
+Este cambio garantiza que el entrevistado mantenga su sesión activa y recupere exactamente la pregunta y el borrador donde se quedó al actualizar o cerrar la página, añade la opción de cerrar sesión dentro de **Ajustes & Privacidad**, actualiza el botón de fotografías a **«Añadir fotografías o recuerdos»** centrado y sin subrayado, y simplifica la casilla de aceptación del aviso de privacidad.
 
-## Revisión del Usuario y Decisiones Confirmadas
+### User Review & Critical Decisions
 
 > [!IMPORTANT]
-> Se han integrado las decisiones confirmadas para garantizar que el sistema jamás invente texto y guíe con calidez al participante cuando existan problemas de audio.
+> Se han integrado tus respuestas de clarificación junto con los dos ajustes visuales y de texto solicitados para el Portal del Entrevistado.
 
-- **Decisión Confirmada 1 (Verificación en vivo a los 30 segundos)**: Si transcurren 30 segundos de grabación continua sin detectar palabras legibles ni señal vocal clara, el grabador **pausará automáticamente la grabación** y mostrará una tarjeta de alerta con opciones para cancelar la grabación, revisar el micrófono o lugar, reanudar, o escribir directamente con el teclado.
-- **Decisión Confirmada 2 (Audios sin palabras comprensibles al enviar)**: Cuando el audio enviado sea ininteligible o solo contenga silencio/ruido, **se conservará el archivo de audio grabado**, pero **la transcripción quedará completamente vacía** (sin inventar ninguna palabra) y se mostrará una alerta explicativa invitando a grabar de nuevo en un sitio silencioso o escribir con el teclado.
-- **Decisión Confirmada 3 (Audios con ruido de fondo pero frases audibles)**: Cuando se detecte ruido ambiental pero existan fragmentos comprensibles, el sistema **transcribirá exclusivamente las palabras audibles** sin completar ni adivinar el resto, acompañando el resultado con un aviso preventivo de ruido de fondo.
-
----
-
-## 1. Visión General y Concepto Principal
-
-- **Qué hace**: Elimina por completo las historias inventadas por el modelo de transcripción cuando un audio es silencioso o ruidoso, añade un detector en vivo que evalúa los primeros 30 segundos de grabación, y ofrece alertas diagnósticas empáticas y accionables.
-- **Público Objetivo**: Adultos mayores y familiares que narran sus memorias biográficas y que pueden enfrentarse a micrófonos mal configurados, entornos ruidosos o volumen de voz bajo.
-- **Valor Principal**: Preserva la fidelidad absoluta del testimonio biográfico («nunca inventar nada») y evita que el participante pierda varios minutos hablando sin que su voz esté siendo comprendida.
+- **Decisión Confirmada 1 (Alcance de Restauración)**: Al recargar o volver a abrir la página, el sistema restaurará automáticamente la sesión activa del entrevistado, la pregunta exacta en la que se encontraba y cualquier borrador de texto en curso no enviado.
+- **Decisión Confirmada 2 (Ubicación de Cerrar Sesión)**: El botón para cerrar sesión estará disponible dentro de **Ajustes & Privacidad** tanto en la cabecera superior del panel como en una sección dedicada dentro de la pestaña *Mi privacidad y autorizaciones*.
+- **Decisión Confirmada 3 (Resguardo de Borradores al Cerrar Sesión)**: Si el entrevistado cierra su sesión mientras tiene texto sin enviar en la pregunta actual, ese borrador se conservará localmente para restaurarse en cuanto vuelva a iniciar sesión.
+- **Decisión Confirmada 4 (Botón de Fotografías)**: El botón que actualmente dice «Cargar Fotografía» cambiará su texto a **«Añadir fotografías o recuerdos»**, eliminando el subrayado y alineándose de forma centrada en su contenedor.
+- **Decisión Confirmada 5 (Casilla Breve de Aviso de Privacidad)**: Al aceptar el aviso de privacidad, la casilla única mostrará el texto breve: **«Confirmo que soy [NOMBRE COMPLETO] y he leído y acepto el aviso de privacidad»**.
 
 ---
 
-## 2. Experiencia de Usuario y Diseño Visual
+### 1. Overview & Core Concept
 
-- **Flujos Clave de Usuario**:
-  1. **Monitoreo Preventivo a los 30 Segundos de Grabación**:
-     - Al pulsar *«Pulsa y cuéntanos tu recuerdo»*, el grabador monitorea simultáneamente la actividad vocal en el espectro de frecuencias de voz humana y el reconocimiento de palabras en vivo del navegador.
-     - Si al llegar a los **30 segundos** no se ha identificado ninguna palabra legible o la señal vocal ha permanecido en silencio/ruido constante, la grabación pasa automáticamente a estado **En Pausa** y despliega una alerta destacada:
-       *«Hemos pausado tu grabación porque tras 30 segundos no hemos logrado escuchar ninguna palabra con claridad. Te sugerimos revisar tu micrófono, acercarte un poco más o moverte a un lugar sin ruido de fondo. También puedes cancelar esta grabación y escribir tu respuesta directamente usando el teclado.»*
-     - Incluye botones directos: **«Cancelar grabación»**, **«Ir al cuadro de texto (usar teclado)»** y **«Continuar grabando»**.
-  2. **Diagnóstico Acústico al Enviar el Audio**:
-     - Al pulsar *«Enviar y Transcribir»*, el servidor analiza el audio sin recibir el texto de la pregunta como guía narrativa (evitando que el modelo invente respuestas a la pregunta cuando no escucha voz) y devuelve un dictamen estructurado de calidad:
-       - **`clear` (Voz clara)**: Inserta la transcripción fidedigna en el cuadro de respuesta.
-       - **`noisy` (Con ruido de fondo pero comprensible)**: Inserta únicamente las frases claramente audibles y muestra una alerta ámbar sugiriendo trasladarse a un lugar más silencioso en las siguientes grabaciones o complementar el texto con el teclado.
-       - **`unintelligible` / `silent` (Sin palabras legibles o solo silencio/ruido)**: Guarda el archivo de voz en la lista de audios pero **deja el texto vacío**, mostrando una alerta visible que informa que no se logró comprender ninguna palabra legible, sugiere revisar el micrófono o el ruido ambiental, y ofrece un botón para enfocar el cuadro de texto y escribir con el teclado.
-
-- **Identidad Visual y Tema**:
-  - *Dirección Estética*: Editorial cálido y accesible (*Archival Warm Paper*), coherente con el diseño de Legado Digital.
-  - *Paleta de Colores*:
-    - Alertas preventivas de ruido o pausa a los 30s en tonos ámbar cálido (`bg-amber-50`, `border-amber-300`, `text-amber-950`) con iconos de alto contraste.
-    - Alertas de audio sin palabras comprensibles en tono terracota/rosa suave (`bg-rose-50`, `border-rose-300`, `text-rose-950`) sin resultar alarmantes pero claramente distinguibles.
-  - *Tipografía y Jerarquía*: Encabezados claros en `font-serif font-bold`, cuerpo explicativo en `font-sans text-xs sm:text-sm leading-relaxed` para lectura cómoda por adultos mayores, y botones con etiquetas explícitas.
+- **What It Does**:
+  1. Mantiene abierta la sesión del entrevistado en el navegador para que no pierda su acceso al actualizar (`F5`) o cerrar y reabrir la ventana.
+  2. Guarda en tiempo real la posición de la pregunta actual y el borrador de respuesta en curso para retomar sin fricción donde se quedó.
+  3. Permite cerrar sesión explícitamente desde **Ajustes & Privacidad**, limpiando la sesión activa pero conservando los borradores pendientes para el próximo ingreso.
+  4. Presenta el botón **«Añadir fotografías o recuerdos»** centrado y sin texto subrayado.
+  5. Simplifica la casilla de aceptación del aviso de privacidad a una confirmación clara y directa con el nombre completo del entrevistado.
+- **Target Audience / Persona**: Personas entrevistadas (padres, abuelos, familiares) que relatan sus memorias en varias sesiones y requieren una experiencia cálida, clara y libre de obstáculos técnicos.
+- **Key Value**: Elimina la frustración de volver a introducir códigos de acceso o perder respuestas a medio escribir al cerrar el navegador, y hace más legibles tanto la carga de recuerdos fotográficos como el consentimiento de privacidad.
 
 ---
 
-## 3. Decisiones Clave de Producto y Justificación
+### 2. User Experience & Visual Design
 
-- **Decisión 1: Aislamiento del contexto de la pregunta durante la transcripción acústica**
-  - *Enfoque elegido*: Eliminar el texto de la pregunta y el nombre del participante del prompt de transcripción multimodal y exigir un esquema JSON estructurado con clasificación acústica (`clear`, `noisy`, `unintelligible`, `silent`).
-  - *Por qué*: Cuando un modelo multimodal recibe la pregunta biográfica junto con un audio ininteligible o en silencio, tiende a «responder la pregunta» inventando una historia plausible. Al aislar la tarea como transcripción acústica pura con validación anti-alucinación y temperatura `0.0`, el modelo solo puede transcribir fonemas reales o reportar `unintelligible` / `silent`.
-- **Decisión 2: Detección híbrida a los 30 segundos (Reconocimiento de voz en vivo + Energía vocal)**
-  - *Enfoque elegido*: Combinar la API nativa de reconocimiento de voz del navegador (`SpeechRecognition` / `webkitSpeechRecognition`) con un detector de picos de voz humana en el analizador de frecuencias (`AudioContext` + `AnalyserNode`).
-  - *Por qué*: En navegadores que soportan `SpeechRecognition` (Chrome, Edge, Safari), el sistema sabe con exactitud si se pronunció al menos una palabra legible en los primeros 30 segundos; en navegadores sin soporte de `SpeechRecognition`, el analizador espectral detecta si hubo modulación real de voz o únicamente silencio/ruido estacionario.
+- **Key User Flows**:
+  1. **Ingreso y Persistencia Automática**: Cuando el entrevistado ingresa con su código o enlace personal, su sesión queda activa en el navegador. Si actualiza la página o la vuelve a abrir más tarde, entra directamente a la pregunta exacta donde estaba con su borrador de texto intacto.
+  2. **Aceptación Breve del Aviso de Privacidad**: En la pantalla previa al inicio de la entrevista, el participante marca un único checkbox con el texto: *«Confirmo que soy [NOMBRE COMPLETO] y he leído y acepto el aviso de privacidad»* y pulsa confirmar para iniciar.
+  3. **Adición de Fotografías o Recuerdos**: Debajo del área de respuesta de cada pregunta, el botón aparece centrado, sin subrayado, con el texto **«Añadir fotografías o recuerdos»**.
+  4. **Cierre de Sesión Voluntario**: Cuando el entrevistado abre **Ajustes & Privacidad**, puede pulsar **«Cerrar sesión»** desde la barra superior del panel o desde el bloque final de la pestaña *Mi privacidad y autorizaciones*, regresando a la pantalla de ingreso de código.
+- **Visual Identity & Theme**:
+  - *Aesthetic Direction*: Editorial cálido y accesible (monografía biográfica familiar).
+  - *Color Palette & Mood*: Superficies en papel cálido (`stone-50` / `white`), acentos principales en ámbar profundo (`amber-700` / `amber-800`) y bordes sutiles (`stone-200`).
+  - *Typography & Hierarchy*: Encabezados editoriales en serif y controles interactivos limpios en sans-serif de una sola línea, sin subrayados innecesarios en botones.
+  - *Component Styling & Layout*: El contenedor del botón **«Añadir fotografías o recuerdos»** utilizará alineación flexible centrada (`flex justify-center`), manteniendo bordes suaves y contraste claro.
+- **Interactive Feedback & Motion**:
+  - Indicador discreto cuando se recupera un borrador guardado al reabrir la sesión.
+  - Confirmación clara al cerrar sesión desde **Ajustes & Privacidad** indicando que el progreso y los borradores quedaron resguardados.
 
 ---
 
-## 4. Arquitectura Técnica y Estrategia de Datos
+### 3. Key Product Decisions & Trade-Offs
 
-- **Diagrama de Arquitectura y Flujo de Diagnóstico de Voz**:
+- **Decision 1: Separación entre Credencial de Sesión Activa y Borradores por Participante**
+  - *Chosen Approach*: Almacenar la credencial de sesión activa en una clave independiente del progreso y de los borradores de cada pregunta (`participantId + questionId`).
+  - *Why*: Permite que al pulsar «Cerrar sesión» se cierre el acceso automático en el navegador, pero cuando el entrevistado vuelva a ingresar su código más adelante recupere intactos tanto la pregunta donde iba como el texto que estaba escribiendo.
+  - *Alternatives Considered*: Borrar todo el almacenamiento local al cerrar sesión (descartado porque perdería el borrador en curso que el usuario pidió conservar).
+- **Decision 2: Declaración Breve en Casilla de Consentimiento**
+  - *Chosen Approach*: Actualizar el generador de la declaración de consentimiento para que muestre y registre exactamente `"Confirmo que soy [NOMBRE COMPLETO] y he leído y acepto el aviso de privacidad"`, manteniendo intactos los botones para consultar el aviso simplificado e integral.
+  - *Why*: Reduce la fatiga visual para adultos mayores y familiares sin perder la confirmación expresa de identidad y aceptación del aviso.
 
+---
+
+### 4. Technical Architecture & Data Strategy *(Technical Reference)*
+
+- **Architecture & Component Diagram**:
 ```
-┌────────────────────────────────────────────────────────────────────────────┐
-│                        GRABADOR DE VOZ (Cliente)                           │
-│                                                                            │
-│  ┌──────────────────────────────┐     ┌─────────────────────────────────┐  │
-│  │ Monitor en Vivo (0s -> 30s)  │     │ Alertas de Calidad y Teclado    │  │
-│  │ • SpeechRecognition (palabras│────▶│ • Pausa automática a los 30s    │  │
-│  │   legibles detectadas)       │     │ • Sugerencia contra ruido/mic   │  │
-│  │ • Analizador de energía vocal│     │ • Botón "Escribir con teclado"  │  │
-│  └──────────────────────────────┘     └─────────────────────────────────┘  │
-└───────────────────────────────────┬────────────────────────────────────────┘
-                                    │ POST /api/participant/audio/upload
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────────┐
-│                 SERVICIO DE TRANSCRIPCIÓN ESTRICTA (Servidor)              │
-│                                                                            │
-│  ┌──────────────────────────────────────────────────────────────────────┐  │
-│  │ Analizador Acústico Multimodal (Sin contexto de pregunta, Temp 0.0)  │  │
-│  │ • Clasifica calidad: "clear" | "noisy" | "unintelligible" | "silent" │  │
-│  │ • Filtro anti-invención: prohíbe inventar historias o rellenar       │  │
-│  │ • Si "unintelligible"/"silent": transcription = "" (audio se guarda) │  │
-│  └──────────────────────────────────────────────────────────────────────┘  │
-└────────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        Navegador del Entrevistado                       │
+│                                                                         │
+│  ┌───────────────────────────────────────────────────────────────────┐  │
+│  │               Almacén Persistente de Sesión y Avance              │  │
+│  │  • Sesión Activa (token resuelto, participantId, interviewId)     │  │
+│  │  • Progreso Actual (currentQuestionId, activeTab, completion)     │  │
+│  │  • Borrador por Pregunta (answerText, branchChoice, updatedAt)    │  │
+│  └───────────────▲───────────────────────────────────▲───────────────┘  │
+│                  │ Lectura / Escritura               │ Limpieza de      │
+│                  ▼ Automática                        │ Sesión Activa    │
+│  ┌───────────────────────────────────┐   ┌───────────┴───────────────┐  │
+│  │     Portal del Entrevistado       │──▶│   Ajustes & Privacidad    │  │
+│  │  • Auto-restauración al cargar    │   │  • Botón "Cerrar sesión"  │  │
+│  │  • Sincronización de borrador     │   │    en cabecera superior   │  │
+│  │  • Botón centrado sin subrayado:  │   │  • Tarjeta "Cerrar sesión"│  │
+│  │    "Añadir fotografías o          │   │    en pestaña Privacidad  │  │
+│  │     recuerdos"                    │   └───────────────────────────┘  │
+│  └───────────────┬───────────────────┘                                  │
+│                  │                                                      │
+│                  ▼                                                      │
+│  ┌───────────────────────────────────┐                                  │
+│  │  Pantalla de Aviso de Privacidad  │                                  │
+│  │  • Checkbox con texto breve:      │                                  │
+│  │    "Confirmo que soy [NOMBRE] y   │                                  │
+│  │     he leído y acepto el aviso    │                                  │
+│  │     de privacidad"                │                                  │
+│  └───────────────────────────────────┘                                  │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Modelo de Respuesta de Transcripción y Estado**:
-  - El servicio de transcripción devolverá un objeto estructurado:
-    - `transcription`: Texto transcrito (vacío `""` cuando no hay palabras legibles).
-    - `audioQuality`: `'clear' | 'noisy' | 'unintelligible' | 'silent'`.
-    - `qualityMessage`: Mensaje claro en español explicando la causa (ruido de fondo, voz muy baja o sin palabras comprensibles) y la sugerencia correspondiente.
-  - En el portal del participante, cuando `audioQuality` sea `'unintelligible'` o `'silent'`, el archivo de audio se conservará en la lista de grabaciones, no se insertará texto inventado en el área de respuesta, y se mostrará la alerta orientando al usuario a cancelar/repetir en un lugar sin ruido o escribir su recuerdo usando el teclado.
+- **Data Model & State**:
+  - **Active Session State**: Guarda el token validado y el identificador del participante para rehidratar la sesión automáticamente al montar la aplicación o recargar la página.
+  - **Participant Progress State**: Registra `currentQuestionId`, `activeTab` y `showCompletionScreen` asociados al `participantId`.
+  - **Question Draft State**: Registra `answerText` y `branchChoice` indexados por `participantId` y `questionId`. Se limpia automáticamente cuando la respuesta de esa pregunta es enviada y confirmada por el servidor.
+
+- **Interactive Component & State Mapping**:
+  - **Inicio / Recarga de Página**: Si no hay parámetro `?token=` en la URL pero existe una sesión activa guardada, el contenedor principal mantiene la vista del Portal del Entrevistado y carga la sesión automáticamente, posicionándose en la pregunta guardada y restaurando el borrador en curso.
+  - **Edición en Tiempo Real**: Cada cambio en el cuadro de texto de la pregunta actual o selección de rama actualiza el borrador local de esa pregunta. Al enviar o saltar la pregunta con éxito, se elimina el borrador local correspondiente.
+  - **Acción «Cerrar sesión» en Ajustes & Privacidad**: Guarda el último estado del borrador actual, elimina la clave de sesión activa, limpia cualquier `?token=` o `?code=` de la barra de direcciones, cierra el modal administrativo y regresa a la vista de ingreso de código de acceso.
+  - **Componente de Carga de Fotografías**: Renderiza el botón colapsado dentro de un contenedor centrado (`flex justify-center pt-1`) con la etiqueta exacta `Añadir fotografías o recuerdos` y sin la clase `underline`.
+  - **Componente de Consentimiento de Privacidad**: Renderiza el checkbox único con el texto `Confirmo que soy ${participantName} y he leído y acepto el aviso de privacidad` y envía la confirmación al servidor al pulsar el botón de inicio.

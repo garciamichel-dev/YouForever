@@ -56,6 +56,7 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('todos');
   const [copiedToken, setCopiedToken] = useState<string | null>(null);
+  const [copiedAccessBadge, setCopiedAccessBadge] = useState<string | null>(null);
   const [copiedMessage, setCopiedMessage] = useState(false);
   const [copiedCode, setCopiedCode] = useState(false);
 
@@ -109,7 +110,34 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
       ]);
 
       if (resInterviews.ok && resInterviews.data) {
-        setInterviews(resInterviews.data);
+        let finalList = resInterviews.data;
+        try {
+          const cachedRaw = localStorage.getItem('foreveryou_interviews_cache');
+          if (cachedRaw) {
+            const cachedList: EnrichedInterview[] = JSON.parse(cachedRaw);
+            if (Array.isArray(cachedList) && cachedList.length > 0) {
+              const serverIds = new Set(finalList.map((i) => i.id));
+              const missingOnServer = cachedList.filter((c) => c && c.id && !serverIds.has(c.id));
+              if (missingOnServer.length > 0) {
+                const syncRes = await apiFetch<EnrichedInterview[]>('/api/interviews/restore-cache', {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
+                  },
+                  body: JSON.stringify({ interviews: missingOnServer }),
+                });
+                if (syncRes.ok && syncRes.data) {
+                  finalList = syncRes.data;
+                }
+              }
+            }
+          }
+          localStorage.setItem('foreveryou_interviews_cache', JSON.stringify(finalList));
+        } catch (_cacheErr) {
+          // Ignore localStorage quota/parse issues
+        }
+        setInterviews(finalList);
       } else if (resInterviews.error && adminEmail) {
         console.warn('Notice loading interviews:', resInterviews.error);
       }
@@ -140,9 +168,41 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
     return `${targetOrigin}/interview?token=${token}`;
   };
 
+  const copyToClipboard = (text: string) => {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).catch(() => {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+          document.execCommand('copy');
+        } catch (_e) {
+          // ignore
+        }
+        document.body.removeChild(ta);
+      });
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        document.execCommand('copy');
+      } catch (_e) {
+        // ignore
+      }
+      document.body.removeChild(ta);
+    }
+  };
+
   const handleCopyLink = (token: string) => {
     const fullUrl = getPublicShareUrl(token);
-    navigator.clipboard.writeText(fullUrl);
+    copyToClipboard(fullUrl);
     setCopiedToken(token);
     setTimeout(() => setCopiedToken(null), 3000);
   };
@@ -316,7 +376,15 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
       });
       const data = await res.json();
       if (data.success) {
-        setInterviews((prev) => prev.filter((inv) => inv.id !== interview.id));
+        setInterviews((prev) => {
+          const next = prev.filter((inv) => inv.id !== interview.id);
+          try {
+            localStorage.setItem('foreveryou_interviews_cache', JSON.stringify(next));
+          } catch (_e) {
+            // ignore
+          }
+          return next;
+        });
         setNoticeMessage(`La entrevista «${interview.title}» fue eliminada de la base de datos.`);
         setTimeout(() => setNoticeMessage(null), 4000);
       } else {
@@ -789,9 +857,21 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
                         {p.plainToken ? (
                           <div className="flex flex-wrap items-center gap-1.5">
                             {p.accessCode && (
-                              <span className="font-mono text-[10px] bg-amber-50 text-amber-900 border border-amber-200 px-1.5 py-0.5 rounded font-bold">
-                                Código: {p.accessCode}
-                              </span>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  copyToClipboard(p.accessCode!);
+                                  setCopiedAccessBadge(p.id);
+                                  setTimeout(() => setCopiedAccessBadge(null), 2500);
+                                }}
+                                title="Clic para copiar el código de acceso"
+                                className="inline-flex items-center space-x-1 font-mono text-[10px] bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 px-1.5 py-0.5 rounded font-bold transition cursor-pointer"
+                              >
+                                <Key className="w-3 h-3 text-amber-700" />
+                                <span>
+                                  {copiedAccessBadge === p.id ? `¡Copiado: ${p.accessCode}!` : `Código: ${p.accessCode}`}
+                                </span>
+                              </button>
                             )}
 
                             <button
@@ -1183,7 +1263,7 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
                   </div>
                   <button
                     onClick={() => {
-                      navigator.clipboard.writeText(sharingData.participant.accessCode!);
+                      copyToClipboard(sharingData.participant.accessCode!);
                       setCopiedCode(true);
                       setTimeout(() => setCopiedCode(false), 3000);
                     }}
@@ -1250,7 +1330,7 @@ O si lo prefieres, entra a la aplicación e ingresa tu código de acceso:
 👉 ${sharingData.participant.accessCode || ''}
 
 Tus recuerdos y testimonios serán preservados con total fidelidad para nuestra memoria familiar.`;
-                  navigator.clipboard.writeText(message);
+                  copyToClipboard(message);
                   setCopiedMessage(true);
                   setTimeout(() => setCopiedMessage(false), 3000);
                 }}

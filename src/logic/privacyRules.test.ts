@@ -12,9 +12,7 @@ import {
 test('1. Casilla única genera la declaración exacta con confirmación de identidad', () => {
   const name = 'María Elena Sánchez Rosas';
   const decl = buildConsentDeclarationText(name);
-  assert.ok(decl.includes(`Confirmo que soy ${name}, la persona identificada en esta entrevista.`));
-  assert.ok(decl.includes('Declaro que he tenido acceso al Aviso de Privacidad Simplificado y al Aviso de Privacidad Integral de ForeverYou'));
-  assert.ok(decl.includes('Entiendo que las finalidades opcionales que requieren una autorización independiente no se activan automáticamente'));
+  assert.equal(decl, `Confirmo que soy ${name} y he leído y acepto el aviso de privacidad`);
 });
 
 test('2. Validación de consentimiento: requiere que la casilla única esté marcada', () => {

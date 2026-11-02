@@ -34,6 +34,7 @@ import {
   getNextQuestionInFlow,
   isQuestionnaireFlowComplete,
   validatePhotoAttachments,
+  extractCleanTokenOrCode,
 } from '../logic/interviewRules.ts';
 import { QuestionPhotoUploader, DraftPhotoItem } from './QuestionPhotoUploader.tsx';
 import { VoiceRecorder, VoiceRecorderHandle, SavedVoiceAudiosList } from './VoiceRecorder.tsx';
@@ -41,6 +42,16 @@ import { AudioPlayer } from './AudioPlayer.tsx';
 import { FAQModal } from './FAQModal.tsx';
 import { PrivacyConsentScreen } from './PrivacyConsentScreen.tsx';
 import { ParticipantAdminPanel } from './ParticipantAdminPanel.tsx';
+import {
+  getActiveParticipantSession,
+  saveActiveParticipantSession,
+  clearActiveParticipantSession,
+  getParticipantProgress,
+  saveParticipantProgress,
+  getQuestionDraft,
+  saveQuestionDraft,
+  clearQuestionDraft,
+} from '../utils/participantSessionStorage.ts';
 
 function mapAttachmentsToDraftItems(attachments?: AnswerPhotoAttachment[]): DraftPhotoItem[] {
   if (!attachments || attachments.length === 0) return [];
@@ -59,17 +70,22 @@ interface ParticipantPortalProps {
   initialToken?: string | null;
   onGoToAdmin?: () => void;
   onOpenFaq?: () => void;
+  onClearToken?: () => void;
 }
 
 export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
   initialToken,
   onOpenFaq,
+  onClearToken,
 }) => {
   const [isFaqOpen, setIsFaqOpen] = useState(false);
   const handleOpenFaq = onOpenFaq || (() => setIsFaqOpen(true));
   const [tokenInput, setTokenInput] = useState<string>(initialToken || '');
   const [isParticipantAdminOpen, setIsParticipantAdminOpen] = useState(false);
+  const [logoutNotice, setLogoutNotice] = useState<string | null>(null);
   const [sessionData, setSessionData] = useState<{
+    resolvedToken?: string;
+    accessCode?: string;
     interview: InterviewRecord;
     participant: ParticipantRecord;
     questions: QuestionRecord[];
@@ -198,6 +214,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
   const currentQuestion = currentFlowItem?.question || null;
 
   const activeToken = (
+    sessionData?.resolvedToken ||
     tokenInput ||
     initialToken ||
     (typeof window !== 'undefined'
@@ -208,25 +225,49 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
   ).trim();
 
   const loadSession = async (token: string) => {
-    const cleanToken = token.trim();
+    const cleanToken = extractCleanTokenOrCode(token) || token.trim();
     if (!cleanToken) return;
     setTokenInput(cleanToken);
+    setLogoutNotice(null);
     try {
       setLoading(true);
       setErrorMsg(null);
 
+      let cachedInterviews: unknown[] | undefined = undefined;
+      try {
+        const rawCache = localStorage.getItem('foreveryou_interviews_cache');
+        if (rawCache) {
+          const parsedCache = JSON.parse(rawCache);
+          if (Array.isArray(parsedCache) && parsedCache.length > 0) {
+            cachedInterviews = parsedCache;
+          }
+        }
+      } catch (_e) {
+        // ignore localStorage read errors
+      }
+
       const res = await fetch('/api/participant/session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: cleanToken }),
+        body: JSON.stringify({ token: cleanToken, cachedInterviews }),
       });
 
       const data = await res.json();
       if (data.success && data.data) {
         setSessionData(data.data);
 
+        const participantId: string = data.data.participant.id;
+        const resolvedTokenToSave: string = data.data.resolvedToken || cleanToken;
+        saveActiveParticipantSession({
+          token: resolvedTokenToSave,
+          accessCode: data.data.accessCode,
+          participantId,
+          interviewId: data.data.interview.id,
+          participantName: data.data.participant.name,
+        });
+
         const participantAnswers: AnswerRecord[] = data.data.answers.filter(
-          (a: AnswerRecord) => a.participantId === data.data.participant.id
+          (a: AnswerRecord) => a.participantId === participantId
         );
         const seq = buildParticipantFlowSequence({
           allQuestions: data.data.questions,
@@ -234,19 +275,30 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
           storyMode: data.data.interview.storyMode,
         });
 
-        const answeredIds = new Set(
-          participantAnswers
-            .filter((a) => !a.isFollowUp && !a.isAdditionalMemory)
-            .map((a) => a.questionId)
-        );
-        const firstUnanswered = seq.find((item) => !answeredIds.has(item.question.id));
+        const savedProgress = getParticipantProgress(participantId);
+        const hasValidSavedQuestion =
+          savedProgress?.currentQuestionId &&
+          seq.some((item) => item.question.id === savedProgress.currentQuestionId);
 
-        if (firstUnanswered) {
-          setCurrentQuestionId(firstUnanswered.question.id);
-          setShowCompletionScreen(false);
-        } else if (seq.length > 0) {
-          setCurrentQuestionId(seq[seq.length - 1].question.id);
-          setShowCompletionScreen(true);
+        if (savedProgress && hasValidSavedQuestion) {
+          setCurrentQuestionId(savedProgress.currentQuestionId);
+          setActiveTab(savedProgress.activeTab === 'history' ? 'history' : 'interview');
+          setShowCompletionScreen(Boolean(savedProgress.showCompletionScreen));
+        } else {
+          const answeredIds = new Set(
+            participantAnswers
+              .filter((a) => !a.isFollowUp && !a.isAdditionalMemory)
+              .map((a) => a.questionId)
+          );
+          const firstUnanswered = seq.find((item) => !answeredIds.has(item.question.id));
+
+          if (firstUnanswered) {
+            setCurrentQuestionId(firstUnanswered.question.id);
+            setShowCompletionScreen(false);
+          } else if (seq.length > 0) {
+            setCurrentQuestionId(seq[seq.length - 1].question.id);
+            setShowCompletionScreen(true);
+          }
         }
       } else {
         setErrorMsg(data.error || 'No se pudo validar el enlace de invitación.');
@@ -262,24 +314,47 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
     if (initialToken) {
       setTokenInput(initialToken);
       loadSession(initialToken);
+      return;
+    }
+    const savedSession = getActiveParticipantSession();
+    if (savedSession && savedSession.token) {
+      setTokenInput(savedSession.accessCode || savedSession.token);
+      loadSession(savedSession.token);
     }
   }, [initialToken]);
 
-  // Sync answer text, branchChoice, & saved photos when currentQuestionId changes
+  const hydratedQuestionKeyRef = useRef<string | null>(null);
+
+  // Sync answer text, branchChoice, saved photos, & local draft when currentQuestionId changes
   useEffect(() => {
     if (!sessionData || !currentQuestion) return;
+
+    const participantId = sessionData.participant.id;
+    const questionKey = `${participantId}:${currentQuestion.id}`;
+    hydratedQuestionKeyRef.current = null;
 
     const myAnswer = sessionData.answers.find(
       (a) =>
         a.questionId === currentQuestion.id &&
-        a.participantId === sessionData.participant.id &&
+        a.participantId === participantId &&
         !a.isFollowUp &&
         !a.isAdditionalMemory
     );
 
-    if (myAnswer) {
+    const savedDraft = getQuestionDraft(participantId, currentQuestion.id);
+
+    if (savedDraft) {
+      setCurrentAnswerText(savedDraft.answerText);
+      setBranchChoice(savedDraft.branchChoice ?? myAnswer?.branchChoice ?? null);
+    } else if (myAnswer) {
       setCurrentAnswerText(myAnswer.notRecalled ? '' : myAnswer.answerText);
       setBranchChoice(myAnswer.branchChoice || null);
+    } else {
+      setCurrentAnswerText('');
+      setBranchChoice(null);
+    }
+
+    if (myAnswer) {
       setCurrentPhotos(mapAttachmentsToDraftItems(myAnswer.photos));
       const audios =
         myAnswer.audioRecordings && myAnswer.audioRecordings.length > 0
@@ -289,13 +364,97 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
           : [];
       setCurrentAudios(audios);
     } else {
-      setCurrentAnswerText('');
-      setBranchChoice(null);
       setCurrentPhotos([]);
       setCurrentAudios([]);
     }
     setValidationNotice(null);
+    hydratedQuestionKeyRef.current = questionKey;
   }, [currentQuestion?.id, sessionData?.participant.id]);
+
+  // Persist current question progress in localStorage so reloads or future logins resume at exact step
+  useEffect(() => {
+    if (!sessionData?.participant?.id || !currentQuestionId) return;
+    saveParticipantProgress(sessionData.participant.id, {
+      currentQuestionId,
+      activeTab,
+      showCompletionScreen,
+    });
+  }, [sessionData?.participant?.id, currentQuestionId, activeTab, showCompletionScreen]);
+
+  // Persist in-progress draft text and branchChoice locally as the interviewee types
+  useEffect(() => {
+    if (!sessionData?.participant?.id || !currentQuestion?.id) return;
+    const expectedKey = `${sessionData.participant.id}:${currentQuestion.id}`;
+    if (hydratedQuestionKeyRef.current !== expectedKey) return;
+
+    const myAnswer = sessionData.answers.find(
+      (a) =>
+        a.questionId === currentQuestion.id &&
+        a.participantId === sessionData.participant.id &&
+        !a.isFollowUp &&
+        !a.isAdditionalMemory
+    );
+    const persistedText = myAnswer ? (myAnswer.notRecalled ? '' : myAnswer.answerText) : '';
+    const persistedBranch = myAnswer?.branchChoice || null;
+
+    // If current state matches already-saved server answer, clear redundant draft; otherwise save draft
+    if (currentAnswerText === persistedText && branchChoice === persistedBranch) {
+      clearQuestionDraft(sessionData.participant.id, currentQuestion.id);
+    } else {
+      saveQuestionDraft(sessionData.participant.id, currentQuestion.id, {
+        answerText: currentAnswerText,
+        branchChoice,
+      });
+    }
+  }, [currentAnswerText, branchChoice, currentQuestion?.id, sessionData?.participant?.id]);
+
+  // Explicit Logout from Ajustes & Privacidad (clears active session credential while preserving progress & drafts)
+  const handleLogoutSession = () => {
+    if (sessionData?.participant?.id && currentQuestion?.id) {
+      saveParticipantProgress(sessionData.participant.id, {
+        currentQuestionId: currentQuestion.id,
+        activeTab,
+        showCompletionScreen,
+      });
+      const myAnswer = sessionData.answers.find(
+        (a) =>
+          a.questionId === currentQuestion.id &&
+          a.participantId === sessionData.participant.id &&
+          !a.isFollowUp &&
+          !a.isAdditionalMemory
+      );
+      const persistedText = myAnswer ? (myAnswer.notRecalled ? '' : myAnswer.answerText) : '';
+      const persistedBranch = myAnswer?.branchChoice || null;
+      if (currentAnswerText !== persistedText || branchChoice !== persistedBranch) {
+        saveQuestionDraft(sessionData.participant.id, currentQuestion.id, {
+          answerText: currentAnswerText,
+          branchChoice,
+        });
+      }
+    }
+
+    clearActiveParticipantSession();
+
+    if (typeof window !== 'undefined') {
+      const cleanPath = window.location.pathname || '/';
+      window.history.replaceState({}, '', cleanPath);
+    }
+
+    onClearToken?.();
+    setIsParticipantAdminOpen(false);
+    setSessionData(null);
+    setTokenInput('');
+    setCurrentQuestionId(null);
+    setCurrentAnswerText('');
+    setCurrentPhotos([]);
+    setCurrentAudios([]);
+    setBranchChoice(null);
+    setAdaptiveQuestion(null);
+    setErrorMsg(null);
+    setLogoutNotice(
+      'Has cerrado tu sesión de forma segura. Tu avance y cualquier borrador escrito en curso se han conservado para cuando vuelvas a ingresar.'
+    );
+  };
 
   // Delete an already-persisted photo from the server
   const handleDeletePersistedPhoto = async (photoId: string) => {
@@ -646,6 +805,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
 
       const data = await res.json();
       if (data.success) {
+        clearQuestionDraft(sessionData.participant.id, currentQuestion.id);
         setSaveSuccessNotice(
           activeAudios.length > 0
             ? 'Respuesta, grabaciones de voz y transcripción guardadas con éxito en la base de datos. Avanzando...'
@@ -982,6 +1142,13 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
           Ingresa el código o token de invitación que recibiste por correo o mensaje para comenzar.
         </p>
 
+        {logoutNotice && (
+          <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-emerald-900 text-xs mb-4 flex items-start space-x-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+            <span>{logoutNotice}</span>
+          </div>
+        )}
+
         {errorMsg && (
           <div className="p-3 bg-rose-50 border border-rose-200 rounded-lg text-rose-800 text-xs mb-4 flex items-center space-x-2">
             <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
@@ -1006,13 +1173,12 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
               placeholder="Ej: LEG-8492 o pega tu enlace completo..."
               value={tokenInput}
               onChange={(e) => {
-                let val = e.target.value.trim();
-                if (val.includes('token=')) {
-                  val = val.split('token=')[1].split('&')[0].split('#')[0];
-                } else if (val.includes('code=')) {
-                  val = val.split('code=')[1].split('&')[0].split('#')[0];
+                const rawVal = e.target.value;
+                if (rawVal.includes('token=') || rawVal.includes('code=') || /^c[oó]digo\s*:/i.test(rawVal.trim())) {
+                  setTokenInput(extractCleanTokenOrCode(rawVal));
+                } else {
+                  setTokenInput(rawVal);
                 }
-                setTokenInput(val);
               }}
               className="w-full px-3.5 py-2.5 border border-stone-300 rounded-lg text-xs font-mono text-stone-900 focus:outline-none focus:ring-2 focus:ring-amber-200 focus:border-amber-600 uppercase"
             />
@@ -2148,6 +2314,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
             setIsParticipantAdminOpen(false);
             setSessionData((prev) => (prev ? { ...prev, hasValidConsent: false } : null));
           }}
+          onLogoutSession={handleLogoutSession}
         />
       )}
     </div>

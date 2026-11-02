@@ -27,6 +27,10 @@ import {
   QuestionRecord,
   generateInvitationToken,
   hashToken,
+  deriveDeterministicAccessCode,
+  deriveDeterministicPlainToken,
+  extractCleanTokenOrCode,
+  matchTokenRecord,
   canSubmitAnswer,
   isTokenActive,
   evaluateAnswerIncrement,
@@ -182,7 +186,141 @@ class StorageManager {
     return stripOversizedStrings(cleaned);
   }
 
+  private getSnapshotFilePath(): string {
+    const dataDir = path.join(process.cwd(), 'data');
+    if (!fs.existsSync(dataDir)) {
+      fs.mkdirSync(dataDir, { recursive: true });
+    }
+    return path.join(dataDir, 'storage_state.json');
+  }
+
+  private saveStateToDisk(): void {
+    try {
+      const filePath = this.getSnapshotFilePath();
+      const snapshot = {
+        savedAt: new Date().toISOString(),
+        config: this.config,
+        questions: Array.from(this.questions.values()),
+        interviews: Array.from(this.interviews.values()),
+        participants: Array.from(this.participants.values()),
+        tokens: Array.from(this.tokens.values()),
+        answers: Array.from(this.answers.values()),
+        photos: Array.from(this.photos.values()).map((p) => ({
+          ...p,
+          dataUrl: p.dataUrl && p.dataUrl.length < 50_000 ? p.dataUrl : '',
+        })),
+        audios: Array.from(this.audios.values()).map((a) => ({
+          ...a,
+          audioDataUrl: a.audioDataUrl && a.audioDataUrl.length < 50_000 ? a.audioDataUrl : '',
+        })),
+        manuscripts: Array.from(this.manuscripts.values()),
+        auditLogs: this.auditLogs.slice(0, 200),
+        privacyConsents: Array.from(this.privacyConsents.values()),
+        bookShares: Array.from(this.bookShares.values()),
+        scheduledDeliveries: Array.from(this.scheduledDeliveries.values()),
+        secondaryAccess: Array.from(this.secondaryAccess.values()),
+        postMortemInstructions: Array.from(this.postMortemInstructions.values()),
+        arcoRequests: Array.from(this.arcoRequests.values()),
+      };
+      fs.writeFileSync(filePath, JSON.stringify(snapshot, null, 2), 'utf-8');
+    } catch (err) {
+      console.warn('[StorageManager] Could not save state snapshot to disk:', err);
+    }
+  }
+
+  private loadStateFromDisk(): boolean {
+    try {
+      const filePath = this.getSnapshotFilePath();
+      if (!fs.existsSync(filePath)) return false;
+      const raw = fs.readFileSync(filePath, 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object') return false;
+
+      if (parsed.config) {
+        this.config = { ...INITIAL_APP_CONFIG, ...parsed.config };
+      }
+      if (Array.isArray(parsed.questions)) {
+        for (const q of parsed.questions) {
+          if (q && q.id) this.questions.set(q.id, q);
+        }
+      }
+      if (Array.isArray(parsed.interviews)) {
+        for (const inv of parsed.interviews) {
+          if (inv && inv.id) this.interviews.set(inv.id, inv);
+        }
+      }
+      if (Array.isArray(parsed.participants)) {
+        for (const part of parsed.participants) {
+          if (part && part.id) this.participants.set(part.id, part);
+        }
+      }
+      if (Array.isArray(parsed.tokens)) {
+        for (const tok of parsed.tokens) {
+          if (tok && tok.tokenHash) this.registerTokenInMemory(tok);
+        }
+      }
+      if (Array.isArray(parsed.answers)) {
+        for (const ans of parsed.answers) {
+          if (ans && ans.id) this.answers.set(ans.id, ans);
+        }
+      }
+      if (Array.isArray(parsed.photos)) {
+        for (const ph of parsed.photos) {
+          if (ph && ph.id) this.photos.set(ph.id, ph);
+        }
+      }
+      if (Array.isArray(parsed.audios)) {
+        for (const aud of parsed.audios) {
+          if (aud && aud.id) this.audios.set(aud.id, aud);
+        }
+      }
+      if (Array.isArray(parsed.manuscripts)) {
+        for (const manu of parsed.manuscripts) {
+          if (manu && manu.id) this.manuscripts.set(manu.id, manu);
+        }
+      }
+      if (Array.isArray(parsed.auditLogs)) {
+        this.auditLogs = parsed.auditLogs;
+      }
+      if (Array.isArray(parsed.privacyConsents)) {
+        for (const c of parsed.privacyConsents) {
+          if (c && c.id) this.privacyConsents.set(c.id, c);
+        }
+      }
+      if (Array.isArray(parsed.bookShares)) {
+        for (const s of parsed.bookShares) {
+          if (s && s.id) this.bookShares.set(s.id, s);
+        }
+      }
+      if (Array.isArray(parsed.scheduledDeliveries)) {
+        for (const d of parsed.scheduledDeliveries) {
+          if (d && d.id) this.scheduledDeliveries.set(d.id, d);
+        }
+      }
+      if (Array.isArray(parsed.secondaryAccess)) {
+        for (const sa of parsed.secondaryAccess) {
+          if (sa && sa.id) this.secondaryAccess.set(sa.id, sa);
+        }
+      }
+      if (Array.isArray(parsed.postMortemInstructions)) {
+        for (const pmi of parsed.postMortemInstructions) {
+          if (pmi && pmi.id) this.postMortemInstructions.set(pmi.id, pmi);
+        }
+      }
+      if (Array.isArray(parsed.arcoRequests)) {
+        for (const ar of parsed.arcoRequests) {
+          if (ar && ar.id) this.arcoRequests.set(ar.id, ar);
+        }
+      }
+      return true;
+    } catch (err) {
+      console.warn('[StorageManager] Could not load state snapshot from disk:', err);
+      return false;
+    }
+  }
+
   private async persistDoc<T>(collectionName: string, docId: string, data: T): Promise<void> {
+    this.saveStateToDisk();
     try {
       const sanitized = this.sanitizeDocForFirestore(data);
       const serialized = JSON.stringify(sanitized);
@@ -200,7 +338,7 @@ class StorageManager {
       await setDoc(doc(serverDb, collectionName, docId), sanitized as Record<string, unknown>);
     } catch (err: any) {
       if (err?.message?.includes('Quota limit exceeded') || err?.code === 'resource-exhausted') {
-        console.warn(`[Firestore Quota] Write skipped for ${collectionName}/${docId} due to daily limit. Stored in memory.`);
+        console.warn(`[Firestore Quota] Write skipped for ${collectionName}/${docId} due to daily limit. Stored in memory and disk.`);
       } else if (err?.message?.includes('exceeds the limit') || err?.code === 3) {
         console.warn(`[Firestore Payload Warning] Write skipped for ${collectionName}/${docId} due to size limit (${err?.message}). Retained safely on server.`);
       } else {
@@ -210,11 +348,12 @@ class StorageManager {
   }
 
   private async removeDoc(collectionName: string, docId: string): Promise<void> {
+    this.saveStateToDisk();
     try {
       await deleteDoc(doc(serverDb, collectionName, docId));
     } catch (err: any) {
       if (err?.message?.includes('Quota limit exceeded') || err?.code === 'resource-exhausted') {
-        console.warn(`[Firestore Quota] Delete skipped for ${collectionName}/${docId} due to daily limit. Removed from memory.`);
+        console.warn(`[Firestore Quota] Delete skipped for ${collectionName}/${docId} due to daily limit. Removed from memory and disk.`);
       } else {
         console.warn(`[Firestore Delete Warning] Could not delete ${collectionName}/${docId}:`, err?.message || err);
       }
@@ -222,13 +361,443 @@ class StorageManager {
   }
 
   private registerTokenInMemory(tokenDoc: PersistedTokenRecord) {
+    const partDeterministicCode = tokenDoc.participantId
+      ? deriveDeterministicAccessCode(tokenDoc.participantId).toUpperCase()
+      : '';
+    const hashDeterministicCode = tokenDoc.tokenHash
+      ? deriveDeterministicAccessCode(tokenDoc.tokenHash).toUpperCase()
+      : '';
+
+    if (!tokenDoc.accessCode || tokenDoc.accessCode.trim().length === 0) {
+      tokenDoc.accessCode = partDeterministicCode || hashDeterministicCode;
+    } else {
+      tokenDoc.accessCode = extractCleanTokenOrCode(tokenDoc.accessCode).toUpperCase();
+    }
+    if (!tokenDoc.plainToken || tokenDoc.plainToken.trim().length === 0) {
+      tokenDoc.plainToken = deriveDeterministicPlainToken(tokenDoc.participantId || tokenDoc.tokenHash);
+    }
+
+    // Deduplicate any existing non-revoked token for the same participantId so a participant never has two conflicting tokens
+    const aliasCodes = new Set<string>();
+    const aliasPlainTokens = new Set<string>();
+
+    if (tokenDoc.participantId && !tokenDoc.revoked) {
+      for (const [existingHash, existingTok] of Array.from(this.tokens.entries())) {
+        if (existingTok.participantId === tokenDoc.participantId && !existingTok.revoked && existingHash !== tokenDoc.tokenHash) {
+          if (existingTok.accessCode) aliasCodes.add(existingTok.accessCode.toUpperCase());
+          if (existingTok.plainToken) aliasPlainTokens.add(existingTok.plainToken);
+
+          // Prefer the original non-fallback token record (where id does not start with tok_part_ or accessCode is not the fallback partDeterministicCode)
+          const incomingIsFallback =
+            tokenDoc.id === `tok_${tokenDoc.participantId}` &&
+            tokenDoc.accessCode === partDeterministicCode;
+          const existingIsFallback =
+            existingTok.id === `tok_${existingTok.participantId}` &&
+            existingTok.accessCode === partDeterministicCode;
+
+          if (incomingIsFallback && !existingIsFallback) {
+            tokenDoc.id = existingTok.id;
+            tokenDoc.tokenHash = existingTok.tokenHash;
+            tokenDoc.plainToken = existingTok.plainToken || tokenDoc.plainToken;
+            tokenDoc.accessCode = existingTok.accessCode || tokenDoc.accessCode;
+          } else if (!incomingIsFallback && existingIsFallback) {
+            this.tokens.delete(existingHash);
+          } else {
+            // Both are real or both are fallback: preserve non-deterministic accessCode if one has it
+            if (tokenDoc.accessCode === partDeterministicCode && existingTok.accessCode && existingTok.accessCode !== partDeterministicCode) {
+              tokenDoc.accessCode = existingTok.accessCode.toUpperCase();
+            }
+            this.tokens.delete(existingHash);
+          }
+        }
+      }
+    }
+
     this.tokens.set(tokenDoc.tokenHash, tokenDoc);
-    if (tokenDoc.plainToken) {
-      this.plainTokenMap.set(tokenDoc.plainToken, tokenDoc.tokenHash);
+
+    aliasPlainTokens.add(tokenDoc.plainToken);
+    if (tokenDoc.participantId) {
+      aliasPlainTokens.add(deriveDeterministicPlainToken(tokenDoc.participantId));
     }
-    if (tokenDoc.accessCode) {
-      this.accessCodeMap.set(tokenDoc.accessCode.toUpperCase(), tokenDoc.tokenHash);
+    for (const pt of aliasPlainTokens) {
+      if (!pt) continue;
+      this.plainTokenMap.set(pt, tokenDoc.tokenHash);
+      this.plainTokenMap.set(pt.toLowerCase(), tokenDoc.tokenHash);
     }
+
+    aliasCodes.add(tokenDoc.accessCode.toUpperCase());
+    if (partDeterministicCode) aliasCodes.add(partDeterministicCode);
+    if (hashDeterministicCode) aliasCodes.add(hashDeterministicCode);
+
+    for (const code of aliasCodes) {
+      if (!code) continue;
+      const upper = code.toUpperCase();
+      this.accessCodeMap.set(upper, tokenDoc.tokenHash);
+      const alphaNum = upper.replace(/[^A-Z0-9]/gi, '');
+      if (alphaNum) {
+        this.accessCodeMap.set(alphaNum, tokenDoc.tokenHash);
+      }
+    }
+  }
+
+  private ensureParticipantTokensConsistent(): void {
+    for (const part of this.participants.values()) {
+      const interview = this.interviews.get(part.interviewId);
+      const existingToken = Array.from(this.tokens.values()).find(
+        (t) => t.participantId === part.id && !t.revoked
+      );
+      if (existingToken) {
+        if (
+          interview &&
+          interview.status === 'open' &&
+          new Date(interview.expiresAt).getTime() > Date.now() &&
+          new Date(existingToken.expiresAt).getTime() < new Date(interview.expiresAt).getTime()
+        ) {
+          existingToken.expiresAt = interview.expiresAt;
+        }
+        this.registerTokenInMemory(existingToken);
+      } else {
+        const plainToken = deriveDeterministicPlainToken(part.id);
+        const tokenHash = hashToken(plainToken);
+        const accessCode = deriveDeterministicAccessCode(part.id);
+        const expiresAt =
+          interview?.expiresAt || new Date(Date.now() + 20 * 86400000).toISOString();
+        const fallbackTok: PersistedTokenRecord = {
+          id: `tok_${part.id}`,
+          tokenHash,
+          plainToken,
+          accessCode,
+          interviewId: part.interviewId,
+          participantId: part.id,
+          expiresAt,
+          revoked: false,
+          createdAt: new Date().toISOString(),
+        };
+        this.registerTokenInMemory(fallbackTok);
+      }
+    }
+  }
+
+  private seedDefaultInterviewsInMemory(): void {
+    const now = new Date();
+    const openDays = 20;
+    const expiresAt = new Date(now.getTime() + openDays * 86400000).toISOString();
+
+    // 1. Individual Interview: "Memorias de Don Fernando: Raíces y Legado"
+    const indInterviewId = 'int_demo_fernando';
+    const indPartId = 'part_demo_fernando';
+    const indPlainToken = deriveDeterministicPlainToken(indPartId);
+    const indTokenHash = hashToken(indPlainToken);
+    const indAccessCode = 'LEG-8492';
+
+    const indInterview: InterviewRecord = {
+      id: indInterviewId,
+      title: 'Memorias de Don Fernando: Raíces y Legado',
+      storyMode: 'individual',
+      storyType: 'biografia_personal',
+      status: 'open',
+      openedAt: now.toISOString(),
+      expiresAt,
+      openDaysAtCreation: openDays,
+      sufficiencyThreshold: 5,
+      maxFollowUpsAtCreation: this.config.defaultMaxFollowUps,
+      completedQuestionCount: 3,
+      sufficiencyStatus: 'not_evaluated',
+      userDeclaredComplete: false,
+      closedAt: null,
+      closureReason: null,
+      lastActivityAt: now.toISOString(),
+      questionnaireVersionId: 'v1_initial',
+      createdById: 'garcia.michel@gmail.com',
+      createdByName: 'garcia.michel@gmail.com',
+    };
+    const indParticipant: ParticipantRecord = {
+      id: indPartId,
+      interviewId: indInterviewId,
+      name: 'Fernando Morales',
+      relationship: 'Titular',
+      role: 'primary',
+      status: 'active',
+      email: 'fernando.morales.demo@example.com',
+      joinedAt: now.toISOString(),
+    };
+    const indToken: PersistedTokenRecord = {
+      id: 'tok_demo_fernando',
+      tokenHash: indTokenHash,
+      plainToken: indPlainToken,
+      accessCode: indAccessCode,
+      interviewId: indInterviewId,
+      participantId: indPartId,
+      expiresAt,
+      revoked: false,
+      createdAt: now.toISOString(),
+    };
+
+    this.interviews.set(indInterview.id, indInterview);
+    this.participants.set(indParticipant.id, indParticipant);
+    this.registerTokenInMemory(indToken);
+
+    const indAnswers: AnswerRecord[] = [
+      {
+        id: 'ans_demo_fernando_1',
+        interviewId: indInterviewId,
+        questionId: 'q_inf_01',
+        questionText: '¿Dónde naciste y cómo recuerdas la casa o el lugar donde pasaste tus primeros años?',
+        participantId: indPartId,
+        participantName: 'Fernando Morales',
+        answerText:
+          'Nací en un pueblito de Michoacán llamado Quiroga en 1948. Recuerdo el patio grande empedrado con naranjos y el olor a tierra mojada.',
+        notRecalled: false,
+        isFollowUp: false,
+        parentQuestionId: null,
+        isAdditionalMemory: false,
+        branchChoice: null,
+        idempotencyKey: 'seed_ind_ans_1',
+        createdAt: now.toISOString(),
+        updatedAt: now.toISOString(),
+      },
+      {
+        id: 'ans_demo_fernando_2',
+        interviewId: indInterviewId,
+        questionId: 'q_inf_02',
+        questionText: '¿Quiénes fueron las personas más importantes en tu infancia y qué enseñanzas te dejaron?',
+        participantId: indPartId,
+        participantName: 'Fernando Morales',
+        answerText:
+          'Mi padre era carpintero y mi madre tejía manteles. Nos inculcaron siempre la honradez y la puntualidad como el mayor capital de un hombre.',
+        notRecalled: false,
+        isFollowUp: false,
+        parentQuestionId: null,
+        isAdditionalMemory: false,
+        branchChoice: null,
+        idempotencyKey: 'seed_ind_ans_2',
+        createdAt: now.toISOString(),
+        updatedAt: now.toISOString(),
+      },
+      {
+        id: 'ans_demo_fernando_3',
+        interviewId: indInterviewId,
+        questionId: 'q_inf_03',
+        questionText: '¿Cuál era tu juego o pasatiempo favorito cuando eras niño?',
+        participantId: indPartId,
+        participantName: 'Fernando Morales',
+        answerText: '',
+        notRecalled: true,
+        isFollowUp: false,
+        parentQuestionId: null,
+        isAdditionalMemory: false,
+        branchChoice: null,
+        idempotencyKey: 'seed_ind_ans_3',
+        createdAt: now.toISOString(),
+        updatedAt: now.toISOString(),
+      },
+    ];
+    for (const ans of indAnswers) {
+      this.answers.set(ans.id, ans);
+    }
+
+    // 2. Shared Interview: "Crónicas de la Familia Valenzuela"
+    const sharedInterviewId = 'int_demo_valenzuela';
+    const fatherPartId = 'part_demo_roberto';
+    const daughterPartId = 'part_demo_sofia';
+    const sharedExpiresAt = new Date(now.getTime() + 30 * 86400000).toISOString();
+
+    const sharedInterview: InterviewRecord = {
+      id: sharedInterviewId,
+      title: 'Crónicas de la Familia Valenzuela',
+      storyMode: 'compartida',
+      storyType: 'memorias_familiares',
+      status: 'open',
+      openedAt: now.toISOString(),
+      expiresAt: sharedExpiresAt,
+      openDaysAtCreation: 30,
+      sufficiencyThreshold: 6,
+      maxFollowUpsAtCreation: this.config.defaultMaxFollowUps,
+      completedQuestionCount: 2,
+      sufficiencyStatus: 'not_evaluated',
+      userDeclaredComplete: false,
+      closedAt: null,
+      closureReason: null,
+      lastActivityAt: now.toISOString(),
+      questionnaireVersionId: 'v1_initial',
+      createdById: 'garcia.michel@gmail.com',
+      createdByName: 'garcia.michel@gmail.com',
+    };
+    const fatherPart: ParticipantRecord = {
+      id: fatherPartId,
+      interviewId: sharedInterviewId,
+      name: 'Roberto Valenzuela (Padre)',
+      relationship: 'Padre',
+      role: 'primary',
+      status: 'active',
+      email: 'roberto.valenzuela.demo@example.com',
+      joinedAt: now.toISOString(),
+    };
+    const daughterPart: ParticipantRecord = {
+      id: daughterPartId,
+      interviewId: sharedInterviewId,
+      name: 'Sofía Valenzuela (Hija)',
+      relationship: 'Hija',
+      role: 'contributor',
+      status: 'active',
+      email: 'sofia.valenzuela.demo@example.com',
+      joinedAt: now.toISOString(),
+    };
+
+    const fatherPlain = deriveDeterministicPlainToken(fatherPartId);
+    const fatherTok: PersistedTokenRecord = {
+      id: 'tok_demo_roberto',
+      tokenHash: hashToken(fatherPlain),
+      plainToken: fatherPlain,
+      accessCode: 'LEG-5319',
+      interviewId: sharedInterviewId,
+      participantId: fatherPartId,
+      expiresAt: sharedExpiresAt,
+      revoked: false,
+      createdAt: now.toISOString(),
+    };
+
+    const daughterPlain = deriveDeterministicPlainToken(daughterPartId);
+    const daughterTok: PersistedTokenRecord = {
+      id: 'tok_demo_sofia',
+      tokenHash: hashToken(daughterPlain),
+      plainToken: daughterPlain,
+      accessCode: 'LEG-7640',
+      interviewId: sharedInterviewId,
+      participantId: daughterPartId,
+      expiresAt: sharedExpiresAt,
+      revoked: false,
+      createdAt: now.toISOString(),
+    };
+
+    this.interviews.set(sharedInterview.id, sharedInterview);
+    this.participants.set(fatherPart.id, fatherPart);
+    this.participants.set(daughterPart.id, daughterPart);
+    this.registerTokenInMemory(fatherTok);
+    this.registerTokenInMemory(daughterTok);
+
+    const sharedAnswers: AnswerRecord[] = [
+      {
+        id: 'ans_demo_roberto_1',
+        interviewId: sharedInterviewId,
+        questionId: 'q_inf_01',
+        questionText: '¿Dónde naciste y cómo recuerdas la casa o el lugar donde pasaste tus primeros años?',
+        participantId: fatherPartId,
+        participantName: 'Roberto Valenzuela (Padre)',
+        answerText:
+          'Nuestra primera casa familiar en Monterrey era pequeña, con techo de lámina y un jardín donde planté una higuera que aún sigue en pie.',
+        notRecalled: false,
+        isFollowUp: false,
+        parentQuestionId: null,
+        isAdditionalMemory: false,
+        branchChoice: null,
+        idempotencyKey: 'seed_shared_ans_father_1',
+        createdAt: now.toISOString(),
+        updatedAt: now.toISOString(),
+      },
+      {
+        id: 'ans_demo_sofia_1',
+        interviewId: sharedInterviewId,
+        questionId: 'q_inf_01',
+        questionText: '¿Dónde naciste y cómo recuerdas la casa o el lugar donde pasaste tus primeros años?',
+        participantId: daughterPartId,
+        participantName: 'Sofía Valenzuela (Hija)',
+        answerText:
+          'Yo crecí jugando bajo esa higuera que papá cuidaba. Para mí esa casa olía a pan tostado y a las noches de lluvia viendo caer relámpagos con mi hermano.',
+        notRecalled: false,
+        isFollowUp: false,
+        parentQuestionId: null,
+        isAdditionalMemory: false,
+        branchChoice: null,
+        idempotencyKey: 'seed_shared_ans_daughter_1',
+        createdAt: now.toISOString(),
+        updatedAt: now.toISOString(),
+      },
+    ];
+    for (const ans of sharedAnswers) {
+      this.answers.set(ans.id, ans);
+    }
+
+    this.saveStateToDisk();
+  }
+
+  public restoreFromClientCache(cachedInterviews?: any[]): number {
+    if (!Array.isArray(cachedInterviews) || cachedInterviews.length === 0) return 0;
+    let restoredCount = 0;
+
+    for (const item of cachedInterviews) {
+      if (!item || !item.id || !item.title) continue;
+      const { participants: partList, answersCount: _ac, manuscriptsCount: _mc, latestManuscriptVersion: _lmv, photosCount: _pc, ...interviewData } = item;
+
+      if (!this.interviews.has(interviewData.id)) {
+        this.interviews.set(interviewData.id, interviewData as InterviewRecord);
+        restoredCount++;
+      }
+
+      if (Array.isArray(partList)) {
+        for (const p of partList) {
+          if (!p || !p.id) continue;
+          const { plainToken, accessCode, inviteUrl: _iu, ...partRecord } = p;
+          if (!this.participants.has(partRecord.id)) {
+            this.participants.set(partRecord.id, {
+              ...partRecord,
+              interviewId: interviewData.id,
+            } as ParticipantRecord);
+          }
+
+          const resolvedPlain = plainToken || deriveDeterministicPlainToken(partRecord.id);
+          const resolvedHash = hashToken(resolvedPlain);
+          const resolvedCode = accessCode
+            ? extractCleanTokenOrCode(accessCode).toUpperCase()
+            : deriveDeterministicAccessCode(partRecord.id);
+
+          const existingTok = Array.from(this.tokens.values()).find(
+            (t) => t.participantId === partRecord.id && !t.revoked
+          );
+
+          if (!existingTok) {
+            const newTok: PersistedTokenRecord = {
+              id: `tok_${partRecord.id}`,
+              tokenHash: resolvedHash,
+              plainToken: resolvedPlain,
+              accessCode: resolvedCode,
+              interviewId: interviewData.id,
+              participantId: partRecord.id,
+              expiresAt:
+                interviewData.expiresAt || new Date(Date.now() + 20 * 86400000).toISOString(),
+              revoked: false,
+              createdAt: interviewData.openedAt || new Date().toISOString(),
+            };
+            this.registerTokenInMemory(newTok);
+          } else {
+            const fallbackPartCode = deriveDeterministicAccessCode(partRecord.id).toUpperCase();
+            // Only replace existingTok.accessCode if the incoming resolvedCode is a real non-fallback code
+            // or if existingTok currently only has a fallback code
+            if (
+              accessCode &&
+              resolvedCode !== fallbackPartCode &&
+              existingTok.accessCode !== resolvedCode
+            ) {
+              existingTok.accessCode = resolvedCode;
+            }
+            if (plainToken && existingTok.plainToken !== plainToken) {
+              existingTok.plainToken = plainToken;
+            }
+            this.registerTokenInMemory(existingTok);
+            // Also ensure the incoming resolvedCode is mapped as an alias for this token
+            if (resolvedCode) {
+              this.accessCodeMap.set(resolvedCode.toUpperCase(), existingTok.tokenHash);
+              this.accessCodeMap.set(resolvedCode.replace(/[^A-Z0-9]/gi, '').toUpperCase(), existingTok.tokenHash);
+            }
+          }
+        }
+      }
+    }
+
+    if (restoredCount > 0 || cachedInterviews.length > 0) {
+      this.saveStateToDisk();
+    }
+    return restoredCount;
   }
 
   public async ensureInitialized(): Promise<void> {
@@ -240,26 +809,11 @@ class StorageManager {
   }
 
   public async loadFromFirestore(): Promise<void> {
+    // 0. Always hydrate from local disk snapshot first so restarts survive Firestore quota limits
+    this.loadStateFromDisk();
+
     try {
-      const [
-        settingsSnap,
-        questionsSnap,
-        versionsSnap,
-        interviewsSnap,
-        participantsSnap,
-        tokensSnap,
-        answersSnap,
-        photosSnap,
-        audiosSnap,
-        manuscriptsSnap,
-        logsSnap,
-        consentsSnap,
-        sharesSnap,
-        deliveriesSnap,
-        secondarySnap,
-        postMortemSnap,
-        arcoSnap,
-      ] = await Promise.all([
+      const results = await Promise.allSettled([
         getDocs(collection(serverDb, 'settings')),
         getDocs(collection(serverDb, 'questions')),
         getDocs(collection(serverDb, 'questionnaireVersions')),
@@ -279,72 +833,50 @@ class StorageManager {
         getDocs(collection(serverDb, 'arcoRequests')),
       ]);
 
+      const unwrapSnap = (idx: number) => {
+        const r = results[idx];
+        return r && r.status === 'fulfilled' ? r.value : null;
+      };
+
+      const settingsSnap = unwrapSnap(0);
+      const questionsSnap = unwrapSnap(1);
+      const versionsSnap = unwrapSnap(2);
+      const interviewsSnap = unwrapSnap(3);
+      const participantsSnap = unwrapSnap(4);
+      const tokensSnap = unwrapSnap(5);
+      const answersSnap = unwrapSnap(6);
+      const photosSnap = unwrapSnap(7);
+      const audiosSnap = unwrapSnap(8);
+      const manuscriptsSnap = unwrapSnap(9);
+      const logsSnap = unwrapSnap(10);
+      const consentsSnap = unwrapSnap(11);
+      const sharesSnap = unwrapSnap(12);
+      const deliveriesSnap = unwrapSnap(13);
+      const secondarySnap = unwrapSnap(14);
+      const postMortemSnap = unwrapSnap(15);
+      const arcoSnap = unwrapSnap(16);
+
       // 1. Settings
-      let foundConfig = false;
-      settingsSnap.forEach((docSnap) => {
-        if (docSnap.id === 'appConfig') {
-          this.config = { ...INITIAL_APP_CONFIG, ...(docSnap.data() as AppConfig) };
-          foundConfig = true;
-        }
-      });
-      if (!foundConfig) {
-        await this.persistDoc('settings', 'appConfig', this.config);
+      if (settingsSnap) {
+        settingsSnap.forEach((docSnap) => {
+          if (docSnap.id === 'appConfig') {
+            this.config = { ...INITIAL_APP_CONFIG, ...(docSnap.data() as AppConfig) };
+          }
+        });
       }
 
       // 2. Questions
-      if (questionsSnap.empty) {
-        // Persist default questions on first ever boot
-        await Promise.all(
-          DEFAULT_QUESTIONS.map((q) => this.persistDoc('questions', q.id, q))
-        );
-      } else {
+      if (questionsSnap && !questionsSnap.empty) {
         questionsSnap.forEach((docSnap) => {
           const q = docSnap.data() as QuestionRecord;
           if (q && q.id) {
             this.questions.set(q.id, q);
           }
         });
-
-        // Ensure default sub-flow questions (e.g. 'hijos') and default branchConfig on q_adu_03 exist
-        for (const defQ of DEFAULT_QUESTIONS) {
-          const existing = this.questions.get(defQ.id);
-          if (!existing) {
-            this.questions.set(defQ.id, { ...defQ });
-            await this.persistDoc('questions', defQ.id, defQ);
-          } else {
-            let needsUpdate = false;
-            const merged = { ...existing };
-            if (!merged.flowId && defQ.flowId) {
-              merged.flowId = defQ.flowId;
-              needsUpdate = true;
-            }
-            if (merged.orderIndex === undefined && defQ.orderIndex !== undefined) {
-              merged.orderIndex = defQ.orderIndex;
-              needsUpdate = true;
-            }
-            if (defQ.id === 'q_adu_03' && !merged.branchConfig && defQ.branchConfig) {
-              merged.branchConfig = defQ.branchConfig;
-              merged.text = defQ.text;
-              merged.allowedStoryModes = 'ambas';
-              needsUpdate = true;
-            }
-            if (needsUpdate) {
-              this.questions.set(merged.id, merged);
-              await this.persistDoc('questions', merged.id, merged);
-            }
-          }
-        }
       }
 
       // 3. Questionnaire Versions
-      if (versionsSnap.empty) {
-        const initialVersion: QuestionnaireVersionDoc = {
-          id: 'v1_initial',
-          questions: Array.from(this.questions.values()),
-          createdAt: new Date().toISOString(),
-        };
-        await this.persistDoc('questionnaireVersions', 'v1_initial', initialVersion);
-      } else {
+      if (versionsSnap && !versionsSnap.empty) {
         versionsSnap.forEach((docSnap) => {
           const v = docSnap.data() as QuestionnaireVersionDoc;
           if (v && v.id && Array.isArray(v.questions)) {
@@ -354,138 +886,170 @@ class StorageManager {
       }
 
       // 4. Interviews
-      interviewsSnap.forEach((docSnap) => {
-        const inv = docSnap.data() as InterviewRecord;
-        if (inv && inv.id) {
-          this.interviews.set(inv.id, inv);
-        }
-      });
+      if (interviewsSnap) {
+        interviewsSnap.forEach((docSnap) => {
+          const inv = docSnap.data() as InterviewRecord;
+          if (inv && inv.id) {
+            this.interviews.set(inv.id, inv);
+          }
+        });
+      }
 
       // 5. Participants
-      participantsSnap.forEach((docSnap) => {
-        const part = docSnap.data() as ParticipantRecord;
-        if (part && part.id) {
-          this.participants.set(part.id, part);
-        }
-      });
+      if (participantsSnap) {
+        participantsSnap.forEach((docSnap) => {
+          const part = docSnap.data() as ParticipantRecord;
+          if (part && part.id) {
+            this.participants.set(part.id, part);
+          }
+        });
+      }
 
       // 6. Tokens
-      tokensSnap.forEach((docSnap) => {
-        const tok = docSnap.data() as PersistedTokenRecord;
-        if (tok && tok.tokenHash) {
-          this.registerTokenInMemory(tok);
-        }
-      });
+      if (tokensSnap) {
+        tokensSnap.forEach((docSnap) => {
+          const tok = docSnap.data() as PersistedTokenRecord;
+          if (tok && tok.tokenHash) {
+            this.registerTokenInMemory(tok);
+          }
+        });
+      }
 
       // 7. Answers
-      answersSnap.forEach((docSnap) => {
-        const ans = docSnap.data() as AnswerRecord;
-        if (ans && ans.id) {
-          this.answers.set(ans.id, ans);
-        }
-      });
+      if (answersSnap) {
+        answersSnap.forEach((docSnap) => {
+          const ans = docSnap.data() as AnswerRecord;
+          if (ans && ans.id) {
+            this.answers.set(ans.id, ans);
+          }
+        });
+      }
 
       // 7b. Interview Photos
-      photosSnap.forEach((docSnap) => {
-        const photo = docSnap.data() as InterviewPhotoRecord;
-        if (photo && photo.id) {
-          this.photos.set(photo.id, photo);
-        }
-      });
+      if (photosSnap) {
+        photosSnap.forEach((docSnap) => {
+          const photo = docSnap.data() as InterviewPhotoRecord;
+          if (photo && photo.id) {
+            this.photos.set(photo.id, photo);
+          }
+        });
+      }
 
       // 7c. Interview Voice Audio Recordings & Transcriptions
-      audiosSnap.forEach((docSnap) => {
-        const aud = docSnap.data() as InterviewAudioRecord;
-        if (aud && aud.id) {
-          this.audios.set(aud.id, aud);
-        }
-      });
+      if (audiosSnap) {
+        audiosSnap.forEach((docSnap) => {
+          const aud = docSnap.data() as InterviewAudioRecord;
+          if (aud && aud.id) {
+            this.audios.set(aud.id, aud);
+          }
+        });
+      }
 
       // 8. Manuscripts
-      manuscriptsSnap.forEach((docSnap) => {
-        const manu = docSnap.data() as ManuscriptRecord;
-        if (manu && manu.id) {
-          this.manuscripts.set(manu.id, manu);
-        }
-      });
+      if (manuscriptsSnap) {
+        manuscriptsSnap.forEach((docSnap) => {
+          const manu = docSnap.data() as ManuscriptRecord;
+          if (manu && manu.id) {
+            this.manuscripts.set(manu.id, manu);
+          }
+        });
+      }
 
       // 9. Audit Logs
-      const loadedLogs: AuditLogRecord[] = [];
-      logsSnap.forEach((docSnap) => {
-        const log = docSnap.data() as AuditLogRecord;
-        if (log && log.id) {
-          loadedLogs.push(log);
+      if (logsSnap) {
+        const loadedLogs: AuditLogRecord[] = [];
+        logsSnap.forEach((docSnap) => {
+          const log = docSnap.data() as AuditLogRecord;
+          if (log && log.id) {
+            loadedLogs.push(log);
+          }
+        });
+        if (loadedLogs.length > 0) {
+          loadedLogs.sort(
+            (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+          );
+          this.auditLogs = loadedLogs;
         }
-      });
-      if (loadedLogs.length > 0) {
-        loadedLogs.sort(
-          (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
-        );
-        this.auditLogs = loadedLogs;
       }
 
       // 10. Privacy Consents
-      consentsSnap.forEach((docSnap) => {
-        const c = docSnap.data() as PrivacyConsentRecord;
-        if (c && c.id) {
-          this.privacyConsents.set(c.id, c);
-        }
-      });
+      if (consentsSnap) {
+        consentsSnap.forEach((docSnap) => {
+          const c = docSnap.data() as PrivacyConsentRecord;
+          if (c && c.id) {
+            this.privacyConsents.set(c.id, c);
+          }
+        });
+      }
 
       // 11. Book Shares
-      sharesSnap.forEach((docSnap) => {
-        const s = docSnap.data() as BookShareRecord;
-        if (s && s.id) {
-          this.bookShares.set(s.id, s);
-        }
-      });
+      if (sharesSnap) {
+        sharesSnap.forEach((docSnap) => {
+          const s = docSnap.data() as BookShareRecord;
+          if (s && s.id) {
+            this.bookShares.set(s.id, s);
+          }
+        });
+      }
 
       // 12. Scheduled Deliveries
-      deliveriesSnap.forEach((docSnap) => {
-        const d = docSnap.data() as ScheduledDeliveryRecord;
-        if (d && d.id) {
-          this.scheduledDeliveries.set(d.id, d);
-        }
-      });
+      if (deliveriesSnap) {
+        deliveriesSnap.forEach((docSnap) => {
+          const d = docSnap.data() as ScheduledDeliveryRecord;
+          if (d && d.id) {
+            this.scheduledDeliveries.set(d.id, d);
+          }
+        });
+      }
 
       // 13. Secondary Access
-      secondarySnap.forEach((docSnap) => {
-        const sa = docSnap.data() as SecondaryAccessRecord;
-        if (sa && sa.id) {
-          this.secondaryAccess.set(sa.id, sa);
-        }
-      });
+      if (secondarySnap) {
+        secondarySnap.forEach((docSnap) => {
+          const sa = docSnap.data() as SecondaryAccessRecord;
+          if (sa && sa.id) {
+            this.secondaryAccess.set(sa.id, sa);
+          }
+        });
+      }
 
       // 14. Post Mortem Instructions
-      postMortemSnap.forEach((docSnap) => {
-        const pmi = docSnap.data() as PostMortemInstructionRecord;
-        if (pmi && pmi.id) {
-          this.postMortemInstructions.set(pmi.id, pmi);
-        }
-      });
+      if (postMortemSnap) {
+        postMortemSnap.forEach((docSnap) => {
+          const pmi = docSnap.data() as PostMortemInstructionRecord;
+          if (pmi && pmi.id) {
+            this.postMortemInstructions.set(pmi.id, pmi);
+          }
+        });
+      }
 
       // 15. ARCO Requests
-      arcoSnap.forEach((docSnap) => {
-        const ar = docSnap.data() as ArcoRequestRecord;
-        if (ar && ar.id) {
-          this.arcoRequests.set(ar.id, ar);
-        }
-      });
-
-      this.initialized = true;
-    } catch (err: any) {
-      if (err?.message?.includes('Quota limit exceeded') || err?.code === 'resource-exhausted') {
-        console.warn(
-          '[StorageManager] Firestore daily read quota reached for free tier. Operating in resilient in-memory mode until quota resets.'
-        );
-      } else {
-        console.warn(
-          '[StorageManager] Note: Could not load initial state from Firestore (continuing with cached memory state):',
-          err?.message || err
-        );
+      if (arcoSnap) {
+        arcoSnap.forEach((docSnap) => {
+          const ar = docSnap.data() as ArcoRequestRecord;
+          if (ar && ar.id) {
+            this.arcoRequests.set(ar.id, ar);
+          }
+        });
       }
-      this.initialized = true;
+    } catch (err: any) {
+      console.warn(
+        '[StorageManager] Note during initial Firestore load (operating with disk & memory state):',
+        err?.message || err
+      );
     }
+
+    // Ensure all participants have registered tokens and access codes
+    this.ensureParticipantTokensConsistent();
+
+    // If no interviews exist yet (e.g. fresh environment or Firestore read quota reached before first disk save),
+    // seed deterministic default interviews so Admin Panel and Participant Portal always have valid interviews & codes
+    if (this.interviews.size === 0) {
+      this.seedDefaultInterviewsInMemory();
+    } else {
+      this.saveStateToDisk();
+    }
+
+    this.initialized = true;
   }
 
   // --- Configuration ---
@@ -811,48 +1375,62 @@ class StorageManager {
     interview: InterviewRecord;
     participant: ParticipantRecord;
   } {
-    if (!rawInput) {
+    if (!rawInput || !rawInput.trim()) {
       throw new Error('Debe proporcionar un token o código de acceso.');
     }
 
-    let cleaned = rawInput.trim();
-    // If a full URL was pasted (e.g. https://.../interview?token=xyz or ?code=LEG-1234)
-    if (cleaned.includes('token=')) {
-      cleaned = cleaned.split('token=')[1].split('&')[0].split('#')[0];
-    } else if (cleaned.includes('code=')) {
-      cleaned = cleaned.split('code=')[1].split('&')[0].split('#')[0];
-    } else if (cleaned.includes('#token=')) {
-      cleaned = cleaned.split('#token=')[1].split('&')[0];
-    } else if (cleaned.includes('#code=')) {
-      cleaned = cleaned.split('#code=')[1].split('&')[0];
-    }
+    // Ensure every known participant has a consistent token registered
+    this.ensureParticipantTokensConsistent();
 
-    // 1. Check if matches human-friendly accessCode (case-insensitive)
+    const cleaned = extractCleanTokenOrCode(rawInput);
     const upperInput = cleaned.toUpperCase();
-    let targetHash = this.accessCodeMap.get(upperInput);
+    const lowerInput = cleaned.toLowerCase();
 
-    // 2. Check if matches known plainToken
-    if (!targetHash) {
-      targetHash = this.plainTokenMap.get(cleaned);
-    }
+    // 1. Fast map lookup (accessCode, plainToken, or hash)
+    let targetHash =
+      this.accessCodeMap.get(upperInput) ||
+      this.accessCodeMap.get(upperInput.replace(/[^A-Z0-9]/g, '')) ||
+      this.plainTokenMap.get(cleaned) ||
+      this.plainTokenMap.get(lowerInput);
 
-    // 3. Check SHA-256 hash of cleaned input
     if (!targetHash) {
       const hashed = hashToken(cleaned);
+      const hashedLower = hashToken(lowerInput);
       if (this.tokens.has(hashed)) {
         targetHash = hashed;
+      } else if (this.tokens.has(hashedLower)) {
+        targetHash = hashedLower;
+      } else if (this.tokens.has(cleaned)) {
+        targetHash = cleaned;
+      } else if (this.tokens.has(lowerInput)) {
+        targetHash = lowerInput;
       }
     }
 
-    // 4. Check if cleaned input was already a direct hash
-    if (!targetHash && this.tokens.has(cleaned)) {
-      targetHash = cleaned;
-    }
+    let tokenDoc = targetHash ? this.tokens.get(targetHash) : undefined;
 
-    const tokenDoc = targetHash ? this.tokens.get(targetHash) : undefined;
+    // 2. Comprehensive fallback scan across all token records
+    if (!tokenDoc) {
+      tokenDoc = matchTokenRecord(rawInput, this.tokens.values());
+    }
 
     if (!tokenDoc) {
       throw new Error('El enlace o código de acceso no es válido o no existe.');
+    }
+
+    const interview = this.interviews.get(tokenDoc.interviewId);
+    if (!interview) {
+      throw new Error('La entrevista asociada no existe.');
+    }
+
+    // If the parent interview is open and unexpired, keep the unrevoked token's expiration in sync
+    if (
+      !tokenDoc.revoked &&
+      interview.status === 'open' &&
+      new Date(interview.expiresAt).getTime() > Date.now() &&
+      new Date(tokenDoc.expiresAt).getTime() < new Date(interview.expiresAt).getTime()
+    ) {
+      tokenDoc.expiresAt = interview.expiresAt;
     }
 
     if (!isTokenActive(tokenDoc)) {
@@ -861,11 +1439,6 @@ class StorageManager {
           ? 'Esta invitación ha sido revocada por el administrador.'
           : 'El enlace de invitación ha vencido.'
       );
-    }
-
-    const interview = this.interviews.get(tokenDoc.interviewId);
-    if (!interview) {
-      throw new Error('La entrevista asociada no existe.');
     }
 
     const participant = this.participants.get(tokenDoc.participantId);
@@ -1710,6 +2283,14 @@ class StorageManager {
     this.interviews.set(interviewId, updated);
     await this.persistDoc('interviews', interviewId, updated);
 
+    // Sync token expiration dates for this interview
+    for (const tok of this.tokens.values()) {
+      if (tok.interviewId === interviewId && !tok.revoked) {
+        tok.expiresAt = updated.expiresAt;
+        await this.persistDoc('interviewTokens', tok.id, tok);
+      }
+    }
+
     await this.addAuditLog('EXTEND_INTERVIEW', 'interview', interviewId, performedBy, {
       additionalDays,
       newExpiresAt: updated.expiresAt,
@@ -1729,6 +2310,15 @@ class StorageManager {
     const updated = applyAdminReopen(interview, newDays, reason);
     this.interviews.set(interviewId, updated);
     await this.persistDoc('interviews', interviewId, updated);
+
+    // Sync token expiration dates for this interview
+    for (const tok of this.tokens.values()) {
+      if (tok.interviewId === interviewId) {
+        tok.revoked = false;
+        tok.expiresAt = updated.expiresAt;
+        await this.persistDoc('interviewTokens', tok.id, tok);
+      }
+    }
 
     await this.addAuditLog('REOPEN_INTERVIEW', 'interview', interviewId, performedBy, {
       newDays,
@@ -2015,6 +2605,7 @@ class StorageManager {
   public getParticipantsForInterview(
     interviewId: string
   ): Array<ParticipantRecord & { plainToken?: string; accessCode?: string; inviteUrl?: string }> {
+    this.ensureParticipantTokensConsistent();
     const parts = Array.from(this.participants.values()).filter((p) => p.interviewId === interviewId);
     const result: Array<
       ParticipantRecord & { plainToken?: string; accessCode?: string; inviteUrl?: string }
@@ -2033,10 +2624,11 @@ class StorageManager {
           }
         }
       }
+      const code = token?.accessCode || deriveDeterministicAccessCode(p.id);
       result.push({
         ...p,
         plainToken: plain,
-        accessCode: token?.accessCode,
+        accessCode: code,
         inviteUrl: plain ? `/interview?token=${plain}` : undefined,
       });
     }

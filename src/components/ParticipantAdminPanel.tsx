@@ -20,6 +20,7 @@ import {
   Clock,
   Eye,
   RefreshCw,
+  LogOut,
 } from 'lucide-react';
 import {
   SIMPLIFIED_PRIVACY_NOTICE,
@@ -32,12 +33,14 @@ interface ParticipantAdminPanelProps {
   token: string;
   onClose: () => void;
   onConsentRevoked?: () => void;
+  onLogoutSession?: () => void;
 }
 
 export const ParticipantAdminPanel: React.FC<ParticipantAdminPanelProps> = ({
   token,
   onClose,
   onConsentRevoked,
+  onLogoutSession,
 }) => {
   const [activeTab, setActiveTab] = useState<
     'privacy' | 'versions' | 'share' | 'schedule' | 'secondary' | 'postmortem' | 'audit'
@@ -423,14 +426,27 @@ Generado de forma segura desde la infraestructura Cloud Firestore de ForeverYou.
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={onClose}
-            className="p-2 text-stone-400 hover:text-stone-700 rounded-xl hover:bg-stone-200/60 transition cursor-pointer"
-            title="Cerrar panel"
-          >
-            <X className="w-5 h-5" />
-          </button>
+          <div className="flex items-center gap-2">
+            {onLogoutSession && (
+              <button
+                type="button"
+                onClick={onLogoutSession}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-rose-700 hover:text-rose-900 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-xl transition cursor-pointer"
+                title="Cerrar sesión en este dispositivo y conservar tu avance"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                <span>Cerrar sesión</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              className="p-2 text-stone-400 hover:text-stone-700 rounded-xl hover:bg-stone-200/60 transition cursor-pointer"
+              title="Cerrar panel"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
         </div>
 
         {/* Navigation Tabs */}
@@ -594,6 +610,34 @@ Generado de forma segura desde la infraestructura Cloud Firestore de ForeverYou.
                       </button>
                     </div>
                   </div>
+
+                  {/* Active device session & explicit logout card */}
+                  {onLogoutSession && (
+                    <div className="p-5 bg-white border border-stone-200 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <Lock className="w-4 h-4 text-amber-800" />
+                          <h4 className="font-serif font-bold text-stone-900 text-sm">
+                            Sesión abierta en este dispositivo
+                          </h4>
+                        </div>
+                        <p className="text-xs text-stone-600 leading-relaxed">
+                          Tu sesión permanece activa automáticamente aunque actualices o cierres la página. Si cierras sesión, tu avance en la pregunta actual y cualquier borrador escrito en curso se conservarán para cuando vuelvas a ingresar con tu código o enlace.
+                        </p>
+                      </div>
+
+                      <div className="shrink-0">
+                        <button
+                          type="button"
+                          onClick={onLogoutSession}
+                          className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-bold text-rose-800 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-xl transition cursor-pointer"
+                        >
+                          <LogOut className="w-3.5 h-3.5" />
+                          <span>Cerrar sesión</span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
 
                   {/* Documents & Notice consultation */}
                   <div className="p-5 bg-white border border-stone-200 rounded-2xl space-y-3">

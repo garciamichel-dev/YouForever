@@ -10,12 +10,24 @@ import { ParticipantPortal } from './components/ParticipantPortal.tsx';
 import { AdminLoginView } from './components/AdminLoginView.tsx';
 import { FAQModal } from './components/FAQModal.tsx';
 import { IntegralPrivacyNoticeModal } from './components/IntegralPrivacyNoticeModal.tsx';
+import { ConocemeView } from './components/ConocemeView.tsx';
 import { auth, googleProvider } from './firebase/config.ts';
 import { onAuthStateChanged, signInWithPopup, signOut } from 'firebase/auth';
-import { Clock, HelpCircle, Shield } from 'lucide-react';
+import { Clock, HelpCircle } from 'lucide-react';
+import { getActiveParticipantSession } from './utils/participantSessionStorage.ts';
 
 export default function App() {
-  const [currentView, setCurrentView] = useState<'admin' | 'participant'>('participant');
+  const [currentView, setCurrentView] = useState<'admin' | 'participant' | 'conoceme'>(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const view = urlParams.get('view');
+    if (window.location.pathname.startsWith('/conoceme') || view === 'conoceme') {
+      return 'conoceme';
+    }
+    if (window.location.pathname.startsWith('/admin') || view === 'admin') {
+      return 'admin';
+    }
+    return 'participant';
+  });
   const [adminUser, setAdminUser] = useState<string | null>(null);
   const [isAuthorizedAdmin, setIsAuthorizedAdmin] = useState<boolean>(false);
   const [isAuthChecking, setIsAuthChecking] = useState<boolean>(true);
@@ -28,6 +40,7 @@ export default function App() {
     const urlParams = new URLSearchParams(window.location.search);
     let token = urlParams.get('token') || urlParams.get('code');
     const view = urlParams.get('view');
+    const isConocemeUrl = window.location.pathname.startsWith('/conoceme') || view === 'conoceme';
     const isAdminUrl = window.location.pathname.startsWith('/admin') || view === 'admin';
 
     if (!token && window.location.hash) {
@@ -36,7 +49,9 @@ export default function App() {
       token = hashParams.get('token') || hashParams.get('code');
     }
 
-    if (token) {
+    if (isConocemeUrl) {
+      setCurrentView('conoceme');
+    } else if (token) {
       setParticipantToken(token);
       setCurrentView('participant');
     } else if (isAdminUrl) {
@@ -73,9 +88,13 @@ export default function App() {
 
           const urlParams = new URLSearchParams(window.location.search);
           const token = urlParams.get('token') || urlParams.get('code');
-          const isAdminUrl = window.location.pathname.startsWith('/admin') || urlParams.get('view') === 'admin';
+          const isConocemeUrl =
+            window.location.pathname.startsWith('/conoceme') || urlParams.get('view') === 'conoceme';
+          const isAdminUrl =
+            window.location.pathname.startsWith('/admin') || urlParams.get('view') === 'admin';
+          const hasStoredParticipantSession = Boolean(getActiveParticipantSession());
 
-          if (authorized && (isAdminUrl || !token)) {
+          if (!isConocemeUrl && authorized && (isAdminUrl || (!token && !hasStoredParticipantSession))) {
             setCurrentView('admin');
           }
         } else {
@@ -127,20 +146,40 @@ export default function App() {
     setCurrentView('participant');
   };
 
+  const handleSelectView = (view: 'admin' | 'participant' | 'conoceme') => {
+    if (view === 'conoceme') {
+      window.history.pushState({}, '', '/conoceme');
+    } else if (view === 'admin') {
+      window.history.pushState({}, '', '/admin');
+    } else {
+      window.history.pushState({}, '', '/');
+    }
+    setCurrentView(view);
+  };
+
   return (
     <div className="min-h-screen bg-stone-100/70 text-stone-900 font-sans flex flex-col selection:bg-amber-200">
-      <Navbar
-        currentView={currentView}
-        onSelectView={(v) => setCurrentView(v)}
-        adminEmail={adminUser}
-        isAuthorizedAdmin={isAuthorizedAdmin}
-        onLogout={handleLogout}
-        onOpenFaq={() => setIsFaqOpen(true)}
-        onOpenPrivacyNotice={() => setIsPrivacyNoticeOpen(true)}
-      />
+      {currentView !== 'conoceme' && (
+        <Navbar
+          currentView={currentView}
+          onSelectView={handleSelectView}
+          adminEmail={adminUser}
+          isAuthorizedAdmin={isAuthorizedAdmin}
+          onLogout={handleLogout}
+          onOpenFaq={() => setIsFaqOpen(true)}
+          onOpenPrivacyNotice={() => setIsPrivacyNoticeOpen(true)}
+        />
+      )}
 
-      <main className="flex-1 py-6">
-        {currentView === 'admin' ? (
+      <main className={currentView === 'conoceme' ? 'flex-1' : 'flex-1 py-6'}>
+        {currentView === 'conoceme' ? (
+          <ConocemeView
+            onNavigateToPortal={() => handleSelectView('participant')}
+            onBackToAdmin={isAuthorizedAdmin ? () => handleSelectView('admin') : undefined}
+            onOpenFaq={() => setIsFaqOpen(true)}
+            onOpenPrivacyNotice={() => setIsPrivacyNoticeOpen(true)}
+          />
+        ) : currentView === 'admin' ? (
           isAuthChecking ? (
             <div className="flex flex-col items-center justify-center py-20 text-stone-500 space-y-3">
               <Clock className="w-8 h-8 animate-spin text-amber-700" />
@@ -150,6 +189,7 @@ export default function App() {
             <AdminDashboard
               adminEmail={adminUser}
               onEnterParticipantPortal={handleEnterParticipantWithToken}
+              onOpenConoceme={() => handleSelectView('conoceme')}
             />
           ) : (
             <AdminLoginView
@@ -163,6 +203,7 @@ export default function App() {
           <ParticipantPortal
             initialToken={participantToken}
             onOpenFaq={() => setIsFaqOpen(true)}
+            onClearToken={() => setParticipantToken(null)}
           />
         )}
       </main>
@@ -173,14 +214,6 @@ export default function App() {
             ForeverYou • Plataforma de Entrevistas de Vida &amp; Patrimonio Testimonial
           </p>
           <div className="flex items-center space-x-4 text-[11px] text-stone-400">
-            <button
-              onClick={() => setIsPrivacyNoticeOpen(true)}
-              className="inline-flex items-center space-x-1 hover:text-amber-300 transition cursor-pointer"
-            >
-              <Shield className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Aviso de Privacidad Integral</span>
-            </button>
-            <span>•</span>
             <button
               onClick={() => setIsFaqOpen(true)}
               className="inline-flex items-center space-x-1 hover:text-amber-300 transition cursor-pointer"
