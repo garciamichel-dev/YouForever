@@ -11,15 +11,19 @@ import { AdminLoginView } from './components/AdminLoginView.tsx';
 import { FAQModal } from './components/FAQModal.tsx';
 import { IntegralPrivacyNoticeModal } from './components/IntegralPrivacyNoticeModal.tsx';
 import { ConocemeView } from './components/ConocemeView.tsx';
+import { DemoFreeTrialView } from './components/DemoFreeTrialView.tsx';
 import { auth, googleProvider } from './firebase/config.ts';
 import { onAuthStateChanged, signInWithPopup, signOut } from 'firebase/auth';
 import { Clock, HelpCircle } from 'lucide-react';
 import { getActiveParticipantSession } from './utils/participantSessionStorage.ts';
 
 export default function App() {
-  const [currentView, setCurrentView] = useState<'admin' | 'participant' | 'conoceme'>(() => {
+  const [currentView, setCurrentView] = useState<'admin' | 'participant' | 'conoceme' | 'demo'>(() => {
     const urlParams = new URLSearchParams(window.location.search);
     const view = urlParams.get('view');
+    if (window.location.pathname.startsWith('/demo') || view === 'demo') {
+      return 'demo';
+    }
     if (window.location.pathname.startsWith('/conoceme') || view === 'conoceme') {
       return 'conoceme';
     }
@@ -40,6 +44,7 @@ export default function App() {
     const urlParams = new URLSearchParams(window.location.search);
     let token = urlParams.get('token') || urlParams.get('code');
     const view = urlParams.get('view');
+    const isDemoUrl = window.location.pathname.startsWith('/demo') || view === 'demo';
     const isConocemeUrl = window.location.pathname.startsWith('/conoceme') || view === 'conoceme';
     const isAdminUrl = window.location.pathname.startsWith('/admin') || view === 'admin';
 
@@ -49,7 +54,9 @@ export default function App() {
       token = hashParams.get('token') || hashParams.get('code');
     }
 
-    if (isConocemeUrl) {
+    if (isDemoUrl) {
+      setCurrentView('demo');
+    } else if (isConocemeUrl) {
       setCurrentView('conoceme');
     } else if (token) {
       setParticipantToken(token);
@@ -88,13 +95,20 @@ export default function App() {
 
           const urlParams = new URLSearchParams(window.location.search);
           const token = urlParams.get('token') || urlParams.get('code');
+          const isDemoUrl =
+            window.location.pathname.startsWith('/demo') || urlParams.get('view') === 'demo';
           const isConocemeUrl =
             window.location.pathname.startsWith('/conoceme') || urlParams.get('view') === 'conoceme';
           const isAdminUrl =
             window.location.pathname.startsWith('/admin') || urlParams.get('view') === 'admin';
           const hasStoredParticipantSession = Boolean(getActiveParticipantSession());
 
-          if (!isConocemeUrl && authorized && (isAdminUrl || (!token && !hasStoredParticipantSession))) {
+          if (
+            !isDemoUrl &&
+            !isConocemeUrl &&
+            authorized &&
+            (isAdminUrl || (!token && !hasStoredParticipantSession))
+          ) {
             setCurrentView('admin');
           }
         } else {
@@ -146,8 +160,10 @@ export default function App() {
     setCurrentView('participant');
   };
 
-  const handleSelectView = (view: 'admin' | 'participant' | 'conoceme') => {
-    if (view === 'conoceme') {
+  const handleSelectView = (view: 'admin' | 'participant' | 'conoceme' | 'demo') => {
+    if (view === 'demo') {
+      window.history.pushState({}, '', '/demo');
+    } else if (view === 'conoceme') {
       window.history.pushState({}, '', '/conoceme');
     } else if (view === 'admin') {
       window.history.pushState({}, '', '/admin');
@@ -157,9 +173,11 @@ export default function App() {
     setCurrentView(view);
   };
 
+  const isParticipantInterviewActive = currentView === 'participant' && Boolean(participantToken);
+
   return (
     <div className="min-h-screen bg-stone-100/70 text-stone-900 font-sans flex flex-col selection:bg-amber-200">
-      {currentView !== 'conoceme' && (
+      {!isParticipantInterviewActive && currentView !== 'conoceme' && currentView !== 'demo' && (
         <Navbar
           currentView={currentView}
           onSelectView={handleSelectView}
@@ -171,10 +189,15 @@ export default function App() {
         />
       )}
 
-      <main className={currentView === 'conoceme' ? 'flex-1' : 'flex-1 py-6'}>
-        {currentView === 'conoceme' ? (
+      <main className={isParticipantInterviewActive || currentView === 'conoceme' || currentView === 'demo' ? 'flex-1' : 'flex-1 py-6'}>
+        {currentView === 'demo' ? (
+          <DemoFreeTrialView
+            onNavigateToConoceme={() => handleSelectView('conoceme')}
+          />
+        ) : currentView === 'conoceme' ? (
           <ConocemeView
             onNavigateToPortal={() => handleSelectView('participant')}
+            onNavigateToDemo={() => handleSelectView('demo')}
             onBackToAdmin={isAuthorizedAdmin ? () => handleSelectView('admin') : undefined}
             onOpenFaq={() => setIsFaqOpen(true)}
             onOpenPrivacyNotice={() => setIsPrivacyNoticeOpen(true)}
@@ -208,26 +231,28 @@ export default function App() {
         )}
       </main>
 
-      <footer className="bg-stone-900 text-stone-400 py-6 text-center text-xs border-t border-stone-800">
-        <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-3">
-          <p className="font-serif text-stone-300">
-            ForeverYou • Plataforma de Entrevistas de Vida &amp; Patrimonio Testimonial
-          </p>
-          <div className="flex items-center space-x-4 text-[11px] text-stone-400">
-            <button
-              onClick={() => setIsFaqOpen(true)}
-              className="inline-flex items-center space-x-1 hover:text-amber-300 transition cursor-pointer"
-            >
-              <HelpCircle className="w-3.5 h-3.5 text-amber-400" />
-              <span>Preguntas Frecuentes</span>
-            </button>
-            <span>•</span>
-            <span className="text-stone-500">
-              Fidelidad testimonial estricta • Criptografía SHA-256
-            </span>
+      {!isParticipantInterviewActive && (
+        <footer className="bg-stone-900 text-stone-400 py-6 text-center text-xs border-t border-stone-800">
+          <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-3">
+            <p className="font-serif text-stone-300">
+              ForeverYou • Plataforma de Entrevistas de Vida &amp; Patrimonio Testimonial
+            </p>
+            <div className="flex items-center space-x-4 text-[11px] text-stone-400">
+              <button
+                onClick={() => setIsFaqOpen(true)}
+                className="inline-flex items-center space-x-1 hover:text-amber-300 transition cursor-pointer"
+              >
+                <HelpCircle className="w-3.5 h-3.5 text-amber-400" />
+                <span>Preguntas Frecuentes</span>
+              </button>
+              <span>•</span>
+              <span className="text-stone-500">
+                Fidelidad testimonial estricta • Criptografía SHA-256
+              </span>
+            </div>
           </div>
-        </div>
-      </footer>
+        </footer>
+      )}
 
       {/* Global FAQ & Privacy Modals */}
       <FAQModal isOpen={isFaqOpen} onClose={() => setIsFaqOpen(false)} />

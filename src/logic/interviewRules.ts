@@ -38,6 +38,11 @@ export interface InterviewRecord {
   userDeclaredComplete: boolean;
   closedAt?: string | null;
   closureReason?: string | null;
+  participantClosingText?: string | null;
+  reopenedAt?: string | null;
+  layoutEditsAllowed?: number;
+  layoutEditsUsed?: number;
+  bookGeneratedCount?: number;
   lastActivityAt: string;
   questionnaireVersionId: string;
   createdById?: string;
@@ -638,16 +643,16 @@ export function canSubmitAnswer(
     };
   }
 
-  // Allow adding additional free memories even after completing the main questionnaire as long as not expired
-  if (isAdditionalMemory) {
-    return { allowed: true };
-  }
-
   if (interview.userDeclaredComplete) {
     return {
       allowed: false,
-      reason: 'La entrevista ha sido finalizada voluntariamente por el participante.',
+      reason: 'La entrevista ha sido finalizada voluntariamente por el participante. Tus respuestas se encuentran en modo de solo lectura.',
     };
+  }
+
+  // Allow adding additional free memories while the interview has not been closed by the participant and has not expired
+  if (isAdditionalMemory) {
+    return { allowed: true };
   }
 
   if (interview.status !== 'open') {
@@ -770,15 +775,67 @@ export function evaluateAnswerIncrement(params: {
 export function applyVoluntaryCompletion(
   interview: InterviewRecord,
   reason: string = 'Declarado por el participante',
-  timestampISO: string = new Date().toISOString()
+  timestampISO: string = new Date().toISOString(),
+  participantClosingText?: string | null
 ): InterviewRecord {
+  const isGenericDefault =
+    !reason.trim() ||
+    reason.trim() === 'Declarado por el participante' ||
+    reason.trim() === 'Declaración voluntaria del participante';
+  const cleanClosing =
+    typeof participantClosingText === 'string'
+      ? participantClosingText.trim()
+      : !isGenericDefault
+      ? reason.trim()
+      : interview.participantClosingText || '';
   return {
     ...interview,
     userDeclaredComplete: true,
     status: 'completed',
     closedAt: timestampISO,
     closureReason: reason,
+    participantClosingText: cleanClosing,
+    layoutEditsAllowed: interview.layoutEditsAllowed ?? 1,
+    layoutEditsUsed: interview.layoutEditsUsed ?? 0,
+    bookGeneratedCount: interview.bookGeneratedCount ?? 0,
     lastActivityAt: timestampISO,
+  };
+}
+
+export interface LayoutEditQuotaStatus {
+  hasInitialBook: boolean;
+  bookGeneratedCount: number;
+  layoutEditsAllowed: number;
+  layoutEditsUsed: number;
+  remainingEdits: number;
+  canGenerateInitial: boolean;
+  canModifyLayout: boolean;
+}
+
+/**
+ * Computes the layout modification quota status for an interview's generated PDF book.
+ * By default, after generating Version 1 (initial book), the participant has 1 additional
+ * layout modification (`layoutEditsAllowed = 1`).
+ */
+export function computeLayoutEditQuotaStatus(
+  interview: Pick<
+    InterviewRecord,
+    'userDeclaredComplete' | 'bookGeneratedCount' | 'layoutEditsAllowed' | 'layoutEditsUsed'
+  >
+): LayoutEditQuotaStatus {
+  const bookGeneratedCount = Math.max(0, interview.bookGeneratedCount ?? 0);
+  const layoutEditsAllowed = Math.max(0, interview.layoutEditsAllowed ?? 1);
+  const layoutEditsUsed = Math.max(0, interview.layoutEditsUsed ?? 0);
+  const hasInitialBook = bookGeneratedCount >= 1;
+  const remainingEdits = Math.max(0, layoutEditsAllowed - layoutEditsUsed);
+  return {
+    hasInitialBook,
+    bookGeneratedCount,
+    layoutEditsAllowed,
+    layoutEditsUsed,
+    remainingEdits,
+    canGenerateInitial: !hasInitialBook,
+    canModifyLayout: hasInitialBook && remainingEdits > 0,
   };
 }
 
@@ -807,13 +864,14 @@ export function applyAdminExtension(
 }
 
 /**
- * Admin action: Reopen an interview that was closed or expired.
+ * Admin action: Reopen an interview that was closed or expired, and optionally configure layout edit allowance.
  */
 export function applyAdminReopen(
   interview: InterviewRecord,
   reopenDays: number,
   reason: string,
-  timestampISO: string = new Date().toISOString()
+  timestampISO: string = new Date().toISOString(),
+  additionalLayoutEdits?: number
 ): InterviewRecord {
   if (reopenDays <= 0) {
     throw new Error('Los días para reabrir deben ser mayores a 0.');
@@ -821,14 +879,21 @@ export function applyAdminReopen(
 
   const nowMs = Date.now();
   const newExpiryMs = nowMs + reopenDays * 24 * 60 * 60 * 1000;
+  const used = Math.max(0, interview.layoutEditsUsed ?? 0);
+  const nextAllowed =
+    typeof additionalLayoutEdits === 'number' && !Number.isNaN(additionalLayoutEdits)
+      ? Math.max(0, used + Math.floor(additionalLayoutEdits))
+      : Math.max(interview.layoutEditsAllowed ?? 1, used + 1);
 
   return {
     ...interview,
     status: 'open',
     userDeclaredComplete: false,
     closedAt: null,
+    reopenedAt: timestampISO,
     closureReason: `Reabierta por administrador: ${reason}`,
     expiresAt: new Date(newExpiryMs).toISOString(),
+    layoutEditsAllowed: nextAllowed,
     lastActivityAt: timestampISO,
   };
 }

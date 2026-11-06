@@ -1,0 +1,1808 @@
+
+
+## 1. ROL Y OBJETIVO GENERAL
+
+Actúa simultáneamente como:
+
+- Arquitecto de software senior Full Stack.
+- Especialista en React, TypeScript y Google AI Studio.
+- Ingeniero de integración con Gemini API.
+- Diseñador UX/UI de aplicaciones web responsivas.
+- Especialista en diseño editorial y maquetación de libros digitales.
+- Experto en producción de PDF, tipografía y paginación.
+- Diseñador de experiencias conversacionales con inteligencia artificial.
+- Especialista en escritura autobiográfica, historia oral y narración emocional.
+- Especialista en privacidad, seguridad y protección de datos personales.
+- Especialista en conversión comercial de productos digitales.
+
+Tu tarea es **IMPLEMENTAR una nueva funcionalidad completa dentro de la aplicación Forever You que ya existe**.
+
+La nueva funcionalidad se llamará:
+
+**«Prueba gratuita — Mi historia en 10 preguntas»**
+
+Su finalidad es permitir que una persona o una pareja experimente gratuitamente cómo Forever You transforma sus recuerdos y respuestas en un pequeño libro autobiográfico emocional, auténtico, elegantemente diseñado y descargable en PDF.
+
+La experiencia debe demostrar el valor del servicio completo y motivar de manera natural a adquirirlo.
+
+**NO CREES UNA APLICACIÓN NUEVA. IMPLEMENTA ESTA FUNCIONALIDAD EN EL PROYECTO ACTUAL.**
+
+---
+
+# 2. REGLAS OBLIGATORIAS DE INTEGRACIÓN
+
+Antes de modificar cualquier archivo:
+
+1. Analiza la estructura completa del proyecto existente.
+2. Identifica las tecnologías, dependencias y componentes visuales utilizados.
+3. Identifica las rutas públicas y privadas.
+4. Identifica la configuración actual de Gemini.
+5. Identifica las rutas de contratación o planes existentes.
+6. Comprueba si ya existen componentes reutilizables para libros, preguntas, entrevistas, PDF y visores.
+7. Identifica la identidad visual y el sistema de estilos de Forever You.
+
+Reglas innegociables:
+
+- No eliminar funciones existentes.
+- No modificar el funcionamiento de las entrevistas completas.
+- No alterar el banco de preguntas actual.
+- No cambiar los mecanismos de autenticación existentes.
+- No modificar los sistemas de pagos o contratación.
+- No cambiar la estructura de la base de datos.
+- No agregar nuevas colecciones, tablas ni registros para esta demostración.
+- No eliminar componentes que estén funcionando.
+- No reemplazar configuraciones existentes con ejemplos simulados.
+- No utilizar información ficticia como si fueran respuestas reales.
+
+Aísla la nueva funcionalidad en componentes, servicios y rutas propios, reutilizando la arquitectura existente.
+
+La demostración debe poder desactivarse o modificarse sin afectar el resto de la aplicación.
+
+---
+
+# 3. PRINCIPIO FUNDAMENTAL DEL PRODUCTO
+
+Forever You no es un simple generador de textos autobiográficos.
+
+Su propósito es:
+
+**Preservar la esencia de una persona a través de sus recuerdos, palabras, expresiones, relaciones afectivas y experiencias de vida, creando un legado que pueda acompañar a sus seres queridos durante generaciones.**
+
+El libro debe permitir reconocer a la persona protagonista.
+
+No basta con describir acontecimientos.
+
+Es necesario rescatar, cuando existan en las respuestas:
+
+- Apodos cariñosos.
+- Formas especiales de llamar a familiares.
+- Expresiones que acostumbraba utilizar.
+- Recuerdos de infancia.
+- Gestos cotidianos de afecto.
+- Momentos compartidos con personas importantes.
+- Acontecimientos transformadores.
+- Enseñanzas familiares.
+- Costumbres que definían su personalidad.
+- Recuerdos con su pareja.
+- Recuerdos con sus hijos, padres, abuelos o amigos.
+- Sentimientos expresados con sus propias palabras.
+- Mensajes para quienes ama.
+
+**Nunca inventes recuerdos, personas, acontecimientos, diálogos, fechas, lugares ni sentimientos.**
+
+La calidad literaria debe provenir de transformar fielmente las respuestas auténticas, no de completar vacíos mediante ficción.
+
+---
+
+# 4. UBICACIÓN Y ACCESO A LA PRUEBA GRATUITA
+
+Incorpora la funcionalidad como un módulo público del sistema actual.
+
+Debe existir una opción visible:
+
+**«Prueba gratuita»**
+
+Con un subtítulo:
+
+**«Descubre cómo tus recuerdos pueden convertirse en un libro inolvidable»**
+
+Incluye un botón principal:
+
+**«Crear mi historia gratis»**
+
+La experiencia no debe requerir registro de cuenta, pago ni acceso administrativo.
+
+Respeta la navegación y las rutas actuales. Si procede crear una nueva ruta, utiliza una ruta pública coherente con las existentes, preferentemente `/demo`, sin sobrescribir rutas previas.
+
+El módulo debe ofrecer una experiencia completa:
+
+1. Pantalla de bienvenida.
+2. Selección de modalidad individual o pareja.
+3. Datos básicos para personalizar el relato.
+4. Aviso breve sobre el tratamiento temporal de información.
+5. Entrevista de cinco preguntas principales.
+6. Profundización autónoma mediante Gemini.
+7. Configuración del estilo narrativo.
+8. Configuración editorial de portada e interiores.
+9. Edición opcional.
+10. Generación del PDF.
+11. Visualización interactiva.
+12. Descarga gratuita.
+13. Invitación a crear el libro completo.
+
+Debe existir un indicador visual del avance y navegación para revisar o corregir respuestas anteriores.
+
+---
+
+# 5. PRIVACIDAD: PROHIBIDO GUARDAR DATOS EN LA BASE DE DATOS
+
+Este requisito es obligatorio.
+
+**La prueba gratuita no debe guardar información del entrevistado en ninguna base de datos.**
+
+No almacenar:
+
+- Nombres.
+- Respuestas.
+- Preguntas de profundización.
+- Fotografías.
+- Dedicatorias.
+- Libros generados.
+- Metadatos personales.
+- Historial de la entrevista.
+- Texto autobiográfico.
+- Preferencias de diseño asociadas a la persona.
+
+No realizar escrituras de esta demostración en:
+
+- Firebase Firestore.
+- Firebase Realtime Database.
+- Supabase.
+- PostgreSQL.
+- MongoDB.
+- Bases de datos propias.
+- Almacenamiento cloud permanente.
+- Firebase Storage.
+- Buckets de archivos.
+- Otros repositorios persistentes.
+
+Tampoco utilizar mecanismos indirectos de almacenamiento de contenido personal mediante analytics, telemetría, registros de depuración, historiales de solicitudes o sistemas de seguimiento.
+
+## 5.1. Almacenamiento temporal permitido
+
+Utiliza `sessionStorage` para conservar temporalmente los datos textuales de la entrevista en el navegador.
+
+Requisitos:
+
+- Recuperar las respuestas si el usuario actualiza accidentalmente la página dentro de la misma sesión.
+- No utilizar `localStorage` para datos autobiográficos.
+- No utilizar IndexedDB como repositorio permanente.
+- No sincronizar respuestas entre dispositivos.
+- No crear cuentas temporales.
+- No enviar respuestas a servicios de almacenamiento externo.
+- Implementar expiración lógica de la sesión, por ejemplo, cuatro horas desde la última actividad.
+- Borrar automáticamente los datos expirados al detectar una nueva interacción o recarga.
+- Incorporar el botón «Borrar mi información».
+- Mostrar una advertencia antes de abandonar la entrevista.
+
+Las imágenes grandes deben mantenerse preferentemente en memoria durante la sesión, utilizando URLs de objeto y liberándolas correctamente. No forzar su almacenamiento en `sessionStorage`.
+
+Si una recarga requiere volver a subir una fotografía, comunicarlo de forma clara y conservar las respuestas textuales.
+
+## 5.2. Procesamiento con Gemini
+
+Las llamadas a Gemini deben utilizar las credenciales existentes de manera segura, preferentemente mediante el backend actual.
+
+No exponer claves API en el navegador.
+
+Solo enviar a Gemini la información estrictamente necesaria para generar la pregunta de profundización o el manuscrito.
+
+Procesar las respuestas de manera transitoria, sin almacenarlas en archivos o registros del servidor.
+
+No registrar el contenido de las peticiones ni las respuestas del modelo.
+
+No declarar al usuario que existe retención cero por parte de Google, puesto que el procesamiento externo está sujeto a las políticas aplicables del proveedor.
+
+Mostrar un aviso comprensible antes de comenzar:
+
+«Esta demostración utiliza inteligencia artificial para convertir tus recuerdos en un pequeño libro. Tus respuestas se conservarán temporalmente en este navegador durante la sesión y no se guardarán en nuestra base de datos. Para generar las preguntas y la historia, el texto necesario se enviará al proveedor de inteligencia artificial. Puedes borrar la información de esta demostración en cualquier momento».
+
+Incluir una confirmación de lectura y aceptación apropiada para el uso de la demostración, sin alterar el aviso de privacidad ya implementado en el servicio completo.
+
+---
+
+# 6. SELECCIÓN DE MODALIDAD
+
+La pantalla inicial debe permitir elegir:
+
+**A. Mi historia personal**
+
+Una sola persona cuenta su propia vida.
+
+**B. Nuestra historia en pareja**
+
+Dos personas cuentan recuerdos de su relación y experiencias compartidas.
+
+El sistema debe adaptar automáticamente:
+
+- Los pronombres.
+- Las preguntas principales.
+- Las preguntas de profundización.
+- La redacción del libro.
+- La portada.
+- Los campos de autor.
+- Las referencias a los protagonistas.
+
+## 6.1. Datos básicos
+
+Para historia individual:
+
+- Nombre con el que desea aparecer en el libro.
+- Nombre completo, opcional.
+- Título personalizado, opcional.
+
+Para historia de pareja:
+
+- Nombre del participante 1.
+- Nombre del participante 2.
+- Título personalizado, opcional.
+
+No solicitar información innecesaria.
+
+No asumir que las parejas están casadas, tienen hijos o siguen juntas.
+
+---
+
+# 7. ESTRUCTURA DE LA ENTREVISTA
+
+La demostración debe utilizar exactamente:
+
+**5 preguntas principales + hasta 5 preguntas de profundización generadas por IA.**
+
+Una pregunta principal puede generar como máximo una pregunta adicional.
+
+No generar una cadena ilimitada de profundizaciones.
+
+La entrevista debe avanzar de forma natural, emotiva y conversacional.
+
+Las cinco dimensiones narrativas serán:
+
+1. Mis raíces.
+2. El momento que transformó mi vida.
+3. Las personas que amo.
+4. Mi esencia personal.
+5. Las palabras que deseo dejar.
+
+La cantidad máxima de preguntas formuladas por la aplicación será diez. En modalidad pareja, cada una de las diez preguntas puede admitir respuestas separadas de ambos participantes sin duplicar el número de preguntas.
+
+---
+
+# 8. LAS CINCO PREGUNTAS PRINCIPALES — HISTORIA INDIVIDUAL
+
+Estas preguntas deben incorporarse como contenido fijo de la demostración.
+
+No deben cambiarse arbitrariamente ni sustituirse por preguntas genéricas.
+
+## PREGUNTA 1 — MIS RAÍCES
+
+**Pregunta:**
+
+«Si pudieras regresar por un instante a tu infancia y revivir un momento que guardas con especial cariño, ¿cuál elegirías y quiénes estarían contigo?»
+
+Objetivo:
+
+Descubrir un recuerdo concreto de la infancia que permita crear una escena autobiográfica significativa.
+
+La IA debe buscar detalles como:
+
+- Personas presentes.
+- Lugar.
+- Sensaciones.
+- Expresiones familiares.
+- Emociones.
+- Recuerdos especiales.
+
+Ejemplo de profundización:
+
+Si el entrevistado menciona a su abuela cocinando en casa:
+
+«¿Qué detalle de tu abuela, de su voz o de su manera de tratarte, recuerdas con más cariño de aquellos momentos?»
+
+La pregunta de profundización debe generarse realmente con base en la respuesta obtenida.
+
+## PREGUNTA 2 — EL MOMENTO QUE ME TRANSFORMÓ
+
+**Pregunta:**
+
+«A lo largo de tu vida, ¿qué decisión, acontecimiento o encuentro marcó un antes y un después para ti, y por qué consideras que cambió tu historia?»
+
+Objetivo:
+
+Identificar una experiencia que ayude a comprender cómo se convirtió en la persona que es hoy.
+
+Buscar:
+
+- Decisiones importantes.
+- Cambios de vida.
+- Encuentros significativos.
+- Aprendizajes.
+- Personas involucradas.
+- Sentimientos experimentados.
+
+Ejemplo de profundización:
+
+Si el entrevistado recuerda que se mudó de ciudad:
+
+«¿Qué sentiste cuando te despediste de tu familia aquel día, sabiendo que tu vida estaba a punto de cambiar?»
+
+## PREGUNTA 3 — EL CARIÑO QUE TIENE UN NOMBRE
+
+**Pregunta:**
+
+«Piensa en una persona a la que hayas amado profundamente, como tu pareja, un hijo, tus padres o alguien muy especial. ¿Cómo le decías de cariño y qué pequeño momento que vivieron juntos te gustaría conservar para siempre?»
+
+Objetivo:
+
+Recuperar las expresiones íntimas que hacen que una historia sea personal e irrepetible.
+
+Buscar:
+
+- Apodos afectivos.
+- Formas especiales de llamar a esa persona.
+- Gestos cotidianos.
+- Recuerdos familiares.
+- Costumbres compartidas.
+- Frases memorables.
+- Anécdotas emotivas.
+
+Ejemplo de profundización:
+
+Si el entrevistado dice que llamaba «Chiquita» a su esposa y que conversaban por las tardes:
+
+«¿Recuerdas alguna conversación o gesto de tu Chiquita durante esas tardes que todavía te haga sonreír?»
+
+IMPORTANTE:
+
+Preserva los apodos exactamente como fueron proporcionados.
+
+No los normalices ni sustituyas por expresiones genéricas.
+
+## PREGUNTA 4 — MI ESENCIA
+
+**Pregunta:**
+
+«¿Qué gesto, frase, costumbre o manera de demostrar cariño es tan característica de ti que tus seres queridos la reconocerían inmediatamente y dirían: “Así es como yo lo recuerdo”?»
+
+Objetivo:
+
+Descubrir la personalidad cotidiana del protagonista.
+
+Buscar:
+
+- Maneras de hablar.
+- Expresiones.
+- Formas de cuidar a los demás.
+- Costumbres familiares.
+- Tradiciones.
+- Sentido del humor.
+- Gestos característicos.
+- Hábitos entrañables.
+
+Ejemplo de profundización:
+
+Si responde que cantaba mientras preparaba el desayuno:
+
+«¿Qué ocurría en casa cuando comenzabas a cantar y qué hacían tus seres queridos al escucharte?»
+
+## PREGUNTA 5 — MI LEGADO
+
+**Pregunta:**
+
+«Imagina que, dentro de muchos años, las personas que más amas abren este libro para recordar quién eres y sentirse cerca de ti. ¿Qué te gustaría decirles con tus propias palabras para que nunca olviden cuánto significaron en tu vida?»
+
+Objetivo:
+
+Obtener un mensaje personal para sus seres queridos que pueda cerrar emotivamente la historia.
+
+Buscar:
+
+- Mensajes de amor.
+- Gratitud.
+- Consejos.
+- Enseñanzas.
+- Deseos para la familia.
+- Expresiones personales.
+- Palabras que desee conservar literalmente.
+
+Ejemplo de profundización:
+
+Si dice que desea que sus hijos recuerden cuánto los amó:
+
+«¿Qué recuerdo que compartiste con tus hijos quisieras que trajeran a su memoria cada vez que necesitaran sentir tu amor?»
+
+---
+
+# 9. ADAPTACIÓN DE LAS PREGUNTAS PARA PAREJAS
+
+Cuando la modalidad seleccionada sea «Nuestra historia en pareja», utilizar estas variantes:
+
+**Pregunta 1 — Nuestros primeros recuerdos**
+
+«Antes de que sus caminos se encontraran, ¿qué recuerdo entrañable de la infancia o juventud le gustaría compartir a cada uno para que el otro conozca mejor de dónde viene?»
+
+**Pregunta 2 — El encuentro que cambió nuestras vidas**
+
+«¿Cómo recuerdan el momento en que sus vidas se encontraron y qué acontecimientos hicieron que su historia juntos se volviera importante para ambos?»
+
+**Pregunta 3 — Nuestra manera de querernos**
+
+«¿Cómo se llaman o se llamaban de cariño y qué pequeño gesto, costumbre o momento compartido representa mejor el amor y el afecto que han construido?»
+
+**Pregunta 4 — Lo que nos hace únicos**
+
+«¿Qué costumbre, frase, anécdota o manera de convivir es tan característica de ustedes que sus seres queridos la reconocerían inmediatamente como parte de su historia?»
+
+**Pregunta 5 — Lo que deseamos dejar**
+
+«Si dentro de muchos años sus seres queridos abrieran este libro para recordar su historia, ¿qué les gustaría decirles y qué quisieran que permaneciera vivo de todo lo que han compartido?»
+
+## 9.1. Respuestas de pareja
+
+Permitir que ambos participantes respondan por separado a la misma pregunta.
+
+Mostrar dos campos identificados con sus nombres.
+
+También permitir, cuando sea apropiado, una respuesta conjunta.
+
+Las profundizaciones deben considerar las dos versiones.
+
+La IA debe:
+
+- Tratar ambas voces con equilibrio.
+- Conservar las diferencias entre sus recuerdos.
+- No inventar consenso.
+- No atribuir a uno sentimientos expresados por el otro.
+- No asumir que ambos vivieron los acontecimientos del mismo modo.
+- Respetar los apodos y las expresiones originales.
+
+La pregunta de profundización será una sola por pregunta principal, aunque podrá dirigirse a ambos.
+
+---
+
+# 10. MOTOR INTELIGENTE DE PROFUNDIZACIÓN
+
+Implementa un servicio específico que use Gemini para analizar cada respuesta principal y formular una única pregunta adicional.
+
+La generación debe ocurrir después de la respuesta principal, no antes.
+
+El modelo debe analizar:
+
+- Personas mencionadas.
+- Relaciones afectivas.
+- Momentos concretos.
+- Expresiones propias.
+- Detalles sensoriales o cotidianos.
+- Emociones explícitamente manifestadas.
+- Información que permita enriquecer la narración.
+
+La IA debe seleccionar **un único aspecto que merezca profundización**.
+
+No debe formular varias preguntas dentro de una misma oración.
+
+## 10.1. Reglas de profundización
+
+Cada pregunta generada deberá cumplir:
+
+1. Una sola pregunta abierta.
+2. Redacción natural y comprensible.
+3. Relación directa con la respuesta.
+4. Referencia a un detalle concreto cuando sea posible.
+5. Enfoque emocional sin resultar invasivo.
+6. No repetir información que ya se haya proporcionado.
+7. No presuponer sentimientos.
+8. No forzar recuerdos difíciles.
+9. No inventar nombres, relaciones o acontecimientos.
+10. Permitir responder «No lo recuerdo» o «Prefiero no responder».
+
+Cuando una respuesta sea demasiado breve, por ejemplo «Mi mamá», la pregunta adicional podrá intentar obtener un detalle concreto:
+
+«¿Qué recuerdo especial conservas de un momento que compartiste con tu mamá?»
+
+Si la respuesta no ofrece material suficiente o la persona omite la pregunta, no inventar una profundización artificial. Continuar respetando el máximo de cinco profundizaciones.
+
+## 10.2. Formato de respuesta del modelo
+
+Solicitar respuestas estructuradas de Gemini y validarlas en la aplicación.
+
+El resultado de la generación de profundización debe contener conceptualmente:
+
+- `mainQuestionId`
+- `shouldAskFollowUp`
+- `followUpQuestion`
+- `detectedTheme`
+- `referencedDetail`
+
+Validar estructura, límites, contenido y longitud antes de mostrarla.
+
+Si Gemini falla:
+
+- Permitir reintentar.
+- Mostrar un mensaje de error claro.
+- Ofrecer continuar sin esa profundización.
+
+Nunca bloquear toda la entrevista debido a una llamada fallida.
+
+---
+
+# 11. INTERFAZ DE ENTREVISTA
+
+La experiencia debe parecer una conversación personal, no un formulario administrativo.
+
+Cada pantalla mostrará:
+
+- Número y nombre de la etapa.
+- Pregunta principal.
+- Campo de respuesta amplio.
+- Botón «Continuar».
+- Opción «No lo recuerdo».
+- Opción «Prefiero no responder».
+- Botón para regresar.
+- Progreso general.
+- Indicador de generación cuando Gemini esté preparando la siguiente pregunta.
+
+Después de contestar la principal, mostrar la profundización dentro de la misma etapa.
+
+Ejemplo:
+
+**Mis raíces**
+
+Pregunta 1 de 5
+
+«Si pudieras regresar por un instante...»
+
+[Respuesta del entrevistado]
+
+**Forever You quiere conocer un poquito más...**
+
+[Pregunta de profundización creada con IA]
+
+Evitar exponer análisis internos, razonamiento privado o contenido técnico del modelo.
+
+Usar animaciones suaves y accesibles.
+
+En móviles, los campos de respuesta y botones deben ser cómodos para escribir y utilizar mediante controles táctiles.
+
+---
+
+# 12. FINALIZACIÓN DE LA ENTREVISTA
+
+Al completar las preguntas mostrar:
+
+**«Tu historia comienza a tomar forma»**
+
+Texto de bienvenida:
+
+«Gracias por compartir estos recuerdos. Cada palabra que nos has confiado forma parte de una historia que solo tú puedes contar. Ahora vamos a convertirlos en un pequeño libro creado especialmente para ti».
+
+Botón:
+
+**«Diseñar mi libro»**
+
+No generar directamente el PDF.
+
+Primero mostrar el configurador editorial.
+
+---
+
+# 13. SELECCIÓN DEL ESTILO NARRATIVO
+
+Esta configuración es obligatoria y debe aparecer después de la entrevista, antes de generar el libro.
+
+Mostrar la pregunta:
+
+**«¿Cómo quieres que esté escrita tu historia?»**
+
+Ofrecer exactamente estas tres opciones:
+
+### A. Primera persona — Relato personal
+
+Descripción:
+
+«Tu historia narrada directamente con tus propias palabras, como si estuvieras contándosela a alguien cercano».
+
+Ejemplo:
+
+«Nací en España y recuerdo que mi madre siempre nos recibía con una sonrisa cuando volvíamos a casa».
+
+Características:
+
+- Primera persona.
+- Redacción directa.
+- Lenguaje claro.
+- Tono personal.
+- Conservación de la voz original.
+
+### B. Primera persona — Narrativa literaria y emotiva
+
+Descripción:
+
+«Tus recuerdos transformados en unas memorias personales con una escritura más cuidada, cálida y emotiva, como si tú mismo hubieras escrito un pequeño libro».
+
+Ejemplo:
+
+«Cuando regreso con la memoria a los primeros años de mi vida, todavía puedo imaginar la sonrisa de mi madre esperándonos en casa. Hay recuerdos que el tiempo no consigue borrar».
+
+Características:
+
+- Primera persona.
+- Prosa literaria.
+- Sensibilidad emocional.
+- Descripciones sustentadas en lo narrado.
+- Transiciones elegantes.
+- Conservación de expresiones personales.
+
+**Marcar esta opción como recomendada y seleccionada inicialmente.**
+
+### C. Tercera persona — Biografía narrativa
+
+Descripción:
+
+«Tu historia contada desde la perspectiva de un narrador que presenta tu vida, tus experiencias y las personas que dejaron huella en ella».
+
+Ejemplo:
+
+«Desde pequeña, Ana descubrió que su familia era el centro de sus recuerdos más entrañables. La sonrisa de su madre se convirtió en una de las imágenes que conservaría durante toda su vida».
+
+Características:
+
+- Tercera persona.
+- Tono biográfico.
+- Narrador cálido.
+- Perspectiva respetuosa.
+- Narración fiel.
+
+## 13.1. Selección de pareja
+
+Para parejas, adaptar las opciones:
+
+A. Primera persona del plural, con identificación de recuerdos individuales cuando corresponda.
+
+B. Primera persona del plural con narrativa emotiva y literaria, respetando las dos voces.
+
+C. Tercera persona, narrando la historia de ambos protagonistas.
+
+La elección deberá afectar realmente el texto generado.
+
+No limitarse a cambiar etiquetas.
+
+---
+
+# 14. GENERADOR LITERARIO CON GEMINI
+
+Implementa un segundo servicio de IA para transformar las respuestas de la entrevista en un manuscrito autobiográfico.
+
+El generador deberá recibir:
+
+- Modalidad individual o pareja.
+- Nombre o nombres de los protagonistas.
+- Cinco preguntas principales.
+- Sus respuestas.
+- Hasta cinco preguntas de profundización.
+- Sus respuestas.
+- Estilo narrativo seleccionado.
+- Dedicatoria, si existe.
+- Título elegido, si existe.
+
+## 14.1. Reglas de escritura
+
+La IA debe:
+
+1. Crear un relato cohesivo.
+2. Evitar el formato de cuestionario.
+3. Evitar presentar preguntas y respuestas consecutivas.
+4. Organizar la narración por dimensiones biográficas.
+5. Construir transiciones naturales entre recuerdos.
+6. Conservar expresiones y apodos relevantes.
+7. Mantener fidelidad absoluta a los hechos.
+8. No atribuir sentimientos que no hayan sido expresados.
+9. No inventar lugares, fechas ni personas.
+10. No completar episodios incompletos con ficción.
+11. No escribir diálogos imaginarios.
+12. Evitar repeticiones.
+13. Mantener un tono humano y elegante.
+14. No exagerar constantemente la emoción.
+15. Respetar experiencias dolorosas.
+16. No presentar recuerdos inciertos como hechos seguros.
+17. No afirmar que una persona ha fallecido.
+18. No asumir relaciones familiares inexistentes.
+19. No inventar una infancia feliz ni una relación idealizada.
+20. Conservar literalmente las palabras de despedida o legado cuando sea apropiado y estén identificadas como citas.
+
+No generar textos genéricos como:
+
+«Desde pequeño aprendió que la vida estaba llena de enseñanzas y momentos especiales».
+
+Sustituir ese estilo por contenido concreto basado en la entrevista.
+
+## 14.2. Estructura del manuscrito
+
+Organizar la información en cinco partes narrativas:
+
+1. El lugar donde comenzó mi historia.
+2. Los caminos que me hicieron ser quien soy.
+3. Las personas que llevo en el corazón.
+4. Las pequeñas cosas que me hacen ser yo.
+5. Las palabras que quiero dejar.
+
+Los títulos pueden adaptarse literariamente a las respuestas.
+
+Si determinada parte carece de información, no inventarla. Integrar las partes con contenido suficiente y conservar una narración coherente.
+
+## 14.3. Resultado estructurado
+
+Generar un objeto validable con:
+
+- Título.
+- Subtítulo.
+- Autor o autores.
+- Modalidad.
+- Estilo narrativo.
+- Introducción.
+- Secciones y capítulos.
+- Párrafos ordenados.
+- Citas textuales destacadas.
+- Dedicatoria.
+- Mensaje final.
+- Indicadores de información insuficiente.
+
+Utilizar las capacidades de salida estructurada de Gemini y validación de esquemas disponibles en el proyecto.
+
+El manuscrito debe poder editarse antes de producir el PDF.
+
+---
+
+# 15. CONFIGURADOR EDITORIAL DEL LIBRO
+
+Después de seleccionar el estilo narrativo, mostrar:
+
+**«Diseña el libro que contará tu historia»**
+
+El configurador debe funcionar visualmente y mostrar cambios reales.
+
+Incluir:
+
+- Selección de portada.
+- Selección independiente del diseño interior.
+- Tamaño del libro.
+- Título.
+- Subtítulo.
+- Autor o autores.
+- Dedicatoria.
+- Fotografía o ilustración opcional.
+- Vista previa.
+- Edición del manuscrito.
+
+La apariencia debe ser comparable a un editor editorial profesional simplificado.
+
+No debe parecer un formulario técnico.
+
+---
+
+# 16. CINCO DISEÑOS DE PORTADA
+
+Desarrolla cinco portadas completas, originales y visualmente diferenciadas.
+
+**No mostrar simplemente cinco rectángulos de colores.**
+
+Cada opción debe contar con una composición editorial auténtica, tipografías, jerarquías, espacios, ornamentos y tratamiento visual propio.
+
+Mostrar las cinco simultáneamente en una galería de miniaturas.
+
+La persona podrá seleccionar una y visualizarla en tamaño grande.
+
+## PORTADA 1 — CLÁSICA ETERNA
+
+Inspiración:
+
+Libro autobiográfico de colección.
+
+Características:
+
+- Fondo verde bosque profundo.
+- Tipografía serif refinada.
+- Letras color marfil y detalles dorados.
+- Nombre del protagonista destacado.
+- Subtítulo elegante.
+- Ornamentos discretos.
+- Imagen opcional enmarcada.
+- Apariencia de libro de tapa dura.
+
+Sensación: elegancia, memoria y permanencia.
+
+## PORTADA 2 — RECUERDOS EN MARFIL
+
+Características:
+
+- Fondo marfil.
+- Tipografía literaria.
+- Composición minimalista.
+- Mucho espacio en blanco.
+- Nombre del protagonista en gran formato.
+- Detalles de líneas finas.
+- Imagen opcional con bordes suaves.
+
+Sensación: intimidad, sencillez y nostalgia.
+
+## PORTADA 3 — ÁLBUM DE NUESTRA VIDA
+
+Características:
+
+- Fotografía protagonista.
+- Fondo crema o sepia.
+- Marcos inspirados en álbumes familiares.
+- Tipografía combinada serif y manuscrita.
+- Detalles cálidos.
+- Composición adaptable a una o dos personas.
+
+Sensación: cercanía, familia y recuerdos compartidos.
+
+## PORTADA 4 — RAÍCES Y RECUERDOS
+
+Características:
+
+- Ilustraciones botánicas originales.
+- Tonos tierra, verde salvia y beige.
+- Tipografía editorial clásica.
+- Elementos decorativos inspirados en hojas y ramas.
+- Detalles delicados.
+- Imagen opcional integrada.
+
+Sensación: tradición, familia y legado generacional.
+
+## PORTADA 5 — HISTORIA CONTEMPORÁNEA
+
+Características:
+
+- Diseño limpio y moderno.
+- Composición geométrica equilibrada.
+- Tipografía contemporánea.
+- Colores azul noche, gris cálido, blanco y acentos cobre.
+- Fotografía o ilustración opcional.
+- Amplia jerarquía visual.
+
+Sensación: modernidad, calidad premium y sofisticación.
+
+## 16.1. Personalización de portada
+
+Permitir:
+
+- Cambiar el título.
+- Cambiar el subtítulo.
+- Editar el nombre del protagonista.
+- Ajustar la posición de la imagen cuando exista.
+- Cambiar entre variantes de color predefinidas.
+- Seleccionar una fotografía.
+- Seleccionar una ilustración temática original.
+- Eliminar la imagen y usar una portada exclusivamente tipográfica.
+
+No obligar a subir fotografías.
+
+Las ilustraciones temáticas deben ser visuales decorativos originales, no recreaciones inventadas de episodios reales.
+
+Si la aplicación dispone de generación de ilustraciones mediante IA, ofrecerla solo cuando esté realmente implementada y el usuario la solicite explícitamente.
+
+No copiar logotipos, elementos distintivos ni marcas de otras aplicaciones mostradas en las referencias.
+
+La marca usada será exclusivamente **ForeverYou**.
+
+---
+
+# 17. CINCO DISEÑOS DE INTERIORES
+
+La selección de portada y de diseño interior deben ser **independientes**.
+
+El usuario debe poder combinar cualquiera de las cinco portadas con cualquiera de los cinco interiores.
+
+Implementar los siguientes estilos:
+
+### Interior 1 — Clásico editorial
+
+- Fuente principal: EB Garamond o equivalente.
+- Títulos serif.
+- Texto justificado.
+- Márgenes generosos.
+- Capitulares discretas.
+- Numeración centrada.
+- Apariencia de libro tradicional.
+
+### Interior 2 — Memorias elegantes
+
+- Fuente: Cormorant Garamond para títulos.
+- Cuerpo: Lora o equivalente.
+- Citas destacadas.
+- Separadores delicados.
+- Espaciado elegante.
+- Apariencia literaria premium.
+
+### Interior 3 — Diario íntimo
+
+- Fuente: Libre Baskerville o equivalente.
+- Acentos manuscritos discretos.
+- Bloques de texto cálidos.
+- Ornamentos suaves.
+- Composición inspirada en diarios personales.
+
+### Interior 4 — Minimalista contemporáneo
+
+- Fuente: Source Serif 4 para el cuerpo.
+- Títulos en Manrope o equivalente.
+- Espacios blancos equilibrados.
+- Diseño limpio.
+- Pocas decoraciones.
+- Excelente legibilidad digital.
+
+### Interior 5 — Legado familiar
+
+- Fuente: Lora o equivalente.
+- Títulos ornamentales moderados.
+- Citas familiares destacadas.
+- Espacios opcionales para fotografías.
+- Separadores con motivos botánicos o familiares.
+- Apariencia cálida y emotiva.
+
+Utilizar tipografías legalmente distribuibles y con posibilidad de incrustación en PDF.
+
+Implementar alternativas de fuente si alguna no se encuentra disponible.
+
+Mostrar las cinco opciones con miniaturas auténticas de páginas interiores que permitan comparar tipos de letra, títulos, espaciados y composición.
+
+---
+
+# 18. FORMATOS FÍSICOS DISPONIBLES
+
+Permitir seleccionar:
+
+**A. A5 vertical**
+
+Libro compacto, adecuado para memorias personales.
+
+**B. 6 × 9 pulgadas**
+
+Formato editorial comercial.
+
+**C. Carta vertical**
+
+Formato práctico para impresión doméstica en México.
+
+Al seleccionar un formato:
+
+- Ajustar dimensiones reales.
+- Recalcular márgenes.
+- Recalcular saltos de página.
+- Adaptar tamaños tipográficos dentro de límites legibles.
+- Reubicar imágenes.
+- Conservar proporciones.
+- Volver a generar la vista previa.
+
+No simular el cambio únicamente modificando el tamaño visual del visor.
+
+El PDF descargado debe conservar las dimensiones físicas seleccionadas.
+
+---
+
+# 19. ESTRUCTURA DEL LIBRO PDF
+
+El sistema debe generar un documento de **entre 5 y 10 páginas**, incluyendo portada y cierre.
+
+La cantidad exacta dependerá de la información real y de la maquetación seleccionada.
+
+Propuesta editorial preferida cuando exista contenido suficiente:
+
+**Página 1. Portada**
+
+- Título.
+- Autor o autores.
+- Subtítulo.
+- Fotografía o ilustración opcional.
+- Identidad visual seleccionada.
+- Marca ForeverYou discreta.
+
+**Página 2. Portadilla y dedicatoria**
+
+- Título interior.
+- Autor.
+- Dedicatoria opcional.
+- Introducción breve cuando exista contenido suficiente.
+
+**Página 3. Mis raíces**
+
+Recuerdos de infancia, personas y escenas significativas.
+
+**Página 4. Los caminos de mi vida**
+
+Experiencias transformadoras y decisiones importantes.
+
+**Página 5. Las personas que amo**
+
+Vínculos afectivos, apodos y recuerdos entrañables.
+
+**Página 6. Así soy yo**
+
+Costumbres, expresiones, gestos y personalidad.
+
+**Página 7. Lo que quiero dejarte**
+
+Mensaje autobiográfico para los seres queridos.
+
+**Página 8. Página de cierre**
+
+Página independiente con el texto especificado en la sección siguiente.
+
+Esta distribución es orientativa, no una obligación de generar exactamente ocho páginas.
+
+Si la información ocupa más espacio, distribuirla hasta alcanzar un máximo de diez páginas.
+
+Si la información es breve, utilizar composiciones editoriales más compactas, sin incluir páginas artificialmente vacías.
+
+Para documentos de cinco a siete páginas, combinar secciones de manera elegante, conservando sus títulos o separadores.
+
+Si existe exceso real de contenido, no truncar silenciosamente ni reducir la tipografía hasta hacerla ilegible. Ofrecer una versión editorial fielmente condensada, con aprobación del usuario, o permitir revisar el texto antes de exportarlo.
+
+No presentar diez páginas como requisito superior a la autenticidad del contenido.
+
+---
+
+# 20. REGLAS PROFESIONALES DE MAQUETACIÓN
+
+El resultado debe parecer un libro real, no una página web impresa.
+
+Implementar:
+
+- Márgenes interiores y exteriores adecuados.
+- Espaciado entre párrafos.
+- Jerarquía tipográfica.
+- Títulos y subtítulos consistentes.
+- Paginación real.
+- Separación editorial de capítulos.
+- Control de viudas y huérfanas.
+- Evitar títulos aislados al final de página.
+- Evitar cortar párrafos inadecuadamente.
+- Ajuste correcto de imágenes.
+- Texto justificado cuando el estilo lo requiera.
+- Separación silábica en español cuando exista soporte fiable.
+- Metadatos del PDF.
+- Idioma español.
+- Caracteres acentuados, ñ y signos de puntuación correctos.
+- Fuentes incrustadas.
+- Texto seleccionable y buscable.
+
+No exportar cada página como una captura de pantalla de baja resolución.
+
+La calidad debe ser suficiente para:
+
+- Leer en computadora.
+- Leer en tableta.
+- Leer en celular.
+- Imprimir.
+- Conservar como archivo digital.
+
+Si se incluyen fotografías, respetar las proporciones originales y evitar deformaciones.
+
+No estirar imágenes para llenar espacios.
+
+---
+
+# 21. ÚLTIMA PÁGINA OBLIGATORIA
+
+La última página del libro debe ser especial.
+
+Debe funcionar como un cierre emotivo y una invitación simbólica a continuar la historia.
+
+Debe contener únicamente:
+
+**Texto central:**
+
+«Esta historia continuará...»
+
+El texto debe estar:
+
+- Centrado horizontalmente.
+- Situado aproximadamente en el centro vertical.
+- Con tipografía elegante.
+- Con suficiente espacio en blanco.
+- Con una composición sobria y emotiva.
+
+**Marca:**
+
+«<< ForeverYou >>»
+
+Ubicar la marca en la zona inferior izquierda, alineada con el margen editorial.
+
+No incluir en esta página:
+
+- Botones.
+- Precios.
+- Enlaces.
+- Publicidad.
+- Mensajes comerciales.
+- Códigos QR.
+- Invitaciones de compra.
+- Numeración visible.
+- Otro texto adicional.
+
+Esta página debe ser la última del PDF descargado y del visor interactivo.
+
+---
+
+# 22. GENERACIÓN TÉCNICA DEL PDF
+
+Implementa generación real de PDF.
+
+Priorizar una solución basada en React y bibliotecas compatibles con la arquitectura actual.
+
+Tecnologías candidatas:
+
+- `@react-pdf/renderer` para la composición del documento y exportación.
+- `pdfjs-dist` o equivalente para representar páginas del PDF.
+- Una biblioteca de navegación tipo libro compatible con React, cuando resulte adecuada.
+- Bibliotecas de imágenes para dimensionamiento y procesamiento local.
+
+Seleccionar versiones compatibles con el proyecto existente.
+
+No introducir dependencias innecesarias.
+
+## 22.1. Arquitectura de generación
+
+El flujo debe ser:
+
+Respuestas del entrevistado  
+→ Generación del manuscrito con Gemini  
+→ Revisión y edición  
+→ Selección editorial  
+→ Composición de páginas  
+→ Generación de PDF  
+→ Representación del PDF en el visor  
+→ Descarga local.
+
+La vista previa debe utilizar el mismo documento PDF generado, no una versión HTML diferente.
+
+Así se garantiza que la portada, los saltos de página y la distribución visual sean consistentes.
+
+## 22.2. Requisitos de exportación
+
+El PDF debe:
+
+- Abrirse correctamente en lectores PDF comunes.
+- Tener texto seleccionable.
+- Incorporar las imágenes.
+- Conservar el tamaño elegido.
+- Respetar la paginación.
+- Mantener la portada seleccionada.
+- Mantener el diseño interior elegido.
+- Incluir el cierre obligatorio.
+- Contener un nombre de archivo comprensible.
+
+Ejemplo de nombre:
+
+`ForeverYou_Mi_Historia_Ernesto.pdf`
+
+Para parejas:
+
+`ForeverYou_Nuestra_Historia_Ana_y_Luis.pdf`
+
+Normalizar caracteres inseguros del nombre de archivo.
+
+Evitar nombres aleatorios o identificadores técnicos visibles para el usuario.
+
+---
+
+# 23. VISOR DE LIBRO INTERACTIVO
+
+Después de generar el PDF mostrar un visor integrado dentro de Forever You.
+
+Debe permitir elegir dos modos.
+
+## MODO A — LIBRO INTERACTIVO
+
+Un visor inspirado en un libro físico.
+
+Funciones:
+
+- Portada inicial.
+- Navegación página por página.
+- Botones anterior y siguiente.
+- Transición visual suave.
+- Numeración de página.
+- Indicador de avance.
+- Gestos táctiles.
+- Adaptación a pantalla pequeña.
+- Animación opcional de paso de página.
+
+En escritorio, utilizar vista de doble página cuando exista espacio suficiente.
+
+En móviles, utilizar una página a la vez.
+
+Las animaciones no deben obstaculizar la lectura.
+
+## MODO B — LECTOR PDF
+
+Un lector tradicional integrado.
+
+Funciones:
+
+- Desplazamiento vertical.
+- Zoom.
+- Ajustar al ancho.
+- Ajustar a la página.
+- Navegar por número de página.
+- Descargar.
+- Ver a pantalla completa cuando sea posible.
+- Abrir el archivo en un lector externo si el navegador no admite alguna función.
+
+## 23.1. Compatibilidad
+
+Probar y optimizar para:
+
+- Google Chrome.
+- Mozilla Firefox.
+- Microsoft Edge.
+- Safari de macOS.
+- Safari en iPhone.
+- Chrome en Android.
+- Tabletas Android.
+- iPad.
+
+Garantizar controles táctiles, legibilidad, navegación mediante teclado y compatibilidad razonable con lectores de pantalla.
+
+Si el navegador no soporta una animación o función específica, activar automáticamente un modo de lectura convencional.
+
+No bloquear la descarga por falta de soporte de animaciones.
+
+No depender exclusivamente del visor PDF nativo del navegador.
+
+---
+
+# 24. EDICIÓN DEL LIBRO ANTES DE DESCARGAR
+
+Permitir editar los elementos del libro antes de generar su versión definitiva.
+
+Campos editables:
+
+- Título.
+- Subtítulo.
+- Autor o autores.
+- Dedicatoria.
+- Imagen de portada.
+- Estilo de portada.
+- Diseño interior.
+- Tamaño.
+- Texto introductorio.
+- Texto de cada capítulo.
+- Mensaje final.
+
+## 24.1. Editor de texto
+
+Ofrecer un editor sencillo con:
+
+- Párrafos.
+- Negritas.
+- Cursivas.
+- Deshacer y rehacer.
+- Restaurar la versión generada por IA.
+- Vista previa actualizada.
+- Guardar cambios dentro de la sesión temporal.
+
+La edición no debe modificar las respuestas originales del entrevistado salvo que este decida corregirlas explícitamente.
+
+Al cambiar entre estilos visuales, conservar el texto editado.
+
+Si el usuario cambia el estilo narrativo después de editar manualmente el manuscrito, pedir confirmación antes de volver a generar el texto para evitar perder sus modificaciones.
+
+No realizar llamadas innecesarias a Gemini cada vez que cambie una fuente, un color o un margen.
+
+Los cambios puramente editoriales deben resolverse localmente.
+
+---
+
+# 25. FOTOGRAFÍAS E ILUSTRACIONES
+
+Permitir subir opcionalmente fotografías desde el dispositivo.
+
+Requisitos:
+
+- Formatos JPG, PNG y WebP.
+- Validar tipo real y tamaño del archivo.
+- Orientación correcta.
+- Recorte visual opcional.
+- Ajuste de encuadre.
+- Conservación de proporciones.
+- Compresión razonable.
+- Vista previa inmediata.
+- Eliminación de imágenes antes de generar el PDF.
+
+Procesar las fotografías localmente siempre que sea viable.
+
+No subirlas a un almacenamiento permanente.
+
+No enviar fotografías al modelo de IA salvo que exista una función real que lo requiera, el usuario la solicite y haya recibido información clara sobre ese procesamiento.
+
+Evitar incorporar rostros ficticios que parezcan representar a familiares reales.
+
+Si el entrevistado no proporciona fotografías, utilizar composiciones tipográficas, ornamentos o ilustraciones decorativas originales.
+
+---
+
+# 26. EXPERIENCIA VISUAL DE FOREVER YOU
+
+La interfaz debe transmitir:
+
+- Confianza.
+- Cercanía.
+- Serenidad.
+- Elegancia.
+- Valor emocional.
+- Calidad editorial.
+
+Inspirarse en la experiencia de lectura de un libro físico.
+
+Tomar como referencia conceptual las imágenes de muestra:
+
+- Portada oscura con nombre del protagonista.
+- Portadilla interior en marfil.
+- Página de capítulo con márgenes y numeración.
+- Navegador de páginas.
+- Fondo de lectura sobrio.
+
+Las referencias son únicamente de composición editorial. No copiar marcas de terceros.
+
+Utilizar los colores y componentes existentes de Forever You siempre que resulte apropiado.
+
+Evitar:
+
+- Paneles administrativos complejos.
+- Iconos excesivamente grandes.
+- Gradientes llamativos.
+- Exceso de colores.
+- Animaciones invasivas.
+- Formularios que ocupen toda la pantalla sin necesidad.
+- Elementos decorativos que reduzcan la legibilidad.
+
+La experiencia debe sentirse como la creación de un regalo personal de alta calidad.
+
+---
+
+# 27. MENSAJE COMERCIAL AL FINALIZAR LA LECTURA
+
+Este mensaje debe aparecer **fuera del PDF**, debajo del visor y al finalizar la lectura de la última página.
+
+Diseñar una sección visual elegante, cálida y emotiva.
+
+No debe parecer publicidad agresiva.
+
+Usar el siguiente contenido, con adaptación menor únicamente cuando sea necesario para la modalidad individual o pareja:
+
+### Tu historia apenas comienza...
+
+Lo que acabas de leer nació de solo unas cuantas preguntas. Y, aun así, esos pequeños recuerdos ya nos permiten descubrir algo extraordinario: tu manera de sentir, las personas que amas y los momentos que te han convertido en quien eres.
+
+**Ahora imagina todo lo que aún queda por contar.**
+
+Las historias que nunca compartiste, los apodos que solo tu familia conoce, las enseñanzas que marcaron tu vida, las personas que dejaron huella en tu corazón y esos pequeños detalles que algún día alguien querrá recordar exactamente como tú los viviste.
+
+Con Forever You, una entrevista mucho más profunda, construida a partir de **más de 220 preguntas base y preguntas de profundización personalizadas mediante inteligencia artificial**, puede convertirse en un libro autobiográfico completo, cuidadosamente escrito y maquetado.
+
+Un libro para conservar. Para compartir. Para regalar.
+
+Puedes crear tu propia historia o regalar esta experiencia a tu madre, tu padre, tus abuelos, tu pareja o cualquier persona cuya vida merezca ser recordada.
+
+Porque los recuerdos más valiosos no siempre son los grandes acontecimientos.
+
+A veces son una palabra de cariño, una sonrisa, una costumbre familiar o una historia contada una tarde cualquiera.
+
+**Hoy tienes la oportunidad de escuchar esas historias de su propia voz y conservar sus palabras antes de que el tiempo las vuelva difíciles de recuperar.**
+
+Que sus recuerdos acompañen a sus hijos.  
+Que sus enseñanzas lleguen a sus nietos.  
+Que su historia siga viva de generación en generación.
+
+**Forever You — Tu historia, para siempre.**
+
+### Botón principal
+
+**«Crear mi libro completo»**
+
+Subtexto:
+
+«Convierte tus recuerdos en un legado para toda la familia».
+
+## 27.1. Exactitud comercial
+
+Antes de mostrar la cifra «más de 220 preguntas base», verificar que corresponda a la oferta real del servicio completo.
+
+Si la cantidad configurada en el sistema es diferente, utilizar la cantidad real o una expresión general como «cientos de preguntas».
+
+No inventar cifras, beneficios o condiciones comerciales.
+
+## 27.2. Integración de contratación
+
+El botón «Crear mi libro completo» debe abrir la página de planes o contratación que ya exista en Forever You.
+
+No inventar una dirección.
+
+No implementar un proceso de pago paralelo.
+
+No modificar la integración comercial existente.
+
+Si la ruta no está disponible, localizar su equivalente en el proyecto y resolver la navegación sin crear un destino ficticio.
+
+---
+
+# 28. EXPERIENCIA DESPUÉS DE GENERAR EL LIBRO
+
+Mostrar las siguientes acciones:
+
+**Acción principal:**
+
+«Descargar mi libro en PDF»
+
+**Acciones secundarias:**
+
+- «Leer mi libro».
+- «Cambiar portada».
+- «Cambiar diseño interior».
+- «Editar mi historia».
+- «Cambiar estilo narrativo».
+- «Crear otro libro».
+- «Borrar mi información».
+
+La opción «Crear otro libro» debe permitir iniciar una nueva demostración.
+
+Antes de borrar o sustituir el trabajo actual, solicitar confirmación.
+
+La función debe evitar que una persona pierda accidentalmente su contenido.
+
+---
+
+# 29. ESTADOS Y MENSAJES DEL SISTEMA
+
+Implementar estados de carga reales y diferenciados:
+
+- Preparando la siguiente pregunta.
+- Generando pregunta de profundización.
+- Redactando el manuscrito.
+- Preparando la portada.
+- Aplicando diseño editorial.
+- Componiendo las páginas.
+- Generando el PDF.
+- Preparando vista previa.
+- PDF listo para descargar.
+
+No mostrar progreso numérico ficticio.
+
+Si no existe una medición fiable, utilizar indicadores de estado sin porcentajes inventados.
+
+Contemplar errores:
+
+- Fallo de conexión.
+- Tiempo de espera agotado.
+- Respuesta inválida de Gemini.
+- Problemas con fuentes.
+- Fotografía demasiado grande.
+- PDF que excede diez páginas.
+- Navegador incompatible con animación.
+- Falta de información suficiente para una narración extensa.
+
+Permitir recuperarse de los errores sin perder las respuestas temporales.
+
+---
+
+# 30. ARQUITECTURA TÉCNICA SUGERIDA
+
+Adaptar esta estructura a la arquitectura real del proyecto.
+
+Módulos conceptuales:
+
+### DemoLanding
+
+Pantalla pública de presentación.
+
+### DemoModeSelector
+
+Selección de historia individual o en pareja.
+
+### DemoInterview
+
+Motor de entrevista de cinco preguntas principales.
+
+### FollowUpGenerator
+
+Servicio Gemini para preguntas de profundización.
+
+### DemoSessionManager
+
+Gestión temporal de respuestas en el navegador.
+
+### NarrativeStyleSelector
+
+Selección de primera persona, primera persona literaria o tercera persona.
+
+### AutobiographyGenerator
+
+Servicio Gemini que crea el manuscrito.
+
+### BookEditor
+
+Editor de texto y contenido.
+
+### CoverGallery
+
+Galería de cinco portadas.
+
+### InteriorStyleGallery
+
+Galería de cinco diseños interiores.
+
+### BookFormatSelector
+
+Selector de A5, 6 × 9 pulgadas y carta.
+
+### BookComposer
+
+Motor de composición editorial y paginación.
+
+### PDFGenerator
+
+Exportador de PDF real.
+
+### FlipbookViewer
+
+Visor tipo libro.
+
+### PDFReader
+
+Visor de lectura convencional.
+
+### DemoCommercialCTA
+
+Sección de contratación del servicio completo.
+
+### DemoPrivacyManager
+
+Gestión de consentimiento, borrado y privacidad.
+
+No es obligatorio utilizar exactamente estos nombres, pero sí separar correctamente sus responsabilidades.
+
+---
+
+# 31. ACCESIBILIDAD Y RESPONSIVIDAD
+
+La funcionalidad debe diseñarse para:
+
+- Escritorio.
+- Laptop.
+- Tableta.
+- Celular.
+
+Garantizar:
+
+- Diseño responsivo.
+- Tipografía legible.
+- Contrastes accesibles.
+- Controles cómodos.
+- Navegación con teclado.
+- Etiquetas accesibles.
+- Estados de enfoque visibles.
+- Mensajes de error comprensibles.
+- Respeto a la configuración de movimiento reducido.
+- Zoom del navegador.
+- Compatibilidad con pantallas táctiles.
+
+En móviles, priorizar:
+
+- Una página visible.
+- Navegación inferior.
+- Controles táctiles.
+- Ajuste al ancho.
+- Cambio de orientación.
+- Descarga accesible.
+
+No depender de pantallas de gran tamaño para poder completar la entrevista.
+
+---
+
+# 32. REQUISITOS DE SEGURIDAD
+
+Aplicar medidas apropiadas para una aplicación pública:
+
+1. Validación de entradas.
+2. Límites razonables de caracteres.
+3. Sanitización del contenido que se represente como HTML.
+4. Protección contra XSS.
+5. Tratamiento de respuestas del entrevistado como datos, nunca como instrucciones de sistema.
+6. Protección de claves API.
+7. Límites de solicitudes para reducir abusos.
+8. Control de tamaño y tipo de archivos.
+9. Eliminación de URLs temporales de imágenes.
+10. Manejo seguro de errores.
+11. No incorporar información privada en URLs.
+12. No colocar respuestas personales en mensajes de error o telemetría.
+13. No almacenar fotografías en servicios externos.
+14. No insertar identificadores personales en analytics.
+15. No reutilizar respuestas de otras sesiones.
+
+Las solicitudes al modelo deben separar claramente las instrucciones de la aplicación y el contenido proporcionado por el usuario.
+
+No permitir que una respuesta del entrevistado modifique las reglas internas del generador o del sistema.
+
+---
+
+# 33. PRUEBAS FUNCIONALES OBLIGATORIAS
+
+Antes de considerar terminada la implementación, verifica lo siguiente.
+
+## Entrevistas
+
+- La modalidad individual funciona.
+- La modalidad pareja funciona.
+- Se muestran las cinco preguntas correctas.
+- Las preguntas de pareja son diferentes cuando corresponde.
+- Se genera como máximo una profundización por pregunta.
+- La profundización utiliza la respuesta real.
+- No se presentan preguntas repetidas.
+- Se pueden editar respuestas anteriores.
+- Se permiten omisiones.
+- Se puede terminar con menos de diez respuestas cuando existan omisiones.
+
+## Privacidad
+
+- No se crean registros de la prueba en Firestore.
+- No se generan escrituras en otras bases de datos.
+- No se guardan fotografías en almacenamiento remoto.
+- Las respuestas se conservan temporalmente en la sesión del navegador.
+- El usuario puede borrarlas.
+- Los datos temporales caducan.
+- No se registran respuestas personales en logs de la aplicación.
+
+## Narrativa
+
+- Funciona la primera persona sencilla.
+- Funciona la primera persona literaria.
+- Funciona la tercera persona.
+- La pareja conserva el equilibrio entre ambas voces.
+- No aparecen recuerdos inventados.
+- Se conservan los apodos.
+- Las frases personales se reproducen fielmente cuando se citan.
+- La narración no es una simple transcripción de preguntas y respuestas.
+
+## Diseño editorial
+
+- Se muestran cinco portadas realmente diferentes.
+- Se muestran cinco interiores realmente diferentes.
+- Es posible combinar cualquier portada con cualquier interior.
+- Es posible cambiar el título.
+- Es posible añadir dedicatoria.
+- Se pueden añadir fotografías.
+- Se puede eliminar una fotografía.
+- Se puede editar el contenido.
+- Los cambios aparecen en la vista previa.
+
+## PDF
+
+- Se genera un PDF real.
+- Contiene entre cinco y diez páginas.
+- Incluye portada.
+- Incluye capítulos maquetados.
+- Contiene texto seleccionable.
+- Incluye fuentes adecuadas.
+- Respeta las dimensiones del formato.
+- La numeración es correcta.
+- No existen páginas accidentalmente vacías.
+- No existen párrafos cortados.
+- No existen textos desbordados.
+- No existen imágenes distorsionadas.
+- La última página contiene únicamente el mensaje obligatorio y la marca indicada.
+- El archivo puede descargarse.
+
+## Navegadores
+
+- Chrome.
+- Firefox.
+- Edge.
+- Safari.
+- Android.
+- iPhone.
+- Tabletas.
+
+## Conversión comercial
+
+- El mensaje aparece fuera del PDF.
+- Se muestra al finalizar la lectura.
+- No interrumpe la experiencia.
+- El botón utiliza la ruta comercial existente.
+- No se generan enlaces de pago falsos.
+- No se altera la contratación actual.
+
+Si alguna prueba no puede ejecutarse en el entorno disponible, indicarlo expresamente. No declarar compatibilidad verificada sin haberla comprobado.
+
+---
+
+# 34. CRITERIOS DE ACEPTACIÓN FINAL
+
+La funcionalidad estará terminada solamente cuando:
+
+1. Un visitante pueda entrar a la prueba gratuita sin registrarse.
+2. Pueda seleccionar historia individual o pareja.
+3. Responda las cinco preguntas autobiográficas.
+4. Gemini formule preguntas de profundización contextuales.
+5. Pueda elegir uno de tres estilos narrativos.
+6. Pueda previsualizar cinco portadas.
+7. Pueda previsualizar cinco diseños interiores.
+8. Pueda seleccionar A5, 6 × 9 pulgadas o carta.
+9. Pueda subir una fotografía opcional.
+10. Pueda editar el manuscrito.
+11. Se genere un PDF maquetado de cinco a diez páginas.
+12. Pueda leerlo dentro del navegador.
+13. Pueda elegir entre el visor tipo libro y el visor tradicional.
+14. Pueda descargarlo.
+15. La última página diga exactamente «Esta historia continuará...» y muestre «<< ForeverYou >>» en el lado inferior Derecho.
+16. Pueda ver la invitación comercial fuera del documento.
+17. Pueda abrir la contratación real de Forever You.
+18. No se guarde ningún contenido autobiográfico de la demostración en la base de datos.
+19. Las funciones anteriores de Forever You continúen funcionando.
+20. La aplicación no dependa de datos de prueba simulados para producir resultados.
+
+---
+
+# 35. INSTRUCCIONES FINALES DE IMPLEMENTACIÓN
+
+No te limites a explicar cómo podría desarrollarse esta funcionalidad.
+
+**DEBES IMPLEMENTARLA EN EL PROYECTO ACTUAL.**
+
+Realiza los cambios necesarios en los archivos pertinentes.
+
+Instala las dependencias compatibles que hagan falta.
+
+Conecta los servicios reales de Gemini.
+
+Implementa las cinco portadas y cinco diseños interiores, no simples marcadores de posición.
+
+Implementa generación auténtica del manuscrito y del PDF.
+
+Comprueba que el visor utilice el mismo PDF descargable.
+
+Implementa validaciones y manejo de errores.
+
+No generes botones sin funcionalidad.
+
+No simules las respuestas de Gemini como comportamiento final.
+
+No declares pruebas realizadas cuando no se hayan ejecutado.
+
+No inventes rutas comerciales o configuraciones.
+
+Si existe alguna restricción técnica real, resuélvela usando una alternativa compatible y documenta la diferencia.
+
+Al finalizar, proporciona un informe breve que indique:
+
+- Componentes creados.
+- Componentes reutilizados.
+- Servicios Gemini integrados.
+- Bibliotecas empleadas.
+- Mecanismos de almacenamiento temporal.
+- Confirmación de ausencia de escrituras de la demostración en BDD.
+- Método utilizado para generar el PDF.
+- Pruebas efectivamente realizadas.
+- Limitaciones pendientes, si las hubiera.
+
+## RESULTADO ESPERADO
+
+El usuario final debe poder entrar a Forever You, responder unas pocas preguntas personales y obtener un pequeño libro autobiográfico que se sienta íntimo, verdadero y cuidadosamente elaborado.
+
+Un libro que conserve recuerdos reales, nombres especiales, expresiones propias y palabras que merecen permanecer.
+
+La demostración debe permitir entender inmediatamente el potencial del servicio completo.
+
+**No estamos generando simplemente un PDF. Estamos mostrando cómo una historia personal puede transformarse en un legado familiar.**
+
+**Forever You — Tu historia, para siempre.**

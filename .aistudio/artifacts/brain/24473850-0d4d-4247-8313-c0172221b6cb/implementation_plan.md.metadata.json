@@ -1,6 +1,6 @@
 {
-  "summary":  "Plan de implementación actualizado con sesión persistente, restauración de pregunta y borrador en curso, botón de cierre de sesión en Ajustes y Privacidad, botón centrado \"Añadir fotografías o recuerdos\" sin subrayado, y casilla breve de aceptación del aviso de privacidad.",
-  "updatedAt":  "2026-11-02T01:18:08.204617212Z",
-  "requestFeedback":  true,
-  "userFacing":  true
+  "summary": "Plan de rediseño del Portal del Participante centrado en accesibilidad para adultos mayores, presencia protagonista de pregunta y micrófono, barra inferior fija y menú de opciones compacto.",
+  "updatedAt": "2026-11-05T13:38:08.603986586Z",
+  "requestFeedback": true,
+  "userFacing": true
 }

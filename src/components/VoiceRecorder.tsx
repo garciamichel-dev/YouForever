@@ -20,7 +20,6 @@ import {
   CheckCircle2,
   PlusCircle,
   HelpCircle,
-  Upload,
   FileAudio,
   RotateCcw,
 } from 'lucide-react';
@@ -50,6 +49,8 @@ export interface VoiceRecorderProps {
   onRecordingStatusChange?: (isRecording: boolean) => void;
   onFocusKeyboard?: () => void;
   disabled?: boolean;
+  isDemo?: boolean;
+  frameless?: boolean;
 }
 
 export interface VoiceRecorderHandle {
@@ -73,6 +74,8 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
       onRecordingStatusChange,
       onFocusKeyboard,
       disabled = false,
+      isDemo = false,
+      frameless = false,
     },
     ref
   ) => {
@@ -125,9 +128,6 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
     const vocalModulationFramesRef = useRef<number>(0);
     const backgroundNoiseFramesRef = useRef<number>(0);
     const thirtySecCheckTriggeredRef = useRef<boolean>(false);
-
-    const audioFileInputRef = useRef<HTMLInputElement | null>(null);
-    const nativeAudioInputRef = useRef<HTMLInputElement | null>(null);
 
     // Sync when initial audios change or question changes
     useEffect(() => {
@@ -345,7 +345,7 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
 
       if (typeof window === 'undefined' || !navigator?.mediaDevices?.getUserMedia) {
         setErrorMsg(
-          'Tu navegador o dispositivo no soporta grabación en vivo de audio. Puedes subir un archivo de audio o escribir tu respuesta directamente usando el teclado.'
+          'Tu navegador o dispositivo no soporta grabación en vivo de audio. Puedes responder escribiendo directamente usando el teclado.'
         );
         return;
       }
@@ -422,70 +422,18 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
 
         if (isNotAllowed) {
           setErrorMsg(
-            'El acceso al micrófono no está permitido en este navegador. Puedes subir un archivo de audio o escribir tu respuesta por tu cuenta usando el teclado.'
+            'El acceso al micrófono no está permitido en este navegador. Puedes habilitarlo en los permisos de tu navegador o responder escribiendo con el teclado.'
           );
         } else if (err?.name === 'NotFoundError' || err?.name === 'DevicesNotFoundError') {
           setErrorMsg(
-            'No se encontró ningún micrófono conectado en tu dispositivo. Puedes subir una nota de voz o escribir tu respuesta por tu cuenta usando el teclado.'
+            'No se encontró ningún micrófono conectado en tu dispositivo. Puedes conectar un micrófono o responder escribiendo con el teclado.'
           );
         } else {
           setErrorMsg(
-            `No se pudo iniciar la grabación con micrófono (${errMsg || 'error del navegador'}). Puedes subir tu archivo de audio o escribir tu respuesta usando el teclado.`
+            `No se pudo iniciar la grabación con micrófono (${errMsg || 'error del navegador'}). Puedes reintentar o responder escribiendo con el teclado.`
           );
         }
       }
-    };
-
-    // Handler for uploading an audio file / voice memo directly
-    const handleAudioFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
-      if (!file) return;
-
-      setErrorMsg(null);
-      setThirtySecAlert(null);
-      setQualityAlert(null);
-      // Maximum 50MB (supports recordings of 10-30+ minutes)
-      if (file.size > 50 * 1024 * 1024) {
-        setErrorMsg(
-          'El archivo de audio supera el límite de 50 MB. Por favor selecciona una nota de voz de menor tamaño.'
-        );
-        if (e.target) e.target.value = '';
-        return;
-      }
-
-      cleanupResources();
-      audioChunksRef.current = [];
-      finalRecordedBlobRef.current = file;
-      setPreviewAudioName(file.name);
-
-      if (previewAudioUrl) {
-        URL.revokeObjectURL(previewAudioUrl);
-      }
-      const previewUrl = URL.createObjectURL(file);
-      setPreviewAudioUrl(previewUrl);
-
-      // Estimate / measure audio duration using temporary Audio element
-      let detectedDuration = 0;
-      try {
-        const tempAudio = document.createElement('audio');
-        tempAudio.src = previewUrl;
-        await new Promise<void>((resolve) => {
-          tempAudio.onloadedmetadata = () => {
-            if (Number.isFinite(tempAudio.duration) && tempAudio.duration > 0) {
-              detectedDuration = Math.round(tempAudio.duration);
-            }
-            resolve();
-          };
-          tempAudio.onerror = () => resolve();
-          setTimeout(resolve, 800);
-        });
-      } catch {
-        // Non-fatal
-      }
-
-      setTimerSeconds(detectedDuration || Math.max(1, Math.round(file.size / 24000)));
-      setState('stopped');
-      if (e.target) e.target.value = '';
     };
 
     // 1. Control: PAUSA
@@ -653,20 +601,29 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
         const audioBase64 = await base64Promise;
 
         const duration = timerSeconds > 0 ? timerSeconds : 1;
+        const isDemoMode = isDemo || token === 'demo';
+        const uploadUrl = isDemoMode ? '/api/demo/audio/transcribe' : '/api/participant/audio/upload';
+        const requestBody = isDemoMode
+          ? {
+              audioBase64,
+              mimeType: audioBlob.type || 'audio/webm',
+              clientTranscription: liveClientTranscriptRef.current || undefined,
+            }
+          : {
+              token,
+              questionId,
+              questionText: questionText || '',
+              audioBase64,
+              mimeType: audioBlob.type || 'audio/webm',
+              durationSeconds: duration,
+              clientTranscription: liveClientTranscriptRef.current || undefined,
+            };
 
         // Send to server: persists voice recording, strictly transcribes without hallucinating, saves in Firestore
-        const res = await fetch('/api/participant/audio/upload', {
+        const res = await fetch(uploadUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            token,
-            questionId,
-            questionText: questionText || '',
-            audioBase64,
-            mimeType: audioBlob.type || 'audio/webm',
-            durationSeconds: duration,
-            clientTranscription: liveClientTranscriptRef.current || undefined,
-          }),
+          body: JSON.stringify(requestBody),
         });
 
         const data = await res.json();
@@ -681,18 +638,18 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
         const returnedSuggestion: string | undefined = data.data.suggestion;
 
         const audioAttachment: AnswerVoiceAttachment = {
-          id: data.data.id,
-          interviewId: '',
+          id: data.data.id || `demo_aud_${Date.now()}`,
+          interviewId: isDemoMode ? 'demo' : '',
           questionId,
           questionText,
-          participantId: '',
-          participantName: '',
-          audioUrl: data.data.audioUrl,
+          participantId: isDemoMode ? 'demo_user' : '',
+          participantName: isDemoMode ? 'Usuario Demo' : '',
+          audioUrl: data.data.audioUrl || (previewAudioUrl || audioBase64),
           audioDataUrl: data.data.audioDataUrl || audioBase64,
-          mimeType: data.data.mimeType,
+          mimeType: data.data.mimeType || audioBlob.type || 'audio/webm',
           transcription: returnedTranscription,
-          durationSeconds: data.data.durationSeconds,
-          createdAt: data.data.createdAt,
+          durationSeconds: data.data.durationSeconds || duration,
+          createdAt: data.data.createdAt || new Date().toISOString(),
         };
 
         // Append to savedAudios array so all previous voice files are preserved
@@ -804,27 +761,13 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
 
     return (
       <div className="w-full space-y-4">
-        {/* Hidden inputs for audio upload and native device recording fallback */}
-        <input
-          ref={audioFileInputRef}
-          type="file"
-          accept="audio/*,.mp3,.m4a,.wav,.ogg,.webm,.aac,.flac,.caf,.opus,.wma"
-          onChange={handleAudioFileSelected}
-          className="sr-only"
-          aria-label="Seleccionar archivo de audio o nota de voz"
-        />
-        <input
-          ref={nativeAudioInputRef}
-          type="file"
-          accept="audio/*"
-          capture="user"
-          onChange={handleAudioFileSelected}
-          className="sr-only"
-          aria-label="Grabar audio con el micrófono nativo del dispositivo"
-        />
 
         {/* Main active recorder container */}
-        <div className="w-full bg-gradient-to-b from-amber-50/30 via-stone-50/60 to-white border border-stone-200/90 rounded-2xl p-5 transition-all shadow-xs">
+        <div className={`w-full transition-all ${
+          frameless
+            ? 'p-1'
+            : 'bg-gradient-to-b from-amber-50/30 via-stone-50/60 to-white border border-stone-200/90 rounded-2xl p-5 shadow-xs'
+        }`}>
           {/* Live Timer badge (visible when recording, paused or stopped) */}
           {(state === 'recording' || state === 'paused' || state === 'stopped') && (
             <div className="flex items-center justify-between mb-3 pb-2.5 border-b border-stone-200/60">
@@ -995,15 +938,6 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
                 </button>
               </div>
               <div className="flex flex-wrap items-center gap-2 pt-1 pl-6">
-                <button
-                  type="button"
-                  onClick={() => audioFileInputRef.current?.click()}
-                  disabled={disabled}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-800 hover:bg-amber-900 text-white text-xs font-semibold rounded-lg shadow-xs transition cursor-pointer"
-                >
-                  <Upload className="w-3.5 h-3.5" />
-                  Subir archivo de audio o nota de voz
-                </button>
                 {onFocusKeyboard && (
                   <button
                     type="button"
@@ -1035,33 +969,24 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
                 type="button"
                 onClick={handleStartRecording}
                 disabled={disabled}
-                className="w-36 h-36 sm:w-40 sm:h-40 rounded-full bg-gradient-to-br from-amber-700 via-amber-800 to-amber-900 text-white shadow-md hover:shadow-xl hover:scale-105 active:scale-95 transition-all duration-300 flex flex-col items-center justify-center p-3 cursor-pointer group focus:outline-none focus:ring-4 focus:ring-amber-200 border-4 border-amber-100 disabled:opacity-50"
-                aria-label="Pulsa y cuéntanos tu recuerdo"
+                className={`${
+                  frameless
+                    ? 'w-24 h-24 sm:w-28 sm:h-28'
+                    : 'w-36 h-36 sm:w-40 sm:h-40'
+                } rounded-full bg-gradient-to-br from-amber-700 via-amber-800 to-amber-900 text-white shadow-lg hover:shadow-xl hover:scale-105 active:scale-95 transition-all duration-300 flex flex-col items-center justify-center p-2.5 cursor-pointer group focus:outline-none focus:ring-4 focus:ring-amber-200 border-4 border-amber-100/90 disabled:opacity-50`}
+                aria-label="Toca para comenzar a narrar tu recuerdo"
               >
-                <div className="w-12 h-12 rounded-full bg-white/20 flex items-center justify-center mb-1 group-hover:bg-white/30 transition shadow-inner">
-                  <Mic className="w-7 h-7 text-white" />
+                <div className={`${frameless ? 'w-10 h-10' : 'w-12 h-12'} rounded-full bg-white/20 flex items-center justify-center mb-1 group-hover:bg-white/30 transition shadow-inner`}>
+                  <Mic className={`${frameless ? 'w-6 h-6' : 'w-7 h-7'} text-white`} />
                 </div>
-                <span className="text-xs sm:text-sm font-bold text-center leading-snug px-2 text-amber-50">
-                  Pulsa y cuéntanos tu recuerdo
+                <span className={`${frameless ? 'text-[11px] leading-tight' : 'text-xs sm:text-sm leading-snug'} font-bold text-center px-1 text-amber-50`}>
+                  Toca para hablar
                 </span>
               </button>
 
               <p className="font-serif italic text-sm text-stone-700 text-center max-w-md px-2 leading-relaxed">
                 «Habla con calma y a tu propio ritmo. Te escuchamos con el respeto que merece tu historia.»
               </p>
-
-              <div className="pt-1">
-                <button
-                  type="button"
-                  onClick={() => audioFileInputRef.current?.click()}
-                  disabled={disabled}
-                  className="inline-flex items-center gap-1.5 text-xs text-stone-500 hover:text-amber-800 transition underline underline-offset-4 cursor-pointer"
-                  title="Subir archivo de audio o nota de voz (.mp3, .m4a, .wav, .ogg, .webm)"
-                >
-                  <Upload className="w-3.5 h-3.5" />
-                  <span>O si lo prefieres, sube una nota de voz o archivo de audio</span>
-                </button>
-              </div>
             </div>
           )}
 

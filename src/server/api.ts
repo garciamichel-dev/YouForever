@@ -15,12 +15,38 @@ import {
 import {
   CURRENT_PRIVACY_POLICY_VERSION,
 } from '../logic/interviewRules.ts';
+import {
+  generateTransientDemoFollowUp,
+  generateTransientDemoManuscript,
+} from './demoGeminiService.ts';
+import { analyzeAndTranscribeAudioWithGemini } from './geminiService.ts';
 
 export const apiRouter: Router = express.Router();
 apiRouter.use(express.json({ limit: '100mb' }));
 
-// Ensure Firestore state is hydrated before processing any API request (handles Cloud Run scale-to-zero cold starts)
-apiRouter.use(async (_req: Request, _res: Response, next: NextFunction) => {
+// In-memory rate limiter for public demo endpoints (stores no personal content)
+const demoRateLimitMap = new Map<string, { count: number; windowStart: number }>();
+function checkDemoRateLimit(req: Request, maxPerWindow = 40, windowMs = 10 * 60 * 1000): boolean {
+  const key = String(req.ip || req.headers['x-forwarded-for'] || 'anon');
+  const now = Date.now();
+  const entry = demoRateLimitMap.get(key);
+  if (!entry || now - entry.windowStart > windowMs) {
+    demoRateLimitMap.set(key, { count: 1, windowStart: now });
+    return true;
+  }
+  if (entry.count >= maxPerWindow) {
+    return false;
+  }
+  entry.count += 1;
+  return true;
+}
+
+// Ensure Firestore state is hydrated before processing non-demo API requests
+apiRouter.use(async (req: Request, _res: Response, next: NextFunction) => {
+  if (req.path.startsWith('/demo/')) {
+    next();
+    return;
+  }
   try {
     await storage.ensureInitialized();
     next();
@@ -544,6 +570,7 @@ apiRouter.get('/interviews', requireAdmin, (_req: Request, res: Response) => {
       const participants = storage.getParticipantsForInterview(inv.id);
       const answers = storage.getAnswersForInterview(inv.id);
       const manuscripts = storage.getManuscriptsForInterview(inv.id);
+      const bookVersions = storage.getBookVersionsForInterview(inv.id);
       return {
         ...inv,
         participants,
@@ -551,6 +578,9 @@ apiRouter.get('/interviews', requireAdmin, (_req: Request, res: Response) => {
         photosCount: answers.reduce((sum, a) => sum + (a.photos?.length || 0), 0),
         manuscriptsCount: manuscripts.length,
         latestManuscriptVersion: manuscripts[0]?.version || 0,
+        bookVersions,
+        bookVersionsCount: bookVersions.length,
+        latestBookVersion: bookVersions[0]?.versionNumber || 0,
       };
     });
     res.json({ success: true, data: enriched });
@@ -596,11 +626,122 @@ apiRouter.post('/interviews/:id/extend', requireAdmin, async (req: Request, res:
 apiRouter.post('/interviews/:id/reopen', requireAdmin, async (req: Request, res: Response) => {
   try {
     const admin = (req as any).adminUser as string;
-    const { newDays, reason } = req.body;
-    const updated = await storage.reopenInterview(req.params.id, Number(newDays), reason, admin);
+    const { newDays, reason, additionalLayoutEdits } = req.body;
+    const parsedEdits =
+      additionalLayoutEdits !== undefined && additionalLayoutEdits !== ''
+        ? Number(additionalLayoutEdits)
+        : undefined;
+    const updated = await storage.reopenInterview(
+      req.params.id,
+      Number(newDays),
+      reason,
+      admin,
+      parsedEdits
+    );
     res.json({ success: true, data: updated });
   } catch (err: unknown) {
     res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
+apiRouter.post('/interviews/:id/layout-quota', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const admin = (req as any).adminUser as string;
+    const { remainingEdits } = req.body;
+    const updated = await storage.updateInterviewLayoutQuota(
+      req.params.id,
+      Number(remainingEdits),
+      admin
+    );
+    const bookVersions = storage.getBookVersionsForInterview(req.params.id);
+    res.json({
+      success: true,
+      data: {
+        ...updated,
+        bookVersions,
+        bookVersionsCount: bookVersions.length,
+        latestBookVersion: bookVersions[0]?.versionNumber || 0,
+      },
+    });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
+apiRouter.get('/interviews/:id/book-versions', requireAdmin, (req: Request, res: Response) => {
+  try {
+    const versions = storage.getBookVersionsForInterview(req.params.id);
+    res.json({ success: true, data: versions });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
+apiRouter.get('/participant-book-versions', requireAdmin, (_req: Request, res: Response) => {
+  try {
+    const versions = storage.getAllParticipantBookVersions();
+    res.json({ success: true, data: versions });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
+// Delete an individual generated book PDF version permanently with optional quota restoration
+apiRouter.delete('/participant-book-versions/:id', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const admin = (req as any).adminUser as string;
+    const restoreQuota =
+      req.query.restoreQuota === 'true' ||
+      req.body?.restoreQuota === true ||
+      req.query.restore === 'true';
+
+    const result = await storage.deleteParticipantBookVersion(
+      req.params.id,
+      restoreQuota,
+      admin
+    );
+
+    res.json({
+      success: true,
+      message: `Versión del libro eliminada permanentemente.${restoreQuota ? ' Se ha restaurado 1 intento de edición de maquetación al entrevistado.' : ''}`,
+      data: result,
+    });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
+// Seed 7 complete test stories (3 individual with varied flows, 4 shared of 2, 3, 4 and 5 people)
+apiRouter.post('/interviews/seed-test-stories', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const admin = (req as any).adminUser as string;
+    const result = await storage.seedCompleteTestStories(admin);
+    const allInterviews = storage.getInterviews().map((inv) => {
+      const participants = storage.getParticipantsForInterview(inv.id);
+      const answers = storage.getAnswersForInterview(inv.id);
+      const manuscripts = storage.getManuscriptsForInterview(inv.id);
+      const bookVersions = storage.getBookVersionsForInterview(inv.id);
+      return {
+        ...inv,
+        participants,
+        answersCount: answers.length,
+        photosCount: answers.reduce((sum, a) => sum + (a.photos?.length || 0), 0),
+        manuscriptsCount: manuscripts.length,
+        latestManuscriptVersion: manuscripts[0]?.version || 0,
+        bookVersions,
+        bookVersionsCount: bookVersions.length,
+        latestBookVersion: bookVersions[0]?.versionNumber || 0,
+      };
+    });
+
+    res.json({
+      success: true,
+      message: `Se han sembrado ${result.seededCount} historias de prueba completamente respondidas y listas para maquetación.`,
+      seededCount: result.seededCount,
+      data: allInterviews,
+    });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: (err as Error).message });
   }
 });
 
@@ -775,15 +916,19 @@ apiRouter.post('/tokens/revoke', requireAdmin, async (req: Request, res: Respons
 // Restore browser-cached interviews if server restarted while Firestore quota was exhausted
 apiRouter.post('/interviews/restore-cache', requireAdmin, (req: Request, res: Response) => {
   try {
-    const { interviews } = req.body;
-    if (Array.isArray(interviews) && interviews.length > 0) {
-      storage.restoreFromClientCache(interviews);
+    const { interviews, bookVersions: cachedBookVersions } = req.body;
+    if (
+      (Array.isArray(interviews) && interviews.length > 0) ||
+      (Array.isArray(cachedBookVersions) && cachedBookVersions.length > 0)
+    ) {
+      storage.restoreFromClientCache(interviews, cachedBookVersions);
     }
     const list = storage.getInterviews();
     const enriched = list.map((inv) => {
       const participants = storage.getParticipantsForInterview(inv.id);
       const answers = storage.getAnswersForInterview(inv.id);
       const manuscripts = storage.getManuscriptsForInterview(inv.id);
+      const bookVersions = storage.getBookVersionsForInterview(inv.id);
       return {
         ...inv,
         participants,
@@ -791,6 +936,9 @@ apiRouter.post('/interviews/restore-cache', requireAdmin, (req: Request, res: Re
         photosCount: answers.reduce((sum, a) => sum + (a.photos?.length || 0), 0),
         manuscriptsCount: manuscripts.length,
         latestManuscriptVersion: manuscripts[0]?.version || 0,
+        bookVersions,
+        bookVersionsCount: bookVersions.length,
+        latestBookVersion: bookVersions[0]?.versionNumber || 0,
       };
     });
     res.json({ success: true, data: enriched });
@@ -802,20 +950,24 @@ apiRouter.post('/interviews/restore-cache', requireAdmin, (req: Request, res: Re
 // 7. Participant Portal Endpoints
 apiRouter.post('/participant/session', (req: Request, res: Response) => {
   try {
-    const { token, cachedInterviews } = req.body;
+    const { token, cachedInterviews, cachedBookVersions } = req.body;
     if (!token) {
       res.status(400).json({ success: false, error: 'Token de invitación requerido.' });
       return;
     }
 
-    if (Array.isArray(cachedInterviews) && cachedInterviews.length > 0) {
-      storage.restoreFromClientCache(cachedInterviews);
+    if (
+      (Array.isArray(cachedInterviews) && cachedInterviews.length > 0) ||
+      (Array.isArray(cachedBookVersions) && cachedBookVersions.length > 0)
+    ) {
+      storage.restoreFromClientCache(cachedInterviews, cachedBookVersions);
     }
 
     const { token: resolvedTokenDoc, interview, participant } = storage.resolveToken(token);
     const questions = storage.getQuestionsForVersion(interview.questionnaireVersionId);
     const answers = storage.getAnswersForInterview(interview.id);
     const otherParticipants = storage.getParticipantsForInterview(interview.id);
+    const bookVersions = storage.getBookVersionsForInterview(interview.id);
 
     // Verify existing informed consent on record for this specific participant
     const consent = storage.getActiveConsent(interview.id, participant.id) || storage.getConsentForParticipant(participant.id, PRIVACY_NOTICE_VERSION);
@@ -833,13 +985,14 @@ apiRouter.post('/participant/session', (req: Request, res: Response) => {
         participant,
         questions,
         answers,
+        bookVersions,
         otherParticipants: otherParticipants.map((p) => ({
           id: p.id,
           name: p.name,
           relationship: p.relationship,
           role: p.role,
         })),
-        allowAnswerEditing: storage.getConfig().allowAnswerEditing,
+        allowAnswerEditing: Boolean(storage.getConfig().allowAnswerEditing || interview.status === 'open'),
         allowAdditionalMemories: storage.getConfig().allowAdditionalMemories,
         consent: consent || null,
         hasValidConsent,
@@ -1108,8 +1261,60 @@ apiRouter.post('/participant/finish', async (req: Request, res: Response) => {
       return;
     }
 
-    const finished = await storage.declareVoluntaryCompletion(token, reason || 'Declaración voluntaria');
+    const finished = await storage.declareVoluntaryCompletion(token, reason || '');
     res.json({ success: true, data: finished });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
+// Participant Book Studio: Generate AI manuscript in chosen narrative style (A, B, or C)
+apiRouter.post('/participant/book/generate-manuscript', async (req: Request, res: Response) => {
+  try {
+    const { token, narrativeStyle } = req.body;
+    if (!token) {
+      res.status(400).json({ success: false, error: 'Token de invitación requerido.' });
+      return;
+    }
+    const result = await storage.generateParticipantBookManuscript({
+      plainToken: token,
+      narrativeStyle: narrativeStyle || 'first_person_literary',
+    });
+    res.json({ success: true, data: result });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
+// Participant Book Studio: Save a generated PDF book version and update layout edit quota
+apiRouter.post('/participant/book/save-version', async (req: Request, res: Response) => {
+  try {
+    const {
+      token,
+      narrativeStyle,
+      editorialConfig,
+      manuscript,
+      coverPhoto,
+      chapterPhotos,
+      pageCount,
+    } = req.body;
+    if (!token || !editorialConfig || !manuscript) {
+      res.status(400).json({
+        success: false,
+        error: 'Token, configuración editorial y manuscrito son requeridos.',
+      });
+      return;
+    }
+    const result = await storage.saveParticipantBookVersion({
+      plainToken: token,
+      narrativeStyle: narrativeStyle || 'first_person_literary',
+      editorialConfig,
+      manuscript,
+      coverPhoto,
+      chapterPhotos,
+      pageCount: Number(pageCount) || 5,
+    });
+    res.json({ success: true, data: result });
   } catch (err: unknown) {
     res.status(400).json({ success: false, error: (err as Error).message });
   }
@@ -1482,6 +1687,90 @@ apiRouter.get('/admin/privacy/deliveries', requireAdmin, (_req: Request, res: Re
     res.json({ success: true, data: deliveries });
   } catch (err: unknown) {
     res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
+// ============================================================================
+// PUBLIC FREE TRIAL DEMO ENDPOINTS (100% STATELESS — ZERO DATABASE WRITES)
+// ============================================================================
+
+apiRouter.post('/demo/followup', async (req: Request, res: Response) => {
+  if (!checkDemoRateLimit(req, 50, 10 * 60 * 1000)) {
+    res.status(429).json({
+      success: false,
+      error: 'Has realizado demasiadas solicitudes en poco tiempo. Espera un momento e intenta de nuevo.',
+    });
+    return;
+  }
+
+  try {
+    const result = await generateTransientDemoFollowUp(req.body || {});
+    res.json({ success: true, data: result });
+  } catch (_err: unknown) {
+    res.status(500).json({
+      success: false,
+      error: 'No fue posible preparar la pregunta de profundización en este momento.',
+    });
+  }
+});
+
+apiRouter.post('/demo/manuscript', async (req: Request, res: Response) => {
+  if (!checkDemoRateLimit(req, 20, 10 * 60 * 1000)) {
+    res.status(429).json({
+      success: false,
+      error: 'Has realizado demasiadas generaciones seguidas. Espera un momento e intenta de nuevo.',
+    });
+    return;
+  }
+
+  try {
+    const manuscript = await generateTransientDemoManuscript(req.body || {});
+    res.json({ success: true, data: manuscript });
+  } catch (_err: unknown) {
+    res.status(500).json({
+      success: false,
+      error: 'No fue posible redactar el manuscrito en este momento. Por favor intenta nuevamente.',
+    });
+  }
+});
+
+// Transcribe voice recording for Free Trial Demo
+apiRouter.post('/demo/audio/transcribe', async (req: Request, res: Response) => {
+  if (!checkDemoRateLimit(req, 60, 10 * 60 * 1000)) {
+    res.status(429).json({
+      success: false,
+      error: 'Has realizado demasiadas grabaciones en poco tiempo. Espera un momento e intenta de nuevo.',
+    });
+    return;
+  }
+
+  try {
+    const { audioBase64, mimeType, clientTranscription } = req.body || {};
+    if (!audioBase64) {
+      res.status(400).json({ success: false, error: 'Archivo de audio requerido en formato Base64.' });
+      return;
+    }
+
+    const result = await analyzeAndTranscribeAudioWithGemini({
+      audioBase64,
+      mimeType: mimeType || 'audio/webm',
+    });
+
+    res.json({
+      success: true,
+      data: {
+        transcription: result.transcription || '',
+        audioQuality: result.audioQuality || 'clear',
+        qualityWarning: result.qualityWarning,
+        suggestion: result.suggestion,
+      },
+    });
+  } catch (err: unknown) {
+    console.error('[Demo Audio Transcribe Error]:', err);
+    res.status(500).json({
+      success: false,
+      error: 'No fue posible transcribir el audio en este momento. Puedes escribir tu recuerdo con tu teclado.',
+    });
   }
 });
 

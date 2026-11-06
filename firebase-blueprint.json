@@ -310,6 +310,30 @@
         "createdAt": { "type": "string", "description": "Timestamp created" }
       },
       "required": ["id", "folio", "interviewId", "participantId", "email", "requestType", "details", "status", "createdAt"]
+    },
+    "ParticipantBookVersion": {
+      "title": "ParticipantBookVersion",
+      "description": "Immutable generated PDF book version with editorial configuration and chapters",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique book version ID" },
+        "interviewId": { "type": "string", "description": "Associated interview ID" },
+        "participantId": { "type": "string", "description": "Author participant ID" },
+        "participantName": { "type": "string", "description": "Author participant name" },
+        "versionNumber": { "type": "number", "description": "Sequential version number (1, 2, ...)" },
+        "title": { "type": "string", "description": "Book title" },
+        "subtitle": { "type": "string", "description": "Book subtitle" },
+        "authors": { "type": "string", "description": "Book authors" },
+        "dedication": { "type": "string", "description": "Optional dedication" },
+        "closingPageText": { "type": "string", "description": "Closing page dedication/reason" },
+        "narrativeStyle": { "type": "string", "description": "Selected narrative style ID" },
+        "editorialConfig": { "type": "object", "description": "Cover, interior, and physical format configuration" },
+        "manuscript": { "type": "object", "description": "Structured book chapters and paragraphs" },
+        "pageCount": { "type": "number", "description": "Total PDF page count" },
+        "fileName": { "type": "string", "description": "Downloadable PDF filename" },
+        "createdAt": { "type": "string", "description": "ISO creation timestamp" }
+      },
+      "required": ["id", "interviewId", "participantId", "versionNumber", "title", "narrativeStyle", "editorialConfig", "manuscript", "createdAt"]
     }
   },
   "firestore": {
@@ -380,6 +404,10 @@
     "/arcoRequests/{requestId}": {
       "schema": { "$ref": "#/entities/ArcoRequest" },
       "description": "Official ARCO privacy requests"
+    },
+    "/participantBookVersions/{versionId}": {
+      "schema": { "$ref": "#/entities/ParticipantBookVersion" },
+      "description": "Immutable generated PDF book versions for interviewees"
     }
   }
 }

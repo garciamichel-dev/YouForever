@@ -8,6 +8,13 @@ import {
   ensurePhotosPlacedInManuscript,
   formatPhotoMarkdownBlock,
 } from '../logic/interviewRules.ts';
+import {
+  DEMO_NARRATIVE_STYLES,
+  DemoInMemoryPhoto,
+  DemoManuscript,
+  DemoNarrativeStyleId,
+  buildParticipantInitialManuscriptFromAnswers,
+} from '../logic/demoStoryRules.ts';
 
 export interface SufficiencyEvaluationResult {
   sufficiencyStatus: SufficiencyStatus;
@@ -954,4 +961,167 @@ export async function transcribeAudioWithGemini(params: {
   });
   return result.transcription;
 }
+
+/**
+ * Generates an editorial book manuscript (`DemoManuscript`) and chapter photo map from a participant's
+ * completed interview answers in the selected narrative style (A, B, or C).
+ */
+export async function generateParticipantBookManuscriptWithAI(params: {
+  interview: InterviewRecord;
+  participants: ParticipantRecord[];
+  answers: AnswerRecord[];
+  questions: QuestionRecord[];
+  narrativeStyle: DemoNarrativeStyleId;
+  closingDedicationText?: string;
+}): Promise<{
+  manuscript: DemoManuscript;
+  chapterPhotos: Record<string, DemoInMemoryPhoto | null>;
+}> {
+  const {
+    interview,
+    participants,
+    answers,
+    questions,
+    narrativeStyle,
+    closingDedicationText = '',
+  } = params;
+
+  const participantNames = participants.map((p) => p.name);
+  const fallbackResult = buildParticipantInitialManuscriptFromAnswers({
+    interviewTitle: interview.title,
+    storyMode: interview.storyMode,
+    participantNames,
+    answers,
+    questions,
+    narrativeStyle,
+    closingDedicationText,
+  });
+
+  const validAnswers = answers.filter(
+    (a) => !a.notRecalled && a.answerText && a.answerText.trim().length > 0
+  );
+  if (validAnswers.length === 0) {
+    return fallbackResult;
+  }
+
+  const styleSpec =
+    DEMO_NARRATIVE_STYLES.find((s) => s.id === narrativeStyle) || DEMO_NARRATIVE_STYLES[1];
+  const isCouple = interview.storyMode === 'compartida' && participantNames.length >= 2;
+
+  const chapterInputSummary = fallbackResult.manuscript.chapters.map((ch) => ({
+    id: ch.id,
+    partNumber: ch.partNumber,
+    dimensionKey: ch.dimensionKey,
+    title: ch.title,
+    rawTestimonies: ch.paragraphs,
+  }));
+
+  const styleTitle = isCouple ? styleSpec.coupleTitle : styleSpec.individualTitle;
+  const styleDesc = isCouple ? styleSpec.coupleDescription : styleSpec.individualDescription;
+
+  const prompt = `Eres un escritor y editor biográfico de ForeverYou.
+Debes redactar los capítulos del libro autobiográfico a partir EXCLUSIVAMENTE de las respuestas reales del entrevistado.
+
+DATOS DE LA OBRA:
+- Título base: "${interview.title}"
+- Modalidad: ${isCouple ? 'Historia compartida / pareja' : 'Historia individual'}
+- Protagonista(s): ${fallbackResult.manuscript.authors}
+- Estilo narrativo elegido: ${styleTitle}
+  * Descripción del estilo: ${styleDesc}
+  * Ejemplo del tono esperado: "${isCouple ? styleSpec.coupleExample : styleSpec.individualExample}"
+
+TESTIMONIOS AGRUPADOS POR CAPÍTULO:
+${JSON.stringify(chapterInputSummary, null, 2)}
+
+REGLAS ESTRICTAS DE FIDELIDAD Y ESTILO:
+1. NUNCA inventes hechos, fechas, lugares ni nombres que no estén en los testimonios.
+2. Transforma las respuestas en párrafos fluidos, dignos y bien redactados aplicando rigurosamente el estilo narrativo elegido (${styleTitle}).
+3. Conserva exactamente el mismo "id", "partNumber" y "dimensionKey" de cada capítulo de entrada para mantener vinculadas las fotografías del entrevistado.
+4. En cada capítulo, devuelve entre 1 y 4 párrafos en "paragraphs" y una frase literal o destacada breve en "pullQuote" (máximo 150 caracteres).`;
+
+  try {
+    const rawJson = await generateJsonWithFallback({
+      prompt,
+      timeoutMsPerModel: 15000,
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          title: { type: Type.STRING },
+          subtitle: { type: Type.STRING },
+          introduction: { type: Type.STRING },
+          chapters: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                id: { type: Type.STRING },
+                partNumber: { type: Type.NUMBER },
+                dimensionKey: { type: Type.STRING },
+                title: { type: Type.STRING },
+                paragraphs: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                },
+                pullQuote: { type: Type.STRING },
+              },
+              required: ['id', 'partNumber', 'dimensionKey', 'title', 'paragraphs'],
+            },
+          },
+        },
+        required: ['title', 'subtitle', 'introduction', 'chapters'],
+      },
+    });
+
+    if (!rawJson) {
+      return fallbackResult;
+    }
+
+    const parsed = safeJsonExtract<{
+      title?: string;
+      subtitle?: string;
+      introduction?: string;
+      chapters?: Array<{
+        id: string;
+        partNumber: number;
+        dimensionKey: any;
+        title: string;
+        paragraphs: string[];
+        pullQuote?: string;
+      }>;
+    } | null>(rawJson, null);
+
+    if (!parsed || !Array.isArray(parsed.chapters) || parsed.chapters.length === 0) {
+      return fallbackResult;
+    }
+
+    const mergedChapters = fallbackResult.manuscript.chapters.map((origCh, idx) => {
+      const aiCh =
+        parsed.chapters?.find((c) => c.id === origCh.id) || parsed.chapters?.[idx];
+      if (!aiCh || !Array.isArray(aiCh.paragraphs) || aiCh.paragraphs.length === 0) {
+        return origCh;
+      }
+      return {
+        ...origCh,
+        title: (aiCh.title || origCh.title).trim(),
+        paragraphs: aiCh.paragraphs.map((p) => p.trim()).filter((p) => p.length > 0),
+        pullQuote: (aiCh.pullQuote || origCh.pullQuote || '').trim() || undefined,
+      };
+    });
+
+    return {
+      manuscript: {
+        ...fallbackResult.manuscript,
+        title: (parsed.title || fallbackResult.manuscript.title).trim(),
+        subtitle: (parsed.subtitle || fallbackResult.manuscript.subtitle).trim(),
+        introduction: (parsed.introduction || fallbackResult.manuscript.introduction).trim(),
+        chapters: mergedChapters,
+        generatedAt: new Date().toISOString(),
+      },
+      chapterPhotos: fallbackResult.chapterPhotos,
+    };
+  } catch (_err) {
+    return fallbackResult;
+  }
+}
+
 

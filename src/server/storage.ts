@@ -37,10 +37,21 @@ import {
   applyVoluntaryCompletion,
   applyAdminExtension,
   applyAdminReopen,
+  computeLayoutEditQuotaStatus,
   isSufficiencyThresholdMet,
   validatePhotoAttachments,
   ensurePhotosPlacedInManuscript,
 } from '../logic/interviewRules.ts';
+import {
+  DemoEditorialConfig,
+  DemoInMemoryPhoto,
+  DemoManuscript,
+  DemoNarrativeStyleId,
+  ParticipantBookVersionRecord,
+  buildSafeDemoPdfFilename,
+  buildParticipantInitialManuscriptFromAnswers,
+  composeBookPages,
+} from '../logic/demoStoryRules.ts';
 import {
   PrivacyConsentRecord,
   BookShareRecord,
@@ -61,10 +72,12 @@ import {
   COMPREHENSIVE_PRIVACY_NOTICE,
 } from '../logic/privacyNoticeContent.ts';
 import { DEFAULT_QUESTIONS } from './seedData.ts';
+import { buildCompleteTestStories } from './seedStories.ts';
 import {
   evaluateNarrativeSufficiency,
   generateAdaptiveFollowUp,
   generateManuscriptDraft,
+  generateParticipantBookManuscriptWithAI,
   analyzeAndTranscribeAudioWithGemini,
   AudioQualityStatus,
 } from './geminiService.ts';
@@ -98,7 +111,7 @@ export interface ManuscriptRecord {
   generatedBy: string;
 }
 
-interface PersistedTokenRecord extends InterviewTokenRecord {
+export interface PersistedTokenRecord extends InterviewTokenRecord {
   plainToken?: string;
 }
 
@@ -131,6 +144,7 @@ class StorageManager {
   private secondaryAccess: Map<string, SecondaryAccessRecord> = new Map();
   private postMortemInstructions: Map<string, PostMortemInstructionRecord> = new Map();
   private arcoRequests: Map<string, ArcoRequestRecord> = new Map();
+  private participantBookVersions: Map<string, ParticipantBookVersionRecord> = new Map();
 
   private initialized = false;
   private initPromise: Promise<void> | null = null;
@@ -221,6 +235,7 @@ class StorageManager {
         secondaryAccess: Array.from(this.secondaryAccess.values()),
         postMortemInstructions: Array.from(this.postMortemInstructions.values()),
         arcoRequests: Array.from(this.arcoRequests.values()),
+        participantBookVersions: Array.from(this.participantBookVersions.values()),
       };
       fs.writeFileSync(filePath, JSON.stringify(snapshot, null, 2), 'utf-8');
     } catch (err) {
@@ -310,6 +325,11 @@ class StorageManager {
       if (Array.isArray(parsed.arcoRequests)) {
         for (const ar of parsed.arcoRequests) {
           if (ar && ar.id) this.arcoRequests.set(ar.id, ar);
+        }
+      }
+      if (Array.isArray(parsed.participantBookVersions)) {
+        for (const bv of parsed.participantBookVersions) {
+          if (bv && bv.id) this.participantBookVersions.set(bv.id, bv);
         }
       }
       return true;
@@ -718,83 +738,206 @@ class StorageManager {
       this.answers.set(ans.id, ans);
     }
 
+    this.seedCompleteTestStoriesInMemory();
     this.saveStateToDisk();
   }
 
-  public restoreFromClientCache(cachedInterviews?: any[]): number {
-    if (!Array.isArray(cachedInterviews) || cachedInterviews.length === 0) return 0;
+  public seedCompleteTestStoriesInMemory(): void {
+    const testStories = buildCompleteTestStories();
+    const testStoryIds = new Set(testStories.map((s) => s.interview.id));
+
+    // Clean up any stale test participants and answers belonging to these test interviews
+    for (const [ansId, ans] of this.answers.entries()) {
+      if (testStoryIds.has(ans.interviewId)) {
+        this.answers.delete(ansId);
+      }
+    }
+    for (const [partId, part] of this.participants.entries()) {
+      if (testStoryIds.has(part.interviewId)) {
+        this.participants.delete(partId);
+      }
+    }
+
+    for (const story of testStories) {
+      this.interviews.set(story.interview.id, story.interview);
+      for (const part of story.participants) {
+        this.participants.set(part.id, part);
+        if (part.plainToken) {
+          this.plainTokenMap.set(part.plainToken, part.id);
+        }
+        if (part.accessCode) {
+          this.accessCodeMap.set(part.accessCode.toUpperCase(), hashToken(part.plainToken));
+        }
+      }
+      for (const tok of story.tokens) {
+        this.registerTokenInMemory(tok);
+      }
+      for (const ans of story.answers) {
+        this.answers.set(ans.id, ans);
+      }
+    }
+  }
+
+  public restoreFromClientCache(
+    cachedInterviews?: any[],
+    cachedBookVersions?: ParticipantBookVersionRecord[]
+  ): number {
     let restoredCount = 0;
 
-    for (const item of cachedInterviews) {
-      if (!item || !item.id || !item.title) continue;
-      const { participants: partList, answersCount: _ac, manuscriptsCount: _mc, latestManuscriptVersion: _lmv, photosCount: _pc, ...interviewData } = item;
+    if (Array.isArray(cachedInterviews) && cachedInterviews.length > 0) {
+      for (const item of cachedInterviews) {
+        if (!item || !item.id || !item.title) continue;
+        const {
+          participants: partList,
+          answersCount: _ac,
+          manuscriptsCount: _mc,
+          latestManuscriptVersion: _lmv,
+          photosCount: _pc,
+          bookVersions: itemBookVersions,
+          bookVersionsCount: _bvc,
+          latestBookVersion: _lbv,
+          ...interviewData
+        } = item;
 
-      if (!this.interviews.has(interviewData.id)) {
-        this.interviews.set(interviewData.id, interviewData as InterviewRecord);
-        restoredCount++;
-      }
-
-      if (Array.isArray(partList)) {
-        for (const p of partList) {
-          if (!p || !p.id) continue;
-          const { plainToken, accessCode, inviteUrl: _iu, ...partRecord } = p;
-          if (!this.participants.has(partRecord.id)) {
-            this.participants.set(partRecord.id, {
-              ...partRecord,
-              interviewId: interviewData.id,
-            } as ParticipantRecord);
+        const existingInterview = this.interviews.get(interviewData.id);
+        if (!existingInterview) {
+          this.interviews.set(interviewData.id, interviewData as InterviewRecord);
+          restoredCount++;
+        } else {
+          // Merge any newer closure or book generation counters from client cache
+          let updated = false;
+          if (interviewData.userDeclaredComplete && !existingInterview.userDeclaredComplete) {
+            const reopenedTime = existingInterview.reopenedAt
+              ? new Date(existingInterview.reopenedAt).getTime()
+              : 0;
+            const closedTime = interviewData.closedAt
+              ? new Date(interviewData.closedAt).getTime()
+              : 0;
+            // Server reopen status takes precedence over older cached closure
+            if (existingInterview.status === 'open' && (reopenedTime >= closedTime || !existingInterview.closedAt)) {
+              // Keep open status
+            } else {
+              existingInterview.userDeclaredComplete = true;
+              existingInterview.closedAt = interviewData.closedAt || existingInterview.closedAt || new Date().toISOString();
+              existingInterview.closureReason = interviewData.closureReason ?? existingInterview.closureReason;
+              existingInterview.participantClosingText =
+                interviewData.participantClosingText ?? existingInterview.participantClosingText;
+              if (interviewData.status === 'completed') {
+                existingInterview.status = 'completed';
+              }
+              updated = true;
+            }
           }
+          if ((interviewData.bookGeneratedCount ?? 0) > (existingInterview.bookGeneratedCount ?? 0)) {
+            existingInterview.bookGeneratedCount = interviewData.bookGeneratedCount;
+            updated = true;
+          }
+          if ((interviewData.layoutEditsUsed ?? 0) > (existingInterview.layoutEditsUsed ?? 0)) {
+            existingInterview.layoutEditsUsed = interviewData.layoutEditsUsed;
+            updated = true;
+          }
+          if (
+            interviewData.layoutEditsAllowed !== undefined &&
+            interviewData.layoutEditsAllowed > (existingInterview.layoutEditsAllowed ?? 1)
+          ) {
+            existingInterview.layoutEditsAllowed = interviewData.layoutEditsAllowed;
+            updated = true;
+          }
+          if (updated) {
+            this.interviews.set(existingInterview.id, existingInterview);
+            restoredCount++;
+          }
+        }
 
-          const resolvedPlain = plainToken || deriveDeterministicPlainToken(partRecord.id);
-          const resolvedHash = hashToken(resolvedPlain);
-          const resolvedCode = accessCode
-            ? extractCleanTokenOrCode(accessCode).toUpperCase()
-            : deriveDeterministicAccessCode(partRecord.id);
-
-          const existingTok = Array.from(this.tokens.values()).find(
-            (t) => t.participantId === partRecord.id && !t.revoked
-          );
-
-          if (!existingTok) {
-            const newTok: PersistedTokenRecord = {
-              id: `tok_${partRecord.id}`,
-              tokenHash: resolvedHash,
-              plainToken: resolvedPlain,
-              accessCode: resolvedCode,
-              interviewId: interviewData.id,
-              participantId: partRecord.id,
-              expiresAt:
-                interviewData.expiresAt || new Date(Date.now() + 20 * 86400000).toISOString(),
-              revoked: false,
-              createdAt: interviewData.openedAt || new Date().toISOString(),
-            };
-            this.registerTokenInMemory(newTok);
-          } else {
-            const fallbackPartCode = deriveDeterministicAccessCode(partRecord.id).toUpperCase();
-            // Only replace existingTok.accessCode if the incoming resolvedCode is a real non-fallback code
-            // or if existingTok currently only has a fallback code
-            if (
-              accessCode &&
-              resolvedCode !== fallbackPartCode &&
-              existingTok.accessCode !== resolvedCode
-            ) {
-              existingTok.accessCode = resolvedCode;
+        if (Array.isArray(itemBookVersions)) {
+          for (const bv of itemBookVersions) {
+            if (bv && bv.id && bv.interviewId && bv.manuscript && !this.participantBookVersions.has(bv.id)) {
+              this.participantBookVersions.set(bv.id, bv as ParticipantBookVersionRecord);
+              restoredCount++;
             }
-            if (plainToken && existingTok.plainToken !== plainToken) {
-              existingTok.plainToken = plainToken;
+          }
+        }
+
+        if (Array.isArray(partList)) {
+          for (const p of partList) {
+            if (!p || !p.id) continue;
+            const { plainToken, accessCode, inviteUrl: _iu, ...partRecord } = p;
+            if (!this.participants.has(partRecord.id)) {
+              this.participants.set(partRecord.id, {
+                ...partRecord,
+                interviewId: interviewData.id,
+              } as ParticipantRecord);
             }
-            this.registerTokenInMemory(existingTok);
-            // Also ensure the incoming resolvedCode is mapped as an alias for this token
-            if (resolvedCode) {
-              this.accessCodeMap.set(resolvedCode.toUpperCase(), existingTok.tokenHash);
-              this.accessCodeMap.set(resolvedCode.replace(/[^A-Z0-9]/gi, '').toUpperCase(), existingTok.tokenHash);
+
+            const resolvedPlain = plainToken || deriveDeterministicPlainToken(partRecord.id);
+            const resolvedHash = hashToken(resolvedPlain);
+            const resolvedCode = accessCode
+              ? extractCleanTokenOrCode(accessCode).toUpperCase()
+              : deriveDeterministicAccessCode(partRecord.id);
+
+            const existingTok = Array.from(this.tokens.values()).find(
+              (t) => t.participantId === partRecord.id && !t.revoked
+            );
+
+            if (!existingTok) {
+              const newTok: PersistedTokenRecord = {
+                id: `tok_${partRecord.id}`,
+                tokenHash: resolvedHash,
+                plainToken: resolvedPlain,
+                accessCode: resolvedCode,
+                interviewId: interviewData.id,
+                participantId: partRecord.id,
+                expiresAt:
+                  interviewData.expiresAt || new Date(Date.now() + 20 * 86400000).toISOString(),
+                revoked: false,
+                createdAt: interviewData.openedAt || new Date().toISOString(),
+              };
+              this.registerTokenInMemory(newTok);
+            } else {
+              const fallbackPartCode = deriveDeterministicAccessCode(partRecord.id).toUpperCase();
+              if (
+                accessCode &&
+                resolvedCode !== fallbackPartCode &&
+                existingTok.accessCode !== resolvedCode
+              ) {
+                existingTok.accessCode = resolvedCode;
+              }
+              if (plainToken && existingTok.plainToken !== plainToken) {
+                existingTok.plainToken = plainToken;
+              }
+              this.registerTokenInMemory(existingTok);
+              if (resolvedCode) {
+                this.accessCodeMap.set(resolvedCode.toUpperCase(), existingTok.tokenHash);
+                this.accessCodeMap.set(
+                  resolvedCode.replace(/[^A-Z0-9]/gi, '').toUpperCase(),
+                  existingTok.tokenHash
+                );
+              }
             }
           }
         }
       }
     }
 
-    if (restoredCount > 0 || cachedInterviews.length > 0) {
+    if (Array.isArray(cachedBookVersions) && cachedBookVersions.length > 0) {
+      for (const bv of cachedBookVersions) {
+        if (bv && bv.id && bv.interviewId && bv.manuscript && !this.participantBookVersions.has(bv.id)) {
+          this.participantBookVersions.set(bv.id, bv);
+          const inv = this.interviews.get(bv.interviewId);
+          if (inv) {
+            inv.bookGeneratedCount = Math.max(inv.bookGeneratedCount ?? 0, bv.versionNumber || 1);
+            this.interviews.set(inv.id, inv);
+          }
+          restoredCount++;
+        }
+      }
+    }
+
+    if (
+      restoredCount > 0 ||
+      (Array.isArray(cachedInterviews) && cachedInterviews.length > 0) ||
+      (Array.isArray(cachedBookVersions) && cachedBookVersions.length > 0)
+    ) {
       this.saveStateToDisk();
     }
     return restoredCount;
@@ -831,6 +974,7 @@ class StorageManager {
         getDocs(collection(serverDb, 'secondaryAccess')),
         getDocs(collection(serverDb, 'postMortemInstructions')),
         getDocs(collection(serverDb, 'arcoRequests')),
+        getDocs(collection(serverDb, 'participantBookVersions')),
       ]);
 
       const unwrapSnap = (idx: number) => {
@@ -855,6 +999,7 @@ class StorageManager {
       const secondarySnap = unwrapSnap(14);
       const postMortemSnap = unwrapSnap(15);
       const arcoSnap = unwrapSnap(16);
+      const bookVersionsSnap = unwrapSnap(17);
 
       // 1. Settings
       if (settingsSnap) {
@@ -1031,6 +1176,16 @@ class StorageManager {
           }
         });
       }
+
+      // 16. Participant Book Versions
+      if (bookVersionsSnap) {
+        bookVersionsSnap.forEach((docSnap) => {
+          const bv = docSnap.data() as ParticipantBookVersionRecord;
+          if (bv && bv.id) {
+            this.participantBookVersions.set(bv.id, bv);
+          }
+        });
+      }
     } catch (err: any) {
       console.warn(
         '[StorageManager] Note during initial Firestore load (operating with disk & memory state):',
@@ -1046,6 +1201,9 @@ class StorageManager {
     if (this.interviews.size === 0) {
       this.seedDefaultInterviewsInMemory();
     } else {
+      if (!this.interviews.has('int_test_santiago_ramos')) {
+        this.seedCompleteTestStoriesInMemory();
+      }
       this.saveStateToDisk();
     }
 
@@ -1309,6 +1467,10 @@ class StorageManager {
       userDeclaredComplete: false,
       closedAt: null,
       closureReason: null,
+      participantClosingText: null,
+      layoutEditsAllowed: 1,
+      layoutEditsUsed: 0,
+      bookGeneratedCount: 0,
       lastActivityAt: now.toISOString(),
       questionnaireVersionId: versionId,
       createdById: performedBy,
@@ -1886,7 +2048,7 @@ class StorageManager {
         branchChoice: params.branchChoice,
         idempotencyKey: params.idempotencyKey,
       },
-      allowEditing: this.config.allowAnswerEditing,
+      allowEditing: Boolean(this.config.allowAnswerEditing || interview.status === 'open'),
     });
 
     if (evalResult.error) {
@@ -2149,9 +2311,13 @@ class StorageManager {
       this.persistDoc('interviews', interview.id, interview),
     ]);
 
-    // 3. Check sufficiency evaluation trigger
+    // 3. Check sufficiency evaluation trigger (only for newly incremented answers)
     let sufficiencyEvaluated = false;
-    if (isSufficiencyThresholdMet(interview.completedQuestionCount, interview.sufficiencyThreshold)) {
+    if (
+      !evalResult.isEdit &&
+      evalResult.shouldIncrementCounter &&
+      isSufficiencyThresholdMet(interview.completedQuestionCount, interview.sufficiencyThreshold)
+    ) {
       try {
         const questions = this.getQuestionsForVersion(interview.questionnaireVersionId);
         const allAnswers = this.getAnswersForInterview(interview.id);
@@ -2176,12 +2342,13 @@ class StorageManager {
       }
     }
 
-    // 4. Autonomous deepening question generation (for base questions and follow-up chains up to maxFollowUpsAtCreation)
+    // 4. Autonomous deepening question generation (for new answers to base questions)
     let adaptiveQuestion:
       | { text: string; reason?: string; followUpIndex?: number; maxFollowUps?: number }
       | undefined;
 
     if (
+      !evalResult.isEdit &&
       !params.notRecalled &&
       !params.isAdditionalMemory &&
       params.branchChoice !== 'no' &&
@@ -2256,21 +2423,27 @@ class StorageManager {
   // --- Voluntary Completion ---
   public async declareVoluntaryCompletion(plainToken: string, reason: string): Promise<InterviewRecord> {
     const { interview, participant } = this.resolveToken(plainToken);
+    const cleanClosingDedication =
+      reason && reason.trim() !== 'Declaración voluntaria' && reason.trim() !== 'Declarado por el participante'
+        ? reason.trim()
+        : '';
     const updated = applyVoluntaryCompletion(
       interview,
-      `Concluido por ${participant.name}: ${reason || 'Declaración explícita del participante'}`
+      `Concluido por ${participant.name}: ${cleanClosingDedication || 'Declaración explícita del participante'}`,
+      new Date().toISOString(),
+      cleanClosingDedication
     );
     this.interviews.set(updated.id, updated);
     await this.persistDoc('interviews', updated.id, updated);
 
     await this.addAuditLog('VOLUNTARY_COMPLETION', 'interview', updated.id, participant.name, {
       completedQuestionCount: updated.completedQuestionCount,
-      reason,
+      reason: cleanClosingDedication || reason,
     });
     return updated;
   }
 
-  // --- Admin Interview Extensions, Reopens, and Sufficiency Evaluation ---
+  // --- Admin Interview Extensions, Reopens, Layout Quota, and Sufficiency Evaluation ---
   public async extendInterview(
     interviewId: string,
     additionalDays: number,
@@ -2302,12 +2475,19 @@ class StorageManager {
     interviewId: string,
     newDays: number,
     reason: string,
-    performedBy: string
+    performedBy: string,
+    additionalLayoutEdits?: number
   ): Promise<InterviewRecord> {
     const interview = this.interviews.get(interviewId);
     if (!interview) throw new Error('Entrevista no encontrada.');
 
-    const updated = applyAdminReopen(interview, newDays, reason);
+    const updated = applyAdminReopen(
+      interview,
+      newDays,
+      reason,
+      new Date().toISOString(),
+      additionalLayoutEdits
+    );
     this.interviews.set(interviewId, updated);
     await this.persistDoc('interviews', interviewId, updated);
 
@@ -2323,9 +2503,535 @@ class StorageManager {
     await this.addAuditLog('REOPEN_INTERVIEW', 'interview', interviewId, performedBy, {
       newDays,
       reason,
+      additionalLayoutEdits,
       newExpiresAt: updated.expiresAt,
     });
     return updated;
+  }
+
+  public async updateInterviewLayoutQuota(
+    interviewId: string,
+    remainingEdits: number,
+    performedBy: string
+  ): Promise<InterviewRecord> {
+    const interview = this.interviews.get(interviewId);
+    if (!interview) throw new Error('Entrevista no encontrada.');
+
+    const cleanRemaining = Math.max(0, Math.floor(Number(remainingEdits) || 0));
+    const used = Math.max(0, interview.layoutEditsUsed ?? 0);
+    interview.layoutEditsAllowed = used + cleanRemaining;
+    interview.lastActivityAt = new Date().toISOString();
+
+    this.interviews.set(interviewId, interview);
+    await this.persistDoc('interviews', interviewId, interview);
+
+    await this.addAuditLog('UPDATE_LAYOUT_QUOTA', 'interview', interviewId, performedBy, {
+      remainingEdits: cleanRemaining,
+      layoutEditsAllowed: interview.layoutEditsAllowed,
+      layoutEditsUsed: used,
+    });
+
+    return interview;
+  }
+
+  // --- Participant Book Studio & Version History ---
+  private hydrateBookVersionPhotos(version: ParticipantBookVersionRecord): ParticipantBookVersionRecord {
+    const hydratedChapters: Record<string, DemoInMemoryPhoto | null> = {};
+    if (version.chapterPhotos) {
+      for (const [chId, photo] of Object.entries(version.chapterPhotos)) {
+        if (!photo) {
+          hydratedChapters[chId] = null;
+          continue;
+        }
+        const storedPhoto = this.photos.get(photo.id);
+        const resolvedDataUrl =
+          photo.dataUrl && photo.dataUrl.startsWith('data:image/')
+            ? photo.dataUrl
+            : storedPhoto?.dataUrl || photo.objectUrl || `/api/photos/${photo.id}`;
+        hydratedChapters[chId] = {
+          ...photo,
+          dataUrl: resolvedDataUrl,
+          objectUrl: resolvedDataUrl,
+        };
+      }
+    }
+    return {
+      ...version,
+      chapterPhotos: hydratedChapters,
+    };
+  }
+
+  private ensureSynthesizedBookVersionsForInterview(interviewId: string): void {
+    const interview = this.interviews.get(interviewId);
+    if (!interview) return;
+
+    const existingBookVersions = Array.from(this.participantBookVersions.values()).filter(
+      (v) => v.interviewId === interviewId
+    );
+    const existingManuscripts = Array.from(this.manuscripts.values())
+      .filter((m) => m.interviewId === interviewId)
+      .sort((a, b) => a.version - b.version);
+
+    const targetCount = Math.max(
+      existingManuscripts.length,
+      interview.bookGeneratedCount ?? 0
+    );
+    if (targetCount <= 0 || existingBookVersions.length >= targetCount) {
+      return;
+    }
+
+    const existingVersionNumbers = new Set(existingBookVersions.map((v) => v.versionNumber));
+    const participants = Array.from(this.participants.values()).filter(
+      (p) => p.interviewId === interviewId
+    );
+    const primaryParticipant =
+      participants.find((p) => p.role === 'primary') ||
+      participants[0] || {
+        id: `part_${interviewId}`,
+        name: interview.title,
+      };
+    const participantNames =
+      participants.length > 0 ? participants.map((p) => p.name) : [interview.title];
+    const isCouple = interview.storyMode === 'compartida' && participants.length >= 2;
+
+    const answers = this.getAnswersForInterview(interviewId).map((a) => ({
+      ...a,
+      photos: (a.photos || []).map((p) => {
+        const storedPhoto = this.photos.get(p.id);
+        return {
+          ...p,
+          imageUrl: storedPhoto?.dataUrl || p.imageUrl || `/api/photos/${p.id}`,
+        };
+      }),
+    }));
+    const questions = this.getQuestionsForVersion(interview.questionnaireVersionId);
+    const closingPageText = (interview.participantClosingText || '').trim();
+
+    const stylePresets: Array<{
+      narrativeStyle: DemoNarrativeStyleId;
+      coverDesignId: DemoEditorialConfig['coverDesignId'];
+      interiorStyleId: DemoEditorialConfig['interiorStyleId'];
+      bookFormatId: DemoEditorialConfig['bookFormatId'];
+    }> = [
+      {
+        narrativeStyle: 'first_person_literary',
+        coverDesignId: isCouple ? 'album_nuestra_vida' : 'clasica_eterna',
+        interiorStyleId: 'clasico_editorial',
+        bookFormatId: '6x9',
+      },
+      {
+        narrativeStyle: 'first_person_simple',
+        coverDesignId: 'recuerdos_marfil',
+        interiorStyleId: 'memorias_elegantes',
+        bookFormatId: 'a5',
+      },
+      {
+        narrativeStyle: 'third_person_biography',
+        coverDesignId: 'raices_recuerdos',
+        interiorStyleId: 'legado_familiar',
+        bookFormatId: 'carta',
+      },
+    ];
+
+    let createdAny = false;
+    for (let vNum = 1; vNum <= targetCount; vNum++) {
+      if (existingVersionNumbers.has(vNum)) continue;
+
+      const matchingManu = existingManuscripts.find((m) => m.version === vNum);
+      const preset = stylePresets[(vNum - 1) % stylePresets.length];
+      const bookTitle = matchingManu?.title || interview.title;
+
+      const built = buildParticipantInitialManuscriptFromAnswers({
+        interviewTitle: bookTitle,
+        storyMode: interview.storyMode,
+        participantNames,
+        answers,
+        questions,
+        narrativeStyle: preset.narrativeStyle,
+        closingDedicationText: closingPageText,
+      });
+
+      const editorialConfig: DemoEditorialConfig = {
+        coverDesignId: preset.coverDesignId,
+        coverColorVariantIdx: 0,
+        coverVisualType: 'illustration',
+        coverIllustrationId: isCouple ? 'constelacion_familiar' : 'arbol_raices',
+        interiorStyleId: preset.interiorStyleId,
+        bookFormatId: preset.bookFormatId,
+        customTitle: built.manuscript.title,
+        customSubtitle: built.manuscript.subtitle,
+        customAuthors: built.manuscript.authors,
+        dedication: built.manuscript.dedication,
+      };
+
+      const composed = composeBookPages({
+        manuscript: built.manuscript,
+        editorialConfig,
+        coverPhoto: null,
+        chapterPhotos: built.chapterPhotos,
+        customClosingPageText: closingPageText || undefined,
+        maxContentPages: 45,
+      });
+
+      const baseFilename = buildSafeDemoPdfFilename({
+        mode: isCouple ? 'pareja' : 'individual',
+        displayName: primaryParticipant.name,
+        fullName: primaryParticipant.name,
+        partner1Name: participantNames[0] || primaryParticipant.name,
+        partner2Name: participantNames[1] || 'Pareja',
+        hasAcceptedTemporaryNotice: true,
+      }).replace(/\.pdf$/i, `_v${vNum}.pdf`);
+
+      const versionId = `pbv_${interviewId}_v${vNum}`;
+      const record: ParticipantBookVersionRecord = {
+        id: versionId,
+        interviewId,
+        participantId: primaryParticipant.id,
+        participantName: primaryParticipant.name,
+        versionNumber: vNum,
+        title: built.manuscript.title,
+        subtitle: built.manuscript.subtitle,
+        authors: built.manuscript.authors,
+        dedication: built.manuscript.dedication,
+        closingPageText,
+        narrativeStyle: preset.narrativeStyle,
+        editorialConfig,
+        manuscript: built.manuscript,
+        coverPhoto: null,
+        chapterPhotos: built.chapterPhotos,
+        pageCount: Math.max(5, composed.pages.length),
+        fileName: baseFilename,
+        createdAt: matchingManu?.generatedAt || interview.closedAt || interview.lastActivityAt || new Date().toISOString(),
+      };
+
+      this.participantBookVersions.set(versionId, record);
+      createdAny = true;
+    }
+
+    if (createdAny) {
+      interview.bookGeneratedCount = Math.max(interview.bookGeneratedCount ?? 0, targetCount);
+      this.interviews.set(interviewId, interview);
+      this.saveStateToDisk();
+    }
+  }
+
+  public getBookVersionsForInterview(interviewId: string): ParticipantBookVersionRecord[] {
+    this.ensureSynthesizedBookVersionsForInterview(interviewId);
+    return Array.from(this.participantBookVersions.values())
+      .filter((v) => v.interviewId === interviewId)
+      .map((v) => this.hydrateBookVersionPhotos(v))
+      .sort((a, b) => b.versionNumber - a.versionNumber);
+  }
+
+  public getAllParticipantBookVersions(): Array<
+    ParticipantBookVersionRecord & {
+      interviewTitle?: string;
+      storyMode?: 'individual' | 'compartida';
+      remainingEdits?: number;
+      layoutEditsAllowed?: number;
+      layoutEditsUsed?: number;
+    }
+  > {
+    for (const interviewId of this.interviews.keys()) {
+      this.ensureSynthesizedBookVersionsForInterview(interviewId);
+    }
+    return Array.from(this.participantBookVersions.values())
+      .map((v) => {
+        const inv = this.interviews.get(v.interviewId);
+        const quota = inv ? computeLayoutEditQuotaStatus(inv) : undefined;
+        return {
+          ...this.hydrateBookVersionPhotos(v),
+          interviewTitle: inv?.title || v.title,
+          storyMode: inv?.storyMode,
+          remainingEdits: quota?.remainingEdits ?? 0,
+          layoutEditsAllowed: quota?.layoutEditsAllowed ?? 1,
+          layoutEditsUsed: quota?.layoutEditsUsed ?? 0,
+        };
+      })
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }
+
+  public async generateParticipantBookManuscript(params: {
+    plainToken: string;
+    narrativeStyle: DemoNarrativeStyleId;
+  }): Promise<{
+    manuscript: DemoManuscript;
+    chapterPhotos: Record<string, DemoInMemoryPhoto | null>;
+    closingPageText: string;
+  }> {
+    const { interview } = this.resolveToken(params.plainToken);
+    if (!interview.userDeclaredComplete) {
+      throw new Error(
+        'Primero debes confirmar el cierre de tu historia para abrir el estudio de maquetación.'
+      );
+    }
+
+    const participants = Array.from(this.participants.values()).filter(
+      (p) => p.interviewId === interview.id
+    );
+    const answers = this.getAnswersForInterview(interview.id).map((a) => ({
+      ...a,
+      photos: (a.photos || []).map((p) => {
+        const fullPhoto = this.photos.get(p.id);
+        return {
+          ...p,
+          dataUrl: fullPhoto?.dataUrl || p.imageUrl || `/api/photos/${p.id}`,
+        };
+      }),
+    }));
+    const questions = this.getQuestionsForVersion(interview.questionnaireVersionId);
+    const closingPageText = (interview.participantClosingText || '').trim();
+
+    const { manuscript, chapterPhotos } = await generateParticipantBookManuscriptWithAI({
+      interview,
+      participants,
+      answers,
+      questions,
+      narrativeStyle: params.narrativeStyle,
+      closingDedicationText: closingPageText,
+    });
+
+    return {
+      manuscript,
+      chapterPhotos,
+      closingPageText,
+    };
+  }
+
+  public async saveParticipantBookVersion(params: {
+    plainToken: string;
+    narrativeStyle: DemoNarrativeStyleId;
+    editorialConfig: DemoEditorialConfig;
+    manuscript: DemoManuscript;
+    coverPhoto?: DemoInMemoryPhoto | null;
+    chapterPhotos?: Record<string, DemoInMemoryPhoto | null>;
+    pageCount: number;
+  }): Promise<{
+    bookVersion: ParticipantBookVersionRecord;
+    interview: InterviewRecord;
+    allVersions: ParticipantBookVersionRecord[];
+  }> {
+    const { interview, participant } = this.resolveToken(params.plainToken);
+    if (!interview.userDeclaredComplete) {
+      throw new Error(
+        'La entrevista debe estar cerrada para generar y guardar una versión del libro.'
+      );
+    }
+
+    const existingVersions = this.getBookVersionsForInterview(interview.id);
+    const hasExistingBook = existingVersions.length > 0 || (interview.bookGeneratedCount ?? 0) > 0;
+    const quota = computeLayoutEditQuotaStatus(interview);
+
+    if (hasExistingBook && !quota.canModifyLayout) {
+      throw new Error(
+        'Has agotado tus opciones adicionales de modificación de maquetación. Para más modificaciones y/o actualizaciones por favor ponte en contacto con ForeverYou.'
+      );
+    }
+
+    const maxExistingVersion = existingVersions.reduce(
+      (max, v) => (v.versionNumber > max ? v.versionNumber : max),
+      0
+    );
+    const versionNumber = maxExistingVersion + 1;
+    const versionId = `pbv_${interview.id}_v${versionNumber}_${Date.now()}`;
+
+    const participants = Array.from(this.participants.values()).filter(
+      (p) => p.interviewId === interview.id
+    );
+    const isCouple = interview.storyMode === 'compartida' && participants.length >= 2;
+    const baseFilename = buildSafeDemoPdfFilename({
+      mode: isCouple ? 'pareja' : 'individual',
+      displayName: participant.name,
+      fullName: participant.name,
+      partner1Name: participants[0]?.name || participant.name,
+      partner2Name: participants[1]?.name || 'Pareja',
+      hasAcceptedTemporaryNotice: true,
+    }).replace(/\.pdf$/i, `_v${versionNumber}.pdf`);
+
+    const closingPageText = (interview.participantClosingText || '').trim();
+
+    const bookVersion: ParticipantBookVersionRecord = {
+      id: versionId,
+      interviewId: interview.id,
+      participantId: participant.id,
+      participantName: participant.name,
+      versionNumber,
+      title: (params.editorialConfig.customTitle || params.manuscript.title || interview.title).trim(),
+      subtitle: (params.editorialConfig.customSubtitle || params.manuscript.subtitle || '').trim(),
+      authors: (params.editorialConfig.customAuthors || params.manuscript.authors || participant.name).trim(),
+      dedication: (params.editorialConfig.dedication || params.manuscript.dedication || '').trim(),
+      closingPageText,
+      narrativeStyle: params.narrativeStyle,
+      editorialConfig: params.editorialConfig,
+      manuscript: params.manuscript,
+      coverPhoto: params.coverPhoto || null,
+      chapterPhotos: params.chapterPhotos || {},
+      pageCount: Math.max(5, Number(params.pageCount) || 5),
+      fileName: baseFilename,
+      createdAt: new Date().toISOString(),
+    };
+
+    // Update interview quota counters
+    if (!hasExistingBook) {
+      interview.bookGeneratedCount = 1;
+      interview.layoutEditsAllowed = interview.layoutEditsAllowed ?? 1;
+      interview.layoutEditsUsed = interview.layoutEditsUsed ?? 0;
+    } else {
+      interview.bookGeneratedCount = Math.max(versionNumber, (interview.bookGeneratedCount ?? 1) + 1);
+      interview.layoutEditsUsed = (interview.layoutEditsUsed ?? 0) + 1;
+      interview.layoutEditsAllowed = interview.layoutEditsAllowed ?? 1;
+    }
+    interview.lastActivityAt = new Date().toISOString();
+
+    this.participantBookVersions.set(versionId, bookVersion);
+    this.interviews.set(interview.id, interview);
+
+    await this.persistDoc('participantBookVersions', versionId, bookVersion);
+    await this.persistDoc('interviews', interview.id, interview);
+
+    await this.addAuditLog(
+      hasExistingBook ? 'MODIFY_PARTICIPANT_BOOK_LAYOUT' : 'CREATE_PARTICIPANT_BOOK',
+      'participantBookVersion',
+      versionId,
+      participant.name,
+      {
+        interviewId: interview.id,
+        versionNumber,
+        narrativeStyle: params.narrativeStyle,
+        coverDesignId: params.editorialConfig.coverDesignId,
+        interiorStyleId: params.editorialConfig.interiorStyleId,
+        bookFormatId: params.editorialConfig.bookFormatId,
+        layoutEditsUsed: interview.layoutEditsUsed,
+        layoutEditsAllowed: interview.layoutEditsAllowed,
+      }
+    );
+
+    return {
+      bookVersion: this.hydrateBookVersionPhotos(bookVersion),
+      interview,
+      allVersions: this.getBookVersionsForInterview(interview.id),
+    };
+  }
+
+  public async deleteParticipantBookVersion(
+    versionId: string,
+    restoreQuota: boolean,
+    performedBy: string
+  ): Promise<{
+    interview: InterviewRecord;
+    allVersions: ParticipantBookVersionRecord[];
+    deletedVersionId: string;
+    restoredQuota: boolean;
+  }> {
+    const version = this.participantBookVersions.get(versionId);
+    if (!version) {
+      throw new Error('Versión del libro no encontrada.');
+    }
+
+    const interviewId = version.interviewId;
+    const interview = this.interviews.get(interviewId);
+    if (!interview) {
+      throw new Error('Entrevista asociada a la versión no encontrada.');
+    }
+
+    this.participantBookVersions.delete(versionId);
+    await this.removeDoc('participantBookVersions', versionId);
+
+    // Recompute remaining versions
+    const remainingVersions = this.getBookVersionsForInterview(interviewId);
+    interview.bookGeneratedCount = remainingVersions.length;
+
+    if (restoreQuota) {
+      if ((interview.layoutEditsUsed ?? 0) > 0) {
+        interview.layoutEditsUsed = Math.max(0, (interview.layoutEditsUsed ?? 1) - 1);
+      } else {
+        interview.layoutEditsAllowed = (interview.layoutEditsAllowed ?? 1) + 1;
+      }
+    }
+    interview.lastActivityAt = new Date().toISOString();
+    this.interviews.set(interviewId, interview);
+    await this.persistDoc('interviews', interviewId, interview);
+
+    await this.addAuditLog(
+      'DELETE_PARTICIPANT_BOOK_VERSION',
+      'participantBookVersion',
+      versionId,
+      performedBy,
+      {
+        interviewId,
+        versionNumber: version.versionNumber,
+        title: version.title,
+        restoreQuota,
+        newRemainingEdits: computeLayoutEditQuotaStatus(interview).remainingEdits,
+      }
+    );
+
+    this.saveStateToDisk();
+
+    return {
+      interview,
+      allVersions: remainingVersions,
+      deletedVersionId: versionId,
+      restoredQuota: Boolean(restoreQuota),
+    };
+  }
+
+  public async seedCompleteTestStories(performedBy: string = 'system_admin'): Promise<{
+    seededCount: number;
+    interviews: InterviewRecord[];
+  }> {
+    this.seedCompleteTestStoriesInMemory();
+    const testStories = buildCompleteTestStories();
+    const seededInterviews: InterviewRecord[] = [];
+
+    for (const story of testStories) {
+      await this.persistDoc('interviews', story.interview.id, story.interview);
+      for (const part of story.participants) {
+        await this.persistDoc('participants', part.id, part);
+      }
+      for (const tok of story.tokens) {
+        await this.persistDoc('interviewTokens', tok.id, tok);
+      }
+      seededInterviews.push(story.interview);
+    }
+
+    // Background sync of answers to Firestore without blocking response
+    const allAnswers = testStories.flatMap((s) => s.answers);
+    if (serverDb) {
+      (async () => {
+        try {
+          const chunkSize = 25;
+          for (let i = 0; i < allAnswers.length; i += chunkSize) {
+            const chunk = allAnswers.slice(i, i + chunkSize);
+            await Promise.all(
+              chunk.map(async (ans) => {
+                try {
+                  const docRef = doc(serverDb, 'answers', ans.id);
+                  const sanitized = this.sanitizeDocForFirestore(ans);
+                  await setDoc(docRef, sanitized);
+                } catch (_err) {
+                  // Ignore remote errors
+                }
+              })
+            );
+          }
+        } catch (_bgErr) {
+          // Ignore remote batch error
+        }
+      })();
+    }
+
+    await this.addAuditLog('SEED_COMPLETE_TEST_STORIES', 'system', 'seed_complete_stories', performedBy, {
+      totalStories: seededInterviews.length,
+      totalAnswers: allAnswers.length,
+    });
+
+    this.saveStateToDisk();
+
+    return {
+      seededCount: seededInterviews.length,
+      interviews: seededInterviews,
+    };
   }
 
   public async evaluateInterviewManual(interviewId: string, performedBy: string) {

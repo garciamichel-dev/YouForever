@@ -22,6 +22,9 @@ import {
   Mic,
   HelpCircle,
   Settings,
+  BookOpen,
+  MessageSquare,
+  ShieldCheck,
 } from 'lucide-react';
 import {
   InterviewRecord,
@@ -42,6 +45,8 @@ import { AudioPlayer } from './AudioPlayer.tsx';
 import { FAQModal } from './FAQModal.tsx';
 import { PrivacyConsentScreen } from './PrivacyConsentScreen.tsx';
 import { ParticipantAdminPanel } from './ParticipantAdminPanel.tsx';
+import { ParticipantBookStudio } from './ParticipantBookStudio.tsx';
+import { ParticipantBookVersionRecord } from '../logic/demoStoryRules.ts';
 import {
   getActiveParticipantSession,
   saveActiveParticipantSession,
@@ -95,6 +100,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
     allowAdditionalMemories: boolean;
     hasValidConsent?: boolean;
     consent?: any;
+    bookVersions?: ParticipantBookVersionRecord[];
   } | null>(null);
 
   const [loading, setLoading] = useState(false);
@@ -143,11 +149,29 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
   const [finishReason, setFinishReason] = useState('');
   const [finishing, setFinishing] = useState(false);
 
-  // Tab view within participant portal: 'interview' | 'history'
-  const [activeTab, setActiveTab] = useState<'interview' | 'history'>('interview');
+  // Tab view within participant portal: 'interview' | 'history' | 'book'
+  const [activeTab, setActiveTab] = useState<'interview' | 'history' | 'book'>('interview');
   const [editingAnswerId, setEditingAnswerId] = useState<string | null>(null);
   const [editMemoryText, setEditMemoryText] = useState('');
   const [editPhotos, setEditPhotos] = useState<DraftPhotoItem[]>([]);
+
+  // Compact Gear Menu & Senior UI states
+  const [isGearMenuOpen, setIsGearMenuOpen] = useState(false);
+  const gearMenuRef = useRef<HTMLDivElement | null>(null);
+  const [showPhotoSection, setShowPhotoSection] = useState(false);
+  const [isTextareaExpanded, setIsTextareaExpanded] = useState(false);
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (gearMenuRef.current && !gearMenuRef.current.contains(event.target as Node)) {
+        setIsGearMenuOpen(false);
+      }
+    }
+    if (isGearMenuOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+      return () => document.removeEventListener('mousedown', handleClickOutside);
+    }
+  }, [isGearMenuOpen]);
 
   // 10-minute non-interfering autosave state & refs
   const [lastAutosavedAt, setLastAutosavedAt] = useState<Date | null>(null);
@@ -234,12 +258,20 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
       setErrorMsg(null);
 
       let cachedInterviews: unknown[] | undefined = undefined;
+      let cachedBookVersions: unknown[] | undefined = undefined;
       try {
         const rawCache = localStorage.getItem('foreveryou_interviews_cache');
         if (rawCache) {
           const parsedCache = JSON.parse(rawCache);
           if (Array.isArray(parsedCache) && parsedCache.length > 0) {
             cachedInterviews = parsedCache;
+          }
+        }
+        const rawBvCache = localStorage.getItem('foreveryou_book_versions_cache');
+        if (rawBvCache) {
+          const parsedBvCache = JSON.parse(rawBvCache);
+          if (Array.isArray(parsedBvCache) && parsedBvCache.length > 0) {
+            cachedBookVersions = parsedBvCache;
           }
         }
       } catch (_e) {
@@ -249,7 +281,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
       const res = await fetch('/api/participant/session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: cleanToken, cachedInterviews }),
+        body: JSON.stringify({ token: cleanToken, cachedInterviews, cachedBookVersions }),
       });
 
       const data = await res.json();
@@ -275,12 +307,32 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
           storyMode: data.data.interview.storyMode,
         });
 
+        const isInterviewOpen =
+          data.data.interview.status === 'open' &&
+          !data.data.interview.userDeclaredComplete;
+        const isReopened = Boolean(isInterviewOpen && data.data.interview.reopenedAt);
+
         const savedProgress = getParticipantProgress(participantId);
         const hasValidSavedQuestion =
           savedProgress?.currentQuestionId &&
           seq.some((item) => item.question.id === savedProgress.currentQuestionId);
 
-        if (savedProgress && hasValidSavedQuestion) {
+        if (isReopened) {
+          // If the interview was reopened by admin, land on Question 1 with previous responses pre-loaded,
+          // unless the user already resumed this reopened session and navigated to another step.
+          setShowCompletionScreen(false);
+          setActiveTab('interview');
+          if (
+            savedProgress &&
+            hasValidSavedQuestion &&
+            savedProgress.reopenedAt === data.data.interview.reopenedAt &&
+            !savedProgress.showCompletionScreen
+          ) {
+            setCurrentQuestionId(savedProgress.currentQuestionId);
+          } else if (seq.length > 0) {
+            setCurrentQuestionId(seq[0].question.id);
+          }
+        } else if (savedProgress && hasValidSavedQuestion) {
           setCurrentQuestionId(savedProgress.currentQuestionId);
           setActiveTab(savedProgress.activeTab === 'history' ? 'history' : 'interview');
           setShowCompletionScreen(Boolean(savedProgress.showCompletionScreen));
@@ -296,8 +348,13 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
             setCurrentQuestionId(firstUnanswered.question.id);
             setShowCompletionScreen(false);
           } else if (seq.length > 0) {
-            setCurrentQuestionId(seq[seq.length - 1].question.id);
-            setShowCompletionScreen(true);
+            if (isInterviewOpen) {
+              setCurrentQuestionId(seq[0].question.id);
+              setShowCompletionScreen(false);
+            } else {
+              setCurrentQuestionId(seq[seq.length - 1].question.id);
+              setShowCompletionScreen(true);
+            }
           }
         }
       } else {
@@ -363,9 +420,14 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
           ? [myAnswer.audio]
           : [];
       setCurrentAudios(audios);
+      const hasText = !myAnswer.notRecalled && Boolean(myAnswer.answerText && myAnswer.answerText.trim().length > 0);
+      setIsTextareaExpanded(hasText || Boolean(savedDraft?.answerText));
+      setShowPhotoSection(Boolean(myAnswer.photos && myAnswer.photos.length > 0));
     } else {
       setCurrentPhotos([]);
       setCurrentAudios([]);
+      setIsTextareaExpanded(Boolean(savedDraft?.answerText));
+      setShowPhotoSection(false);
     }
     setValidationNotice(null);
     hydratedQuestionKeyRef.current = questionKey;
@@ -378,8 +440,9 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
       currentQuestionId,
       activeTab,
       showCompletionScreen,
+      reopenedAt: sessionData.interview?.reopenedAt || null,
     });
-  }, [sessionData?.participant?.id, currentQuestionId, activeTab, showCompletionScreen]);
+  }, [sessionData?.participant?.id, currentQuestionId, activeTab, showCompletionScreen, sessionData?.interview?.reopenedAt]);
 
   // Persist in-progress draft text and branchChoice locally as the interviewee types
   useEffect(() => {
@@ -415,6 +478,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
         currentQuestionId: currentQuestion.id,
         activeTab,
         showCompletionScreen,
+        reopenedAt: sessionData.interview?.reopenedAt || null,
       });
       const myAnswer = sessionData.answers.find(
         (a) =>
@@ -690,8 +754,14 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
       setTimeout(() => setFlowTransitionNotice(null), 6000);
     }
 
+    const currentIdx = updatedSeq.findIndex((item) => item.question.id === answeredQuestionId);
     if (nextStep.completedInstrument || !nextStep.nextItem) {
-      setShowCompletionScreen(true);
+      if (currentIdx >= 0 && currentIdx < updatedSeq.length - 1) {
+        setShowCompletionScreen(false);
+        setCurrentQuestionId(updatedSeq[currentIdx + 1].question.id);
+      } else {
+        setShowCompletionScreen(true);
+      }
     } else {
       setShowCompletionScreen(false);
       setCurrentQuestionId(nextStep.nextItem.question.id);
@@ -1108,14 +1178,29 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           token: activeToken,
-          reason: finishReason.trim() || 'Declaración voluntaria del participante',
+          reason: finishReason.trim(),
         }),
       });
 
       const data = await res.json();
       if (data.success) {
+        try {
+          const rawIntCache = localStorage.getItem('foreveryou_interviews_cache');
+          if (rawIntCache) {
+            const parsedIntList = JSON.parse(rawIntCache);
+            if (Array.isArray(parsedIntList)) {
+              const nextIntList = parsedIntList.map((item: any) =>
+                item && item.id === data.data.id ? { ...item, ...data.data } : item
+              );
+              localStorage.setItem('foreveryou_interviews_cache', JSON.stringify(nextIntList));
+            }
+          }
+        } catch (_e) {
+          // ignore localStorage write errors
+        }
         setShowFinishModal(false);
         setShowCompletionScreen(true);
+        setActiveTab('interview');
         setSessionData({
           ...sessionData,
           interview: data.data,
@@ -1267,349 +1352,375 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
       : [];
 
   return (
-    <div className="max-w-4xl mx-auto space-y-6 pb-12">
-      {/* Interview Top Status Header */}
-      <div className="bg-white p-6 rounded-2xl border border-stone-200 shadow-sm space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-stone-100">
-          <div>
-            <div className="flex items-center space-x-2">
-              <span className="font-serif text-xl font-bold text-stone-900">
+    <div className="min-h-screen bg-stone-50/70 text-stone-900 flex flex-col">
+      {/* 1. Compact Sticky Top Header: ForeverYou + Quick Icons + Single Gear Menu */}
+      <header className="sticky top-0 z-40 bg-white/95 backdrop-blur-md border-b border-stone-200/90 shadow-2xs">
+        <div className="max-w-4xl mx-auto w-full px-3 sm:px-4 h-14 flex items-center justify-between gap-2">
+          {/* Brand Wordmark & Story Context */}
+          <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+            <span className="font-serif font-black text-amber-900 text-lg sm:text-xl tracking-tight shrink-0 select-none">
+              ForeverYou
+            </span>
+            <span className="text-stone-300 hidden xs:inline select-none">|</span>
+            <div className="min-w-0 hidden sm:block">
+              <span className="text-xs font-semibold text-stone-800 truncate block max-w-xs" title={interview.title}>
                 {interview.title}
               </span>
-              <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-stone-100 text-stone-700 uppercase tracking-wide">
-                {interview.storyMode === 'compartida'
-                  ? 'Historia Compartida'
-                  : 'Historia Individual'}
-              </span>
-            </div>
-            <div className="flex items-center space-x-3 mt-1 text-xs text-stone-500">
-              <span className="flex items-center space-x-1 font-medium text-stone-800">
-                <User className="w-3.5 h-3.5 text-amber-700" />
-                <span>
-                  Respondiendo como:{' '}
-                  <strong>
-                    {participant.name} ({participant.relationship})
-                  </strong>
-                </span>
-              </span>
-              <span>•</span>
-              <span className="flex items-center space-x-1">
-                <Clock className="w-3.5 h-3.5" />
-                <span>
-                  Vence:{' '}
-                  {new Date(interview.expiresAt).toLocaleDateString('es-MX', {
-                    day: 'numeric',
-                    month: 'long',
-                  })}
-                </span>
+              <span className="text-[10px] text-stone-500 truncate block">
+                {participant.name} ({participant.relationship})
               </span>
             </div>
           </div>
 
-          {/* Header Action Buttons (Ajustes/Privacidad & Voluntary Finish) */}
-          <div className="flex items-center space-x-2">
-            <button
-              type="button"
-              onClick={() => setIsParticipantAdminOpen(true)}
-              title="Panel de Privacidad y Gestión del Entrevistado"
-              aria-label="Panel de Privacidad y Gestión del Entrevistado"
-              className="inline-flex items-center space-x-1.5 px-3 py-1.5 bg-stone-100 hover:bg-amber-100 text-stone-700 hover:text-amber-900 border border-stone-300 rounded-lg text-xs font-semibold transition cursor-pointer"
-            >
-              <Settings className="w-3.5 h-3.5 text-stone-600 hover:text-amber-800" />
-              <span>Ajustes &amp; Privacidad</span>
-            </button>
-
-            {isInterviewOpen && (
+          {/* Quick Header Navigation & Actions */}
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+            {/* If on History or Book tab, button to return to the interview */}
+            {activeTab !== 'interview' && (
               <button
                 type="button"
-                onClick={() => setShowFinishModal(true)}
-                className="inline-flex items-center space-x-1.5 px-3.5 py-1.5 bg-stone-100 hover:bg-stone-200 text-stone-700 border border-stone-300 rounded-lg text-xs font-semibold transition cursor-pointer"
+                onClick={() => {
+                  setActiveTab('interview');
+                  setShowCompletionScreen(false);
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-amber-100 hover:bg-amber-200 text-amber-900 border border-amber-300 transition cursor-pointer"
               >
-                <Check className="w-3.5 h-3.5 text-emerald-700" />
-                <span>He terminado mi historia</span>
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>Volver al cuestionario</span>
               </button>
             )}
-          </div>
-        </div>
 
-        {/* Visual Progress Bar Card with Percentage */}
-        <div className="bg-gradient-to-br from-amber-50/70 via-stone-50 to-amber-50/40 p-4 rounded-xl border border-amber-200/80 shadow-xs space-y-3">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-            <div className="flex items-center space-x-2">
-              <span className="font-serif font-bold text-stone-900 text-sm">
-                Progreso del Entrevistado:
+            {/* "Mis Respuestas" Button */}
+            <button
+              type="button"
+              onClick={() => setActiveTab(activeTab === 'history' ? 'interview' : 'history')}
+              title="Mis Respuestas Guardadas"
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold border transition cursor-pointer ${
+                activeTab === 'history'
+                  ? 'bg-amber-800 text-white border-amber-900 shadow-2xs'
+                  : 'bg-stone-50 hover:bg-stone-100 text-stone-700 border-stone-200'
+              }`}
+            >
+              <MessageSquare className={`w-3.5 h-3.5 ${activeTab === 'history' ? 'text-white' : 'text-amber-700'}`} />
+              <span className="hidden sm:inline">Mis Respuestas</span>
+              <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-bold ${
+                activeTab === 'history' ? 'bg-amber-950 text-amber-100' : 'bg-amber-100 text-amber-900'
+              }`}>
+                {myAnswers.length}
               </span>
-              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-200/90 text-amber-950 border border-amber-300 shadow-xs">
-                {progressPercent}% de avance
-              </span>
-            </div>
+            </button>
 
-            <div className="flex flex-wrap items-center gap-2 text-xs text-stone-600">
-              <span className="font-semibold text-stone-800">
-                {answeredInFlowCount}{' '}
-                {answeredInFlowCount === 1 ? 'pregunta respondida' : 'preguntas respondidas'}
-              </span>
-              {silentAutosaveNotice && (
-                <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[11px] font-medium transition-all">
-                  ✓ {silentAutosaveNotice}
-                </span>
+            {/* "Mis Libros" Button (visible if book versions exist or interview closed) */}
+            {(interview.userDeclaredComplete || (sessionData.bookVersions && sessionData.bookVersions.length > 0) || activeTab === 'book') && (
+              <button
+                type="button"
+                onClick={() => setActiveTab(activeTab === 'book' ? 'interview' : 'book')}
+                title="Mis Libros en PDF & Maquetación"
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold border transition cursor-pointer ${
+                  activeTab === 'book'
+                    ? 'bg-amber-800 text-white border-amber-900 shadow-2xs'
+                    : 'bg-stone-50 hover:bg-stone-100 text-stone-700 border-stone-200'
+                }`}
+              >
+                <BookOpen className={`w-3.5 h-3.5 ${activeTab === 'book' ? 'text-white' : 'text-amber-700'}`} />
+                <span className="hidden sm:inline">Mis Libros</span>
+                {sessionData.bookVersions && sessionData.bookVersions.length > 0 && (
+                  <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-bold ${
+                    activeTab === 'book' ? 'bg-amber-950 text-amber-100' : 'bg-amber-100 text-amber-900'
+                  }`}>
+                    {sessionData.bookVersions.length}
+                  </span>
+                )}
+              </button>
+            )}
+
+            {/* Single Gear Dropdown Menu: Settings, Privacy, FAQ, and Voluntary Finish */}
+            <div className="relative" ref={gearMenuRef}>
+              <button
+                type="button"
+                onClick={() => setIsGearMenuOpen(!isGearMenuOpen)}
+                title="Ajustes y opciones de la entrevista"
+                aria-label="Ajustes y opciones de la entrevista"
+                className="p-2 rounded-lg text-stone-700 hover:text-stone-900 hover:bg-stone-100 border border-stone-200 transition cursor-pointer"
+              >
+                <Settings className="w-4 h-4 text-stone-600" />
+              </button>
+
+              {isGearMenuOpen && (
+                <div className="absolute right-0 mt-2 w-64 bg-white rounded-xl shadow-xl border border-stone-200 py-1.5 z-50 text-xs">
+                  <div className="px-3.5 py-2 border-b border-stone-100 bg-stone-50/60 rounded-t-xl">
+                    <div className="font-semibold text-stone-900 truncate">{participant.name}</div>
+                    <div className="text-[11px] text-stone-500 mt-0.5">
+                      <span>Progreso de tu historia: <strong>{progressPercent}%</strong></span>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsGearMenuOpen(false);
+                      setIsParticipantAdminOpen(true);
+                    }}
+                    className="w-full text-left px-3.5 py-2.5 hover:bg-amber-50 text-stone-700 hover:text-amber-900 flex items-center gap-2.5 transition cursor-pointer"
+                  >
+                    <Settings className="w-3.5 h-3.5 text-stone-500" />
+                    <span>Ajustes del Portal</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsGearMenuOpen(false);
+                      setIsParticipantAdminOpen(true);
+                    }}
+                    className="w-full text-left px-3.5 py-2.5 hover:bg-amber-50 text-stone-700 hover:text-amber-900 flex items-center gap-2.5 transition cursor-pointer"
+                  >
+                    <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>Ajustes y Privacidad</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsGearMenuOpen(false);
+                      setIsFaqOpen(true);
+                    }}
+                    className="w-full text-left px-3.5 py-2.5 hover:bg-amber-50 text-stone-700 hover:text-amber-900 flex items-center gap-2.5 transition cursor-pointer"
+                  >
+                    <HelpCircle className="w-3.5 h-3.5 text-stone-500" />
+                    <span>Preguntas Frecuentes y Ayuda</span>
+                  </button>
+
+                  {/* Separated Voluntary Finish action */}
+                  {isInterviewOpen && (
+                    <>
+                      <div className="border-t border-stone-100 my-1"></div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsGearMenuOpen(false);
+                          setShowFinishModal(true);
+                        }}
+                        className="w-full text-left px-3.5 py-2.5 hover:bg-amber-50 text-amber-950 font-semibold flex items-center gap-2.5 transition cursor-pointer"
+                      >
+                        <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                        <span>He terminado mi historia</span>
+                      </button>
+                    </>
+                  )}
+                </div>
               )}
             </div>
           </div>
-
-          {/* Progress Bar Track & Fill */}
-          <div className="w-full h-3.5 bg-stone-200/90 rounded-full overflow-hidden shadow-inner p-0.5 border border-stone-300/60">
-            <div
-              className="h-full bg-gradient-to-r from-amber-600 via-amber-700 to-amber-800 rounded-full transition-all duration-700 ease-out shadow-xs"
-              style={{ width: `${progressPercent}%` }}
-              role="progressbar"
-              aria-valuenow={progressPercent}
-              aria-valuemin={0}
-              aria-valuemax={100}
-            />
-          </div>
-
-          <div className="flex flex-wrap items-center justify-between text-[11px] text-stone-600 pt-0.5 gap-2">
-            <div className="flex items-center space-x-1.5">
-              <span className="font-medium text-stone-700">
-                {currentQuestion
-                  ? `Etapa actual: ${currentQuestion.lifeStage.replace('_', ' ')}`
-                  : 'Cuestionario completado'}
-              </span>
-              {interview.sufficiencyStatus === 'sufficient' && (
-                <span className="inline-flex items-center space-x-1 px-2 py-0.5 bg-emerald-100 text-emerald-900 rounded font-semibold text-[10px] border border-emerald-300">
-                  <Sparkles className="w-3 h-3 text-emerald-700" />
-                  <span>Suficiente</span>
-                </span>
-              )}
-            </div>
-
-            <span className="text-stone-400">
-              Guardado automático silencioso activo cada 10 min
-              {lastAutosavedAt
-                ? ` • Último: ${lastAutosavedAt.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}`
-                : ''}
-            </span>
-          </div>
         </div>
 
-        {isExpired && !interview.userDeclaredComplete && (
-          <div className="p-4 bg-rose-50 border border-rose-200 rounded-xl text-rose-900 text-xs flex items-start space-x-3">
-            <Lock className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
-            <div>
-              <span className="font-bold block text-sm">Periodo de apertura vencido</span>
-              <p className="mt-0.5">
-                El plazo fijado para esta entrevista ha vencido en el servidor. Todas tus respuestas están a salvo. Si necesitas tiempo adicional, solicita al administrador extender el plazo.
+        {/* Subtle Hairline Progress Bar */}
+        <div
+          className="w-full h-1 bg-stone-200/80 relative overflow-hidden"
+          title={`Progreso: ${progressPercent}%`}
+          role="progressbar"
+          aria-valuenow={progressPercent}
+          aria-valuemin={0}
+          aria-valuemax={100}
+        >
+          <div
+            className="h-full bg-gradient-to-r from-amber-600 via-amber-700 to-amber-800 transition-all duration-700 ease-out"
+            style={{ width: `${progressPercent}%` }}
+          />
+        </div>
+      </header>
+
+      {/* Global Feedback Notices */}
+      <div className="max-w-2xl mx-auto w-full px-4 pt-3 space-y-2">
+        {flowTransitionNotice && (
+          <div className="p-3 bg-amber-50 border border-amber-300 rounded-xl text-amber-950 text-xs flex items-center space-x-2.5 shadow-2xs">
+            <GitBranch className="w-4 h-4 text-amber-700 shrink-0" />
+            <span className="font-medium">{flowTransitionNotice}</span>
+          </div>
+        )}
+
+        {saveSuccessNotice && (
+          <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-900 text-xs flex items-center space-x-2 shadow-2xs">
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            <span className="font-medium">{saveSuccessNotice}</span>
+          </div>
+        )}
+
+        {/* Notice Banner: Reopened Interview for Questionnaire & Book Editing */}
+        {interview.status === 'open' && !interview.userDeclaredComplete && interview.reopenedAt && (
+          <div className="p-3.5 bg-gradient-to-r from-amber-50 to-stone-50 border border-amber-300 rounded-xl text-amber-950 text-xs shadow-2xs flex items-start space-x-3">
+            <div className="w-7 h-7 rounded-lg bg-amber-100 flex items-center justify-center shrink-0 text-amber-800 mt-0.5">
+              <Sparkles className="w-3.5 h-3.5" />
+            </div>
+            <div className="space-y-1">
+              <div className="font-bold text-amber-900 text-xs sm:text-sm">
+                Cuestionario Reabierto para Edición Completa
+              </div>
+              <p className="text-amber-800 text-[11px] sm:text-xs leading-relaxed">
+                Tu entrevista está reabierta para que puedas revisar y editar tus respuestas o notas de voz. Puedes navegar pregunta a pregunta o consultar tu historial desde <strong>«Mis Respuestas»</strong>. Al terminar, confirma el cierre para generar una nueva versión de tu libro PDF.
               </p>
             </div>
           </div>
         )}
 
-        {/* Navigation Tabs (Cuestionario vs Respuestas Previas vs Añadir Información Adicional) */}
-        <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
-          <div className="flex flex-wrap gap-2">
-            <button
-              onClick={() => {
-                setActiveTab('interview');
-                setShowCompletionScreen(false);
-              }}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
-                activeTab === 'interview' && !showCompletionScreen
-                  ? 'bg-amber-800 text-white shadow-xs'
-                  : 'bg-stone-100 text-stone-700 hover:bg-stone-200'
-              }`}
-            >
-              Pregunta Actual
-            </button>
-
-            {(allFlowCompleted || interview.userDeclaredComplete || showCompletionScreen) && (
-              <button
-                onClick={() => {
-                  setActiveTab('interview');
-                  setShowCompletionScreen(true);
-                }}
-                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center space-x-1 ${
-                  activeTab === 'interview' && showCompletionScreen
-                    ? 'bg-emerald-800 text-white shadow-xs'
-                    : 'bg-emerald-50 text-emerald-800 border border-emerald-200 hover:bg-emerald-100'
-                }`}
-              >
-                <CheckCircle2 className="w-3.5 h-3.5" />
-                <span>Instrumento Completado</span>
-              </button>
-            )}
-
-            <button
-              onClick={() => setActiveTab('history')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
-                activeTab === 'history'
-                  ? 'bg-amber-800 text-white shadow-xs'
-                  : 'bg-stone-100 text-stone-700 hover:bg-stone-200'
-              }`}
-            >
-              Mis Respuestas Guardadas ({myAnswers.length})
-            </button>
+        {isExpired && !interview.userDeclaredComplete && (
+          <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-900 text-xs flex items-start space-x-2.5">
+            <Lock className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+            <div>
+              <span className="font-bold block">Periodo de apertura vencido</span>
+              <p className="text-[11px] mt-0.5 text-rose-800">
+                El plazo fijado ha vencido. Tus respuestas están protegidas. Puedes solicitar al administrador una extensión si necesitas añadir más recuerdos.
+              </p>
+            </div>
           </div>
-
-          {sessionData.allowAdditionalMemories && !isExpired && (
-            <button
-              onClick={() => setShowAdditionalMemoryModal(true)}
-              className="inline-flex items-center space-x-1.5 px-3.5 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg text-xs font-semibold transition shadow-xs"
-            >
-              <PlusCircle className="w-3.5 h-3.5" />
-              <span>Añadir Información Adicional</span>
-            </button>
-          )}
-        </div>
+        )}
       </div>
 
-      {/* Global Feedback Notices */}
-      {flowTransitionNotice && (
-        <div className="p-4 bg-amber-50 border border-amber-300 rounded-xl text-amber-950 text-xs flex items-center space-x-2.5 shadow-xs">
-          <GitBranch className="w-4 h-4 text-amber-700 shrink-0" />
-          <span className="font-medium">{flowTransitionNotice}</span>
-        </div>
-      )}
-
-      {saveSuccessNotice && (
-        <div className="p-3.5 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-900 text-xs flex items-center space-x-2 shadow-xs">
-          <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-          <span className="font-medium">{saveSuccessNotice}</span>
-        </div>
-      )}
-
-      {/* Main Tab: Interview Question Step OR Completion View */}
-      {activeTab === 'interview' && (
-        <div className="space-y-6">
-          {showCompletionScreen || interview.userDeclaredComplete ? (
-            /* END OF INSTRUMENT COMPLETION VIEW */
-            <div className="bg-white p-8 rounded-2xl border border-emerald-200 shadow-sm space-y-6 text-center">
-              <div className="w-14 h-14 rounded-2xl bg-emerald-100 text-emerald-800 flex items-center justify-center mx-auto">
-                <CheckCircle2 className="w-8 h-8" />
-              </div>
-
-              <div className="max-w-xl mx-auto space-y-2">
-                <span className="inline-block px-3 py-1 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 text-xs font-bold uppercase tracking-wide">
-                  Cuestionario Completado
-                </span>
-                <h3 className="font-serif text-2xl font-bold text-stone-900">
-                  ¡Has completado todas las preguntas del instrumento!
-                </h3>
-                <p className="text-sm text-stone-600 leading-relaxed">
-                  Ya has completado el recorrido del cuestionario biográfico. Si lo deseas, puedes incorporar información adicional, anécdotas, reflexiones o recuerdos libres dando clic en el botón{' '}
-                  <strong>«Añadir Información Adicional»</strong>.
-                </p>
-              </div>
-
-              <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
-                {!isExpired && (
-                  <button
-                    type="button"
-                    onClick={() => setShowAdditionalMemoryModal(true)}
-                    className="inline-flex items-center space-x-2 px-6 py-3 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl text-sm font-semibold shadow-sm transition"
-                  >
-                    <PlusCircle className="w-4 h-4" />
-                    <span>Añadir Información Adicional</span>
-                  </button>
-                )}
-
-                <button
-                  type="button"
-                  onClick={() => setShowCompletionScreen(false)}
-                  className="inline-flex items-center space-x-1.5 px-4 py-3 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-xl text-xs font-semibold transition"
-                >
-                  <RotateCcw className="w-4 h-4" />
-                  <span>Revisar Preguntas del Cuestionario</span>
-                </button>
-
-                {isInterviewOpen && (
-                  <button
-                    type="button"
-                    onClick={() => setShowFinishModal(true)}
-                    className="inline-flex items-center space-x-1.5 px-4 py-3 bg-amber-700 hover:bg-amber-800 text-white rounded-xl text-xs font-semibold transition"
-                  >
-                    <Check className="w-4 h-4" />
-                    <span>Declarar Cierre Definitivo</span>
-                  </button>
-                )}
-              </div>
-
-              {/* List of Additional Information already added */}
-              {myAdditionalMemories.length > 0 && (
-                <div className="pt-6 border-t border-stone-200 text-left space-y-3">
-                  <h4 className="font-serif text-sm font-bold text-stone-800">
-                    Información Adicional Incorporada ({myAdditionalMemories.length})
-                  </h4>
-                  <div className="space-y-2">
-                    {myAdditionalMemories.map((mem) => (
-                      <div
-                        key={mem.id}
-                        className="p-3.5 bg-stone-50 rounded-xl border border-stone-200 text-xs text-stone-800"
-                      >
-                        <div className="text-[10px] text-stone-400 mb-1">
-                          Agregado el {new Date(mem.createdAt).toLocaleString('es-MX')}
-                        </div>
-                        <p className="italic">«{mem.answerText}»</p>
-                      </div>
-                    ))}
-                  </div>
+      {/* Main Container */}
+      {(activeTab === 'interview' || activeTab === 'book') && (
+        <div className="flex-1 flex flex-col">
+          {interview.userDeclaredComplete || activeTab === 'book' ? (
+            <div className="max-w-4xl mx-auto w-full px-4 pt-4 pb-12">
+              <ParticipantBookStudio
+                token={activeToken}
+                interview={interview}
+                participant={participant}
+                otherParticipants={sessionData.otherParticipants}
+                answers={answers}
+                questions={questions}
+                bookVersions={sessionData.bookVersions || []}
+                onBookVersionSaved={({ interview: updatedInterview, allVersions }) => {
+                  setSessionData((prev) =>
+                    prev
+                      ? {
+                          ...prev,
+                          interview: updatedInterview,
+                          bookVersions: allVersions,
+                        }
+                      : prev
+                  );
+                }}
+                onViewReadOnlyAnswers={() => setActiveTab('history')}
+              />
+            </div>
+          ) : showCompletionScreen ? (
+            /* END OF INSTRUMENT COMPLETION VIEW (BEFORE VOLUNTARY CLOSURE) */
+            <div className="max-w-2xl mx-auto w-full px-4 pt-6 pb-12">
+              <div className="bg-white p-8 rounded-2xl border border-emerald-200 shadow-sm space-y-6 text-center">
+                <div className="w-14 h-14 rounded-2xl bg-emerald-100 text-emerald-800 flex items-center justify-center mx-auto">
+                  <CheckCircle2 className="w-8 h-8" />
                 </div>
-              )}
+
+                <div className="max-w-xl mx-auto space-y-2">
+                  <span className="inline-block px-3 py-1 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 text-xs font-bold uppercase tracking-wide">
+                    Cuestionario Completado
+                  </span>
+                  <h3 className="font-serif text-2xl font-bold text-stone-900">
+                    ¡Has completado todas las preguntas del instrumento!
+                  </h3>
+                  <p className="text-sm text-stone-600 leading-relaxed">
+                    Ya has completado el recorrido del cuestionario biográfico. Si lo deseas, puedes incorporar información adicional dando clic en <strong>«Añadir Información Adicional»</strong>, o bien confirmar el cierre definitivo para pasar a las <strong>opciones de maquetación editorial y descargar tu libro en PDF</strong>.
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
+                  {sessionData.allowAdditionalMemories && isInterviewOpen && !isExpired && (
+                    <button
+                      type="button"
+                      onClick={() => setShowAdditionalMemoryModal(true)}
+                      className="inline-flex items-center space-x-2 px-5 py-2.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl text-xs sm:text-sm font-semibold shadow-xs transition cursor-pointer"
+                    >
+                      <PlusCircle className="w-4 h-4" />
+                      <span>Añadir Información Adicional</span>
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={() => setShowCompletionScreen(false)}
+                    className="inline-flex items-center space-x-1.5 px-4 py-2.5 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-xl text-xs sm:text-sm font-semibold transition cursor-pointer"
+                  >
+                    <RotateCcw className="w-4 h-4" />
+                    <span>Revisar Preguntas del Cuestionario</span>
+                  </button>
+
+                  {isInterviewOpen && (
+                    <button
+                      type="button"
+                      onClick={() => setShowFinishModal(true)}
+                      className="inline-flex items-center space-x-1.5 px-5 py-2.5 bg-amber-700 hover:bg-amber-800 text-white rounded-xl text-xs sm:text-sm font-semibold transition shadow-xs cursor-pointer"
+                    >
+                      <BookOpen className="w-4 h-4" />
+                      <span>Confirmar Cierre y Maquetar Mi Libro</span>
+                    </button>
+                  )}
+                </div>
+
+                {/* List of Additional Information already added */}
+                {myAdditionalMemories.length > 0 && (
+                  <div className="pt-6 border-t border-stone-200 text-left space-y-3">
+                    <h4 className="font-serif text-sm font-bold text-stone-800">
+                      Información Adicional Incorporada ({myAdditionalMemories.length})
+                    </h4>
+                    <div className="space-y-2">
+                      {myAdditionalMemories.map((mem) => (
+                        <div
+                          key={mem.id}
+                          className="p-3.5 bg-stone-50 rounded-xl border border-stone-200 text-xs text-stone-800"
+                        >
+                          <div className="text-[10px] text-stone-400 mb-1">
+                            Agregado el {new Date(mem.createdAt).toLocaleString('es-MX')}
+                          </div>
+                          <p className="italic">«{mem.answerText}»</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           ) : currentQuestion ? (
-            <div className="bg-white p-8 rounded-2xl border border-stone-200 shadow-sm space-y-6">
-              {/* Sub-flow Active Banner (e.g. when inside 'hijos' sub-flow) */}
+            /* 2. MAIN INTERVIEW ZONE (Zero scroll mobile layout: Question + Protagonist Mic) */
+            <main className="flex-1 max-w-2xl mx-auto w-full px-4 pt-3 sm:pt-5 pb-28 sm:pb-32 space-y-4 sm:space-y-5">
+              {/* Sub-flow Active Banner */}
               {currentFlowItem?.isSubFlow && (
-                <div className="p-3.5 bg-emerald-50 border border-emerald-200 rounded-xl flex items-center justify-between text-xs text-emerald-950">
+                <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl flex items-center justify-between text-xs text-emerald-950">
                   <div className="flex items-center space-x-2">
                     <GitBranch className="w-4 h-4 text-emerald-700 shrink-0" />
                     <span>
-                      <strong>Sub-flujo activo: «{currentFlowItem.flowId}»</strong> (Pregunta{' '}
-                      {currentFlowItem.subFlowStepIndex} de {currentFlowItem.subFlowTotalSteps} del sub-flujo)
+                      <strong>Sub-flujo: «{currentFlowItem.flowId}»</strong> (Paso{' '}
+                      {currentFlowItem.subFlowStepIndex} de {currentFlowItem.subFlowTotalSteps})
                     </span>
                   </div>
                   <span className="text-[11px] text-emerald-700 font-medium">
-                    Al concluir retornará al hilo principal
+                    Retornará al hilo principal
                   </span>
                 </div>
               )}
 
-              {/* Question metadata badge */}
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="flex items-center space-x-2">
-                  <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-900 capitalize">
-                    {currentQuestion.lifeStage.replace('_', ' ')}
-                  </span>
-                  <span className="text-xs text-stone-400">•</span>
-                  <span className="text-xs text-stone-500 font-medium">
-                    {currentQuestion.topic.replace(/_/g, ' ')}
-                  </span>
-                  {currentQuestion.branchConfig?.enabled && (
-                    <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-50 text-amber-800 border border-amber-200">
-                      <CornerDownRight className="w-3 h-3" />
-                      <span>
-                        Pregunta con flujo condicional ({currentQuestion.branchConfig.targetFlowId})
-                      </span>
-                    </span>
-                  )}
-                </div>
+              {/* Stage Kicker & Progress Percentage */}
+              <div className="text-center">
+                <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-amber-100/80 text-amber-900 border border-amber-200/70 tracking-wide uppercase">
+                  <span>Etapa: {currentQuestion.lifeStage.replace(/_/g, ' ')}</span>
+                  <span className="text-amber-400">•</span>
+                  <span>{progressPercent}% de avance</span>
+                </span>
               </div>
 
-              {/* Question Text */}
-              <h3 className="font-serif text-xl sm:text-2xl font-bold text-stone-900 leading-snug">
+              {/* Prominent Question Heading */}
+              <h1 className="font-serif text-2xl sm:text-3xl font-bold text-stone-900 leading-snug tracking-tight text-center text-balance px-2">
                 {currentQuestion.text}
-              </h3>
+              </h1>
 
-              {/* Gateway Branch Selector (when this question can jump to a sub-flow like 'hijos') */}
+              {/* Gateway Branch Selector (if question can jump to a sub-flow like 'hijos') */}
               {currentQuestion.branchConfig?.enabled &&
                 currentQuestion.branchConfig.targetFlowId &&
                 isInterviewOpen &&
                 !adaptiveQuestion && (
-                  <div className="p-4 bg-stone-50 border border-stone-200 rounded-xl space-y-2.5">
+                  <div className="p-3.5 bg-stone-50 border border-stone-200 rounded-xl space-y-2">
                     <div className="text-xs font-semibold text-stone-800 flex items-center space-x-1.5">
                       <GitBranch className="w-3.5 h-3.5 text-amber-700" />
                       <span>
-                        Selección de flujo para{' '}
+                        Selección para{' '}
                         <strong>
                           {currentQuestion.branchConfig.branchLabel ||
                             `Flujo de ${currentQuestion.branchConfig.targetFlowId}`}
@@ -1621,13 +1732,13 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                       <button
                         type="button"
                         onClick={() => setBranchChoice('yes')}
-                        className={`px-3.5 py-2 rounded-lg text-xs font-semibold border transition ${
+                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition cursor-pointer ${
                           branchChoice === 'yes'
-                            ? 'bg-amber-700 text-white border-amber-800 shadow-xs'
+                            ? 'bg-amber-700 text-white border-amber-800 shadow-2xs'
                             : 'bg-white text-stone-700 border-stone-300 hover:border-amber-400'
                         }`}
                       >
-                        ✓ Sí aplica a mi historia (explorar flujo «{currentQuestion.branchConfig.targetFlowId}» y luego retornar)
+                        ✓ Sí aplica a mi historia
                       </button>
 
                       <button
@@ -1638,30 +1749,30 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                             setCurrentAnswerText('No aplica a mi historia.');
                           }
                         }}
-                        className={`px-3.5 py-2 rounded-lg text-xs font-semibold border transition ${
+                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition cursor-pointer ${
                           branchChoice === 'no'
-                            ? 'bg-stone-800 text-white border-stone-900 shadow-xs'
+                            ? 'bg-stone-800 text-white border-stone-900 shadow-2xs'
                             : 'bg-white text-stone-700 border-stone-300 hover:border-stone-400'
                         }`}
                       >
-                        ✕ No aplica a mi historia (continuar en el hilo principal)
+                        ✕ No aplica a mi historia
                       </button>
                     </div>
                   </div>
                 )}
 
-              {/* In shared story: Show family contributions for this question without mixing them */}
+              {/* In shared story: Show family contributions for this question */}
               {familyAnswersForCurrent.length > 0 && (
-                <div className="p-4 bg-amber-50/60 border border-amber-200/80 rounded-xl space-y-2">
+                <div className="p-3.5 bg-amber-50/70 border border-amber-200/80 rounded-xl space-y-2">
                   <h4 className="text-xs font-bold text-amber-900 uppercase tracking-wide flex items-center space-x-1.5">
                     <HeartHandshake className="w-3.5 h-3.5" />
-                    <span>Recuerdos compartidos por la familia para esta misma pregunta</span>
+                    <span>Recuerdos compartidos por tu familia</span>
                   </h4>
-                  <div className="space-y-2">
+                  <div className="space-y-1.5">
                     {familyAnswersForCurrent.map((fa) => (
                       <div
                         key={fa.id}
-                        className="bg-white p-3 rounded-lg border border-amber-100 text-xs"
+                        className="bg-white p-2.5 rounded-lg border border-amber-100 text-xs"
                       >
                         <span className="font-semibold text-stone-900 block mb-0.5">
                           {fa.participantName}:
@@ -1675,81 +1786,151 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                 </div>
               )}
 
-              {/* 1. Voice recording input as first option (senior-friendly circular button) */}
-              <VoiceRecorder
-                ref={voiceRecorderRef}
-                token={activeToken}
-                questionId={currentQuestion.id}
-                questionText={currentQuestion.text}
-                initialAudio={currentAudio}
-                initialAudios={currentAudios}
-                hideSavedList={true}
-                onFocusKeyboard={() => {
-                  answerTextareaRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                  answerTextareaRef.current?.focus();
-                }}
-                onVoiceSubmitted={(audio, transcription, allAudios, diagnosis) => {
-                  setCurrentAudios(allAudios);
-                  const cleanTranscript = (transcription || '').trim();
-                  if (cleanTranscript.length > 0) {
-                    setCurrentAnswerText((prev) => {
-                      const cleanPrev = prev.trim();
-                      if (!cleanPrev || cleanPrev === 'No aplica a mi historia.') {
-                        return cleanTranscript;
+              {/* 3. HERO PROTAGONIST VOICE RECORDER (Centered, large circular button, no extra card) */}
+              <div className="pt-1 pb-1">
+                <VoiceRecorder
+                  ref={voiceRecorderRef}
+                  token={activeToken}
+                  questionId={currentQuestion.id}
+                  questionText={currentQuestion.text}
+                  initialAudio={currentAudio}
+                  initialAudios={currentAudios}
+                  hideSavedList={true}
+                  frameless={true}
+                  onFocusKeyboard={() => {
+                    setIsTextareaExpanded(true);
+                    setTimeout(() => {
+                      answerTextareaRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                      answerTextareaRef.current?.focus();
+                    }, 100);
+                  }}
+                  onVoiceSubmitted={(audio, transcription, allAudios, diagnosis) => {
+                    setCurrentAudios(allAudios);
+                    const cleanTranscript = (transcription || '').trim();
+                    if (cleanTranscript.length > 0) {
+                      setCurrentAnswerText((prev) => {
+                        const cleanPrev = prev.trim();
+                        if (!cleanPrev || cleanPrev === 'No aplica a mi historia.') {
+                          return cleanTranscript;
+                        }
+                        if (cleanPrev.includes(cleanTranscript)) {
+                          return cleanPrev;
+                        }
+                        return `${cleanPrev}\n\n[Nota de voz]: ${cleanTranscript}`;
+                      });
+                      if (diagnosis?.audioQuality !== 'noisy') {
+                        setSaveSuccessNotice(
+                          'Archivo de voz y transcripción guardados con éxito.'
+                        );
+                        setTimeout(() => setSaveSuccessNotice(null), 3500);
                       }
-                      if (cleanPrev.includes(cleanTranscript)) {
-                        return cleanPrev;
-                      }
-                      return `${cleanPrev}\n\n[Nota de voz]: ${cleanTranscript}`;
-                    });
-                    if (diagnosis?.audioQuality !== 'noisy') {
-                      setSaveSuccessNotice(
-                        'Archivo de voz y transcripción guardados con éxito en la base de datos.'
-                      );
-                      setTimeout(() => setSaveSuccessNotice(null), 3500);
                     }
-                  }
-                }}
-                onVoiceDeleted={(delId) => {
-                  setCurrentAudios((prev) => prev.filter((a) => a.id !== delId));
-                }}
-                disabled={!isInterviewOpen || Boolean(adaptiveQuestion)}
-              />
-
-              {/* 2. Written testimony area below voice recording */}
-              <div className="space-y-2">
-                <label className="block text-xs font-semibold text-stone-700">
-                  Tu recuerdo o testimonio personal:
-                </label>
-                <textarea
-                  ref={answerTextareaRef}
-                  rows={5}
+                  }}
+                  onVoiceDeleted={(delId) => {
+                    setCurrentAudios((prev) => prev.filter((a) => a.id !== delId));
+                  }}
                   disabled={!isInterviewOpen || Boolean(adaptiveQuestion)}
-                  placeholder={
-                    isInterviewOpen
-                      ? 'Escribe aquí con tus propias palabras lo que venga a tu memoria...'
-                      : 'La entrevista no está abierta para nuevas respuestas.'
-                  }
-                  value={currentAnswerText}
-                  onChange={(e) => setCurrentAnswerText(e.target.value)}
-                  className="w-full p-4 border border-stone-300 rounded-xl text-stone-900 text-sm focus:outline-none focus:ring-2 focus:ring-amber-200 focus:border-amber-600 leading-relaxed font-sans disabled:bg-stone-50"
                 />
               </div>
 
-              {/* 3. Optional Photo Uploader for Every Question */}
-              <QuestionPhotoUploader
-                key={`photo_${currentQuestion.id}`}
-                photos={currentPhotos}
-                onChange={(updated) => {
-                  setCurrentPhotos(updated);
-                  if (validationNotice) setValidationNotice(null);
-                }}
-                onDeletePersistedPhoto={handleDeletePersistedPhoto}
-                disabled={!isInterviewOpen || Boolean(adaptiveQuestion)}
-                label=" Puedes Cargar Fotografías o Imágenes Relacionadas (Opcional)"
-              />
+              {/* 4. Alternative to answer by typing (Collapsible / Expandable) */}
+              {!isTextareaExpanded && !currentAnswerText.trim() ? (
+                <div className="text-center pt-0.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsTextareaExpanded(true);
+                      setTimeout(() => answerTextareaRef.current?.focus(), 100);
+                    }}
+                    className="inline-flex items-center gap-2 px-3.5 py-1.5 text-xs text-stone-600 hover:text-amber-900 hover:bg-stone-100 rounded-lg transition font-medium cursor-pointer"
+                  >
+                    <Edit3 className="w-3.5 h-3.5 text-stone-400" />
+                    <span>O si lo prefieres, escribe tu respuesta con el teclado</span>
+                  </button>
+                </div>
+              ) : (
+                <div className="bg-white p-3.5 sm:p-4 rounded-xl border border-stone-200/90 shadow-2xs space-y-2 transition-all">
+                  <div className="flex items-center justify-between text-xs text-stone-600">
+                    <span className="font-semibold text-stone-800 flex items-center gap-1.5">
+                      <Edit3 className="w-3.5 h-3.5 text-amber-700" />
+                      <span>Tu recuerdo o testimonio personal:</span>
+                    </span>
+                    {!currentAnswerText.trim() && (
+                      <button
+                        type="button"
+                        onClick={() => setIsTextareaExpanded(false)}
+                        className="text-[11px] text-stone-400 hover:text-stone-600 cursor-pointer"
+                      >
+                        Ocultar teclado
+                      </button>
+                    )}
+                  </div>
+                  <textarea
+                    ref={answerTextareaRef}
+                    rows={4}
+                    disabled={!isInterviewOpen || Boolean(adaptiveQuestion)}
+                    placeholder={
+                      isInterviewOpen
+                        ? 'Escribe aquí con tus propias palabras lo que venga a tu memoria...'
+                        : 'La entrevista no está abierta para nuevas respuestas.'
+                    }
+                    value={currentAnswerText}
+                    onChange={(e) => setCurrentAnswerText(e.target.value)}
+                    className="w-full p-3 border border-stone-300 rounded-xl text-stone-900 text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-amber-200 focus:border-amber-600 leading-relaxed font-sans disabled:bg-stone-50"
+                  />
+                </div>
+              )}
 
-              {/* 4. Saved voice audios with transcriptions placed at the end below photos */}
+              {/* 5. Compact Options for Attaching Photos and Additional Memories */}
+              <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setShowPhotoSection(!showPhotoSection)}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition cursor-pointer ${
+                    showPhotoSection || currentPhotos.length > 0
+                      ? 'bg-amber-50 text-amber-900 border-amber-300 shadow-2xs'
+                      : 'bg-white text-stone-700 border-stone-300 hover:bg-stone-50'
+                  }`}
+                >
+                  <Camera className="w-3.5 h-3.5 text-amber-700" />
+                  <span>
+                    {currentPhotos.length > 0
+                      ? `Fotografías adjuntas (${currentPhotos.length})`
+                      : 'Añadir fotografía'}
+                  </span>
+                </button>
+
+                {sessionData.allowAdditionalMemories && isInterviewOpen && !isExpired && (
+                  <button
+                    type="button"
+                    onClick={() => setShowAdditionalMemoryModal(true)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-white text-stone-700 border border-stone-300 hover:bg-stone-50 transition cursor-pointer"
+                  >
+                    <PlusCircle className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>Añadir información adicional</span>
+                  </button>
+                )}
+              </div>
+
+              {/* Photo section uploader (toggled or if photos already attached) */}
+              {(showPhotoSection || currentPhotos.length > 0) && (
+                <div className="bg-white p-3.5 rounded-xl border border-stone-200/90 shadow-2xs">
+                  <QuestionPhotoUploader
+                    key={`photo_${currentQuestion.id}`}
+                    photos={currentPhotos}
+                    onChange={(updated) => {
+                      setCurrentPhotos(updated);
+                      if (validationNotice) setValidationNotice(null);
+                    }}
+                    onDeletePersistedPhoto={handleDeletePersistedPhoto}
+                    disabled={!isInterviewOpen || Boolean(adaptiveQuestion)}
+                    compact={true}
+                    label="Fotografías o Recuerdos Visuales (Opcional)"
+                  />
+                </div>
+              )}
+
+              {/* Saved voice audios with transcriptions */}
               {currentAudios && currentAudios.length > 0 && (
                 <SavedVoiceAudiosList
                   key={`audio_${currentQuestion.id}`}
@@ -1786,57 +1967,69 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                 </div>
               )}
 
-              {/* Action buttons for Base Question (hidden while answering an autonomous follow-up) */}
+              {/* 6. FIXED BOTTOM ACTION BAR (Omitir y continuar secondary, Guardar y continuar primary) */}
               {isInterviewOpen && !adaptiveQuestion && (
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-2">
-                  <button
-                    type="button"
-                    onClick={() => handleSaveAnswer(true, 'no')}
-                    disabled={savingAnswer}
-                    className="px-4 py-2 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-lg text-xs font-semibold transition"
-                    title="Esta acción te permite avanzar a la siguiente pregunta respetando tu ritmo y sin forzar el recuerdo"
-                  >
-                    «Omitir y continuar»
-                  </button>
-
-                  <div className="flex items-center space-x-2">
+                <div className="fixed bottom-0 inset-x-0 z-30 bg-white/95 backdrop-blur-md border-t border-stone-200/90 shadow-[0_-4px_20px_rgba(0,0,0,0.06)] px-3 sm:px-4 py-2.5 sm:py-3">
+                  <div className="max-w-2xl mx-auto flex items-center justify-between gap-2 sm:gap-4">
+                    {/* Secondary Action: Omitir y continuar */}
                     <button
                       type="button"
-                      aria-label="Pregunta anterior"
-                      disabled={currentIndex === 0}
-                      onClick={() => {
-                        const prevItem = flowSequence[Math.max(0, currentIndex - 1)];
-                        if (prevItem) setCurrentQuestionId(prevItem.question.id);
-                      }}
-                      className="p-2 border border-stone-300 text-stone-600 rounded-lg hover:bg-stone-50 disabled:opacity-40"
+                      onClick={() => handleSaveAnswer(true, 'no')}
+                      disabled={savingAnswer}
+                      title="Esta acción te permite avanzar a la siguiente pregunta respetando tu ritmo y sin forzar el recuerdo"
+                      className="px-3.5 sm:px-4 py-2.5 rounded-xl border border-stone-300 text-stone-700 hover:bg-stone-100 font-semibold text-xs sm:text-sm transition cursor-pointer disabled:opacity-40"
                     >
-                      <ChevronLeft className="w-4 h-4" />
+                      « Omitir y continuar
                     </button>
 
+                    {/* Step Navigation Arrows */}
+                    <div className="flex items-center gap-1 text-stone-500">
+                      <button
+                        type="button"
+                        aria-label="Pregunta anterior"
+                        disabled={currentIndex === 0}
+                        onClick={() => {
+                          const prevItem = flowSequence[Math.max(0, currentIndex - 1)];
+                          if (prevItem) setCurrentQuestionId(prevItem.question.id);
+                        }}
+                        className="p-2 border border-stone-200 text-stone-600 rounded-lg hover:bg-stone-100 disabled:opacity-30 transition cursor-pointer"
+                      >
+                        <ChevronLeft className="w-4 h-4" />
+                      </button>
+
+                      <span
+                        className="text-xs font-semibold text-stone-600 px-1.5"
+                        title={`Avance de tu historia: ${progressPercent}%`}
+                      >
+                        {progressPercent}%
+                      </span>
+
+                      <button
+                        type="button"
+                        aria-label="Siguiente pregunta"
+                        onClick={() => {
+                          if (currentIndex < flowSequence.length - 1) {
+                            const nextItem = flowSequence[currentIndex + 1];
+                            if (nextItem) setCurrentQuestionId(nextItem.question.id);
+                          } else {
+                            setShowCompletionScreen(true);
+                          }
+                        }}
+                        className="p-2 border border-stone-200 text-stone-600 rounded-lg hover:bg-stone-100 transition cursor-pointer"
+                      >
+                        <ChevronRight className="w-4 h-4" />
+                      </button>
+                    </div>
+
+                    {/* Primary Action: Guardar y Continuar (Featured ForeverYou styling) */}
                     <button
                       type="button"
                       onClick={() => handleSaveAnswer(false)}
                       disabled={savingAnswer}
-                      className="inline-flex items-center space-x-2 px-5 py-2.5 bg-amber-700 hover:bg-amber-800 text-white rounded-lg text-xs font-semibold shadow-sm transition disabled:opacity-50"
+                      className="inline-flex items-center gap-1.5 sm:gap-2 px-5 sm:px-6 py-2.5 sm:py-3 bg-gradient-to-r from-amber-700 via-amber-800 to-amber-900 hover:from-amber-800 hover:to-amber-950 text-white rounded-xl text-xs sm:text-sm font-bold shadow-md hover:shadow-lg transition cursor-pointer disabled:opacity-50"
                     >
                       <Save className="w-4 h-4" />
-                      <span>{savingAnswer ? 'Analizando y Guardando...' : 'Guardar y Continuar'}</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      aria-label="Siguiente pregunta"
-                      onClick={() => {
-                        if (currentIndex < flowSequence.length - 1) {
-                          const nextItem = flowSequence[currentIndex + 1];
-                          if (nextItem) setCurrentQuestionId(nextItem.question.id);
-                        } else {
-                          setShowCompletionScreen(true);
-                        }
-                      }}
-                      className="p-2 border border-stone-300 text-stone-600 rounded-lg hover:bg-stone-50"
-                    >
-                      <ChevronRight className="w-4 h-4" />
+                      <span>{savingAnswer ? 'Guardando...' : 'Guardar y Continuar »'}</span>
                     </button>
                   </div>
                 </div>
@@ -1947,7 +2140,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                   </div>
                 </div>
               )}
-            </div>
+            </main>
           ) : (
             <div className="bg-white p-8 rounded-xl text-center text-stone-500">
               No hay preguntas configuradas.
@@ -1958,20 +2151,46 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
 
       {/* Tab: History and Editing */}
       {activeTab === 'history' && (
-        <div className="space-y-4">
+        <div className="max-w-4xl mx-auto w-full px-4 pt-4 pb-12 space-y-4">
+          {interview.userDeclaredComplete && (
+            <div className="p-4 bg-amber-50 border border-amber-200 rounded-xl text-amber-950 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-start space-x-2.5">
+                <Lock className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                <div>
+                  <span className="font-bold block text-stone-900">
+                    Respuestas en modo de solo lectura (Entrevista cerrada)
+                  </span>
+                  <p className="text-stone-600 mt-0.5">
+                    Has confirmado el cierre de tu historia. Puedes consultar todas tus respuestas y fotografías, pero no es posible añadir ni modificar respuestas.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setActiveTab('interview')}
+                className="inline-flex items-center space-x-1.5 px-3.5 py-2 bg-amber-800 hover:bg-amber-900 text-white rounded-lg text-xs font-semibold transition shrink-0 self-start sm:self-center"
+              >
+                <BookOpen className="w-3.5 h-3.5" />
+                <span>Volver a Mi Libro &amp; Maquetación</span>
+              </button>
+            </div>
+          )}
+
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
             <div>
               <h3 className="font-serif text-lg font-bold text-stone-900">
                 Tus Respuestas, Profundizaciones e Información Adicional
               </h3>
               <p className="text-xs text-stone-500">
-                {sessionData.allowAnswerEditing
+                {interview.userDeclaredComplete
+                  ? 'Consulta de tus respuestas registradas. La adición o modificación de respuestas está bloqueada tras el cierre.'
+                  : sessionData.allowAnswerEditing
                   ? 'Puedes revisar y editar cualquiera de tus aportes. Las ediciones no incrementan el contador de preguntas.'
                   : 'La edición de respuestas anteriores está deshabilitada en la configuración.'}
               </p>
             </div>
 
-            {!isExpired && (
+            {isInterviewOpen && !isExpired && (
               <button
                 type="button"
                 onClick={() => setShowAdditionalMemoryModal(true)}
@@ -2133,21 +2352,39 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                         </div>
                       )}
 
-                      {sessionData.allowAnswerEditing && isInterviewOpen && !ans.notRecalled && (
-                        <div className="flex justify-end pt-1">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setEditingAnswerId(ans.id);
-                              setEditMemoryText(ans.answerText);
-                              setEditPhotos(mapAttachmentsToDraftItems(ans.photos));
-                              setValidationNotice(null);
-                            }}
-                            className="inline-flex items-center space-x-1 text-xs text-stone-500 hover:text-amber-800"
-                          >
-                            <Edit3 className="w-3.5 h-3.5" />
-                            <span>Editar respuesta o fotografías</span>
-                          </button>
+                      {sessionData.allowAnswerEditing && isInterviewOpen && (
+                        <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-stone-100">
+                          {flowSequence.some((item) => item.question.id === ans.questionId) && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setCurrentQuestionId(ans.questionId);
+                                setShowCompletionScreen(false);
+                                setActiveTab('interview');
+                                window.scrollTo({ top: 0, behavior: 'smooth' });
+                              }}
+                              className="inline-flex items-center space-x-1.5 px-3 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-lg text-xs font-semibold transition"
+                            >
+                              <Edit3 className="w-3.5 h-3.5 text-amber-700" />
+                              <span>Editar en el cuestionario paso a paso</span>
+                            </button>
+                          )}
+
+                          {!ans.notRecalled && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditingAnswerId(ans.id);
+                                setEditMemoryText(ans.answerText);
+                                setEditPhotos(mapAttachmentsToDraftItems(ans.photos));
+                                setValidationNotice(null);
+                              }}
+                              className="inline-flex items-center space-x-1 px-3 py-1.5 text-xs text-stone-600 hover:text-stone-900 hover:bg-stone-100 rounded-lg transition"
+                            >
+                              <Edit3 className="w-3 h-3 text-stone-400" />
+                              <span>Edición rápida aquí</span>
+                            </button>
+                          )}
                         </div>
                       )}
                     </div>
@@ -2262,10 +2499,10 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
               <Check className="w-5 h-5" />
             </div>
             <h3 className="font-serif text-lg font-bold text-stone-900 text-center">
-              ¿Deseas dar por terminada tu historia?
+              ¿Deseas dar por terminada tu historia y pasar a la maquetación de tu libro?
             </h3>
             <p className="text-xs text-stone-600 leading-relaxed text-center">
-              Esta acción marcará el instrumento como completado. Aun después de finalizar, podrás seguir agregando recuerdos libres mediante el botón «Añadir Información Adicional».
+              Al confirmar el cierre de tu entrevista, tus respuestas quedarán guardadas en <strong>modo de solo lectura</strong> (podrás verlas en cualquier momento, pero ya no añadir ni modificar respuestas) y el sistema abrirá las <strong>opciones de maquetación editorial</strong> para generar y descargar tu libro en PDF.
             </p>
 
             <div>
@@ -2279,6 +2516,9 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                 onChange={(e) => setFinishReason(e.target.value)}
                 className="w-full p-2.5 border border-stone-300 rounded-lg text-xs text-stone-900"
               />
+              <p className="text-[10px] text-stone-400 mt-1">
+                Si escribes una dedicatoria aquí, se mostrará de forma especial en la página final de cierre de tu libro junto al sello ForeverYou.
+              </p>
             </div>
 
             <div className="flex space-x-2 pt-2">
@@ -2295,7 +2535,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                 disabled={finishing}
                 className="w-1/2 py-2 bg-amber-700 hover:bg-amber-800 text-white rounded-lg text-xs font-semibold shadow-sm"
               >
-                {finishing ? 'Guardando...' : 'Confirmar Cierre'}
+                {finishing ? 'Guardando...' : 'Confirmar Cierre y Maquetar'}
               </button>
             </div>
           </div>

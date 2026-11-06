@@ -2,8 +2,8 @@ import React from 'react';
 import { BookOpen, ShieldCheck, LogOut, Sparkles } from 'lucide-react';
 
 interface NavbarProps {
-  currentView: 'admin' | 'participant' | 'conoceme';
-  onSelectView: (view: 'admin' | 'participant' | 'conoceme') => void;
+  currentView: 'admin' | 'participant' | 'conoceme' | 'demo';
+  onSelectView: (view: 'admin' | 'participant' | 'conoceme' | 'demo') => void;
   adminEmail: string | null;
   isAuthorizedAdmin: boolean;
   onLogout: () => void;
@@ -42,43 +42,58 @@ export const Navbar: React.FC<NavbarProps> = ({
             </div>
           </div>
 
-          {/* Navigation Tabs - ONLY visible when user is an authorized administrator */}
-          {isAuthorizedAdmin && (
-            <nav className="flex items-center space-x-2">
-              <button
-                onClick={() => onSelectView('admin')}
-                className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs sm:text-sm font-medium transition-colors cursor-pointer ${
-                  currentView === 'admin'
-                    ? 'bg-amber-800/80 text-amber-100 border border-amber-600/40 shadow-xs'
-                    : 'text-stone-300 hover:text-white hover:bg-stone-800'
-                }`}
-              >
-                <span>Panel Administrador</span>
-              </button>
-              <button
-                onClick={() => onSelectView('participant')}
-                className={`px-3 py-1.5 rounded-md text-xs sm:text-sm font-medium transition-colors cursor-pointer ${
-                  currentView === 'participant'
-                    ? 'bg-amber-800/80 text-amber-100 border border-amber-600/40 shadow-xs'
-                    : 'text-stone-300 hover:text-white hover:bg-stone-800'
-                }`}
-              >
-                Portal del Participante
-              </button>
-              <button
-                onClick={() => onSelectView('conoceme')}
-                className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs sm:text-sm font-medium transition-colors cursor-pointer ${
-                  currentView === 'conoceme'
-                    ? 'bg-amber-800/80 text-amber-100 border border-amber-600/40 shadow-xs'
-                    : 'text-amber-300 hover:text-amber-100 hover:bg-stone-800'
-                }`}
-                title="Ir a la sección comercial Conóceme (/conoceme)"
-              >
-                <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-                <span>Conóceme</span>
-              </button>
-            </nav>
-          )}
+          {/* Navigation Tabs */}
+          <nav className="flex items-center space-x-2">
+            {isAuthorizedAdmin && (
+              <>
+                <button
+                  onClick={() => onSelectView('admin')}
+                  className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs sm:text-sm font-medium transition-colors cursor-pointer ${
+                    currentView === 'admin'
+                      ? 'bg-amber-800/80 text-amber-100 border border-amber-600/40 shadow-xs'
+                      : 'text-stone-300 hover:text-white hover:bg-stone-800'
+                  }`}
+                >
+                  <span>Panel Administrador</span>
+                </button>
+                <button
+                  onClick={() => onSelectView('participant')}
+                  className={`px-3 py-1.5 rounded-md text-xs sm:text-sm font-medium transition-colors cursor-pointer ${
+                    currentView === 'participant'
+                      ? 'bg-amber-800/80 text-amber-100 border border-amber-600/40 shadow-xs'
+                      : 'text-stone-300 hover:text-white hover:bg-stone-800'
+                  }`}
+                >
+                  Portal del Participante
+                </button>
+                <button
+                  onClick={() => onSelectView('conoceme')}
+                  className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs sm:text-sm font-medium transition-colors cursor-pointer ${
+                    currentView === 'conoceme'
+                      ? 'bg-amber-800/80 text-amber-100 border border-amber-600/40 shadow-xs'
+                      : 'text-amber-300 hover:text-amber-100 hover:bg-stone-800'
+                  }`}
+                  title="Ir a la sección comercial Conóceme (/conoceme)"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Conóceme</span>
+                </button>
+              </>
+            )}
+
+            <button
+              onClick={() => onSelectView('demo')}
+              className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs sm:text-sm font-medium transition-colors cursor-pointer ${
+                currentView === 'demo'
+                  ? 'bg-amber-700 text-amber-50 border border-amber-500/60 shadow-xs'
+                  : 'text-amber-200 hover:text-white bg-stone-800/70 hover:bg-stone-800 border border-amber-700/40'
+              }`}
+              title="Prueba gratuita — Mi historia en 8 preguntas (/demo)"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+              <span>Prueba gratuita</span>
+            </button>
+          </nav>
 
           {/* Actions */}
           <div className="flex items-center space-x-2 sm:space-x-3">

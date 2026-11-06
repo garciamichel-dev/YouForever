@@ -9,8 +9,9 @@ export interface StoredParticipantSession {
 
 export interface StoredParticipantProgress {
   currentQuestionId: string | null;
-  activeTab: 'interview' | 'history';
+  activeTab: 'interview' | 'history' | 'book';
   showCompletionScreen: boolean;
+  reopenedAt?: string | null;
   updatedAt: string;
 }
 
@@ -94,6 +95,15 @@ export function getParticipantProgress(
     return parsed;
   } catch (_err) {
     return null;
+  }
+}
+
+export function clearParticipantProgress(participantId: string): void {
+  if (typeof window === 'undefined' || !participantId) return;
+  try {
+    window.localStorage.removeItem(`${PROGRESS_KEY_PREFIX}${participantId}`);
+  } catch (_err) {
+    // Ignore localStorage errors
   }
 }
 

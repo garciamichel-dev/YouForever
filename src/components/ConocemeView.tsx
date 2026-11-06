@@ -37,6 +37,7 @@ import {
 
 interface ConocemeViewProps {
   onNavigateToPortal?: () => void;
+  onNavigateToDemo?: () => void;
   onBackToAdmin?: () => void;
   onOpenPrivacyNotice?: () => void;
   onOpenFaq?: () => void;
@@ -44,6 +45,7 @@ interface ConocemeViewProps {
 
 export const ConocemeView: React.FC<ConocemeViewProps> = ({
   onNavigateToPortal,
+  onNavigateToDemo,
   onBackToAdmin,
 }) => {
   // 1. SIMULADOR DE ENTREVISTA (AI Chat Interface State — 100% In-Memory, Zero Firestore Writes)
@@ -267,6 +269,19 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
                 Panel Administrador
               </button>
             )}
+            <a
+              href="/demo"
+              onClick={(e) => {
+                if (onNavigateToDemo) {
+                  e.preventDefault();
+                  onNavigateToDemo();
+                }
+              }}
+              className="px-4 py-2 text-xs font-semibold text-amber-900 bg-amber-100/80 hover:bg-amber-200/80 border border-amber-300/70 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer inline-flex items-center gap-1.5"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-amber-700" />
+              <span>Prueba gratuita</span>
+            </a>
             <button
               type="button"
               onClick={() => scrollToSection('contacto-regalo')}
@@ -322,6 +337,32 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
                   >
                     Probar Simulador de Entrevista
                   </button>
+                </div>
+
+                {/* Prueba gratuita — Mi historia en 10 preguntas Card */}
+                <div className="rounded-xl bg-[#F3EFEA] border border-amber-800/20 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div className="space-y-1">
+                    <div className="inline-flex items-center gap-1.5 text-xs font-semibold text-amber-900">
+                      <Sparkles className="w-3.5 h-3.5 text-amber-700" />
+                      <span>Prueba gratuita</span>
+                    </div>
+                    <p className="text-xs sm:text-sm text-stone-700">
+                      Descubre cómo tus recuerdos pueden convertirse en un libro inolvidable
+                    </p>
+                  </div>
+                  <a
+                    href="/demo"
+                    onClick={(e) => {
+                      if (onNavigateToDemo) {
+                        e.preventDefault();
+                        onNavigateToDemo();
+                      }
+                    }}
+                    className="px-4 py-2.5 bg-stone-900 hover:bg-stone-800 text-amber-50 text-xs font-semibold rounded-lg transition-colors inline-flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    <span>Crear mi historia gratis</span>
+                    <ArrowRight className="w-3.5 h-3.5" />
+                  </a>
                 </div>
 
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-stone-600">

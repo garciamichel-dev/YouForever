@@ -26,8 +26,24 @@ import {
   Archive,
   Trash2,
   AlertTriangle,
+  Download,
+  Settings,
 } from 'lucide-react';
-import { InterviewRecord, ParticipantRecord, SufficiencyStatus } from '../logic/interviewRules.ts';
+import {
+  InterviewRecord,
+  ParticipantRecord,
+  SufficiencyStatus,
+  computeLayoutEditQuotaStatus,
+} from '../logic/interviewRules.ts';
+import {
+  ParticipantBookVersionRecord,
+  composeBookPages,
+  DEMO_COVER_DESIGNS,
+  DEMO_INTERIOR_STYLES,
+  DEMO_BOOK_FORMATS,
+  DEMO_NARRATIVE_STYLES,
+} from '../logic/demoStoryRules.ts';
+import { generateRealDemoBookPdf } from '../utils/demoPdfGenerator.ts';
 import { apiFetch } from '../utils/apiClient.ts';
 
 
@@ -36,6 +52,8 @@ interface EnrichedInterview extends InterviewRecord {
   answersCount: number;
   manuscriptsCount?: number;
   latestManuscriptVersion?: number;
+  bookVersions?: ParticipantBookVersionRecord[];
+  bookVersionsCount?: number;
 }
 
 interface InterviewsPanelProps {
@@ -89,10 +107,22 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
     Array<{ name: string; relationship: string; role: 'primary' | 'contributor'; email?: string }>
   >([{ name: '', relationship: 'Titular', role: 'primary', email: '' }]);
 
-  // Extension & Reopen forms
+  // Extension & Reopen & Layout Quota forms
   const [extendDays, setExtendDays] = useState<number>(7);
   const [reopenDays, setReopenDays] = useState<number>(14);
-  const [reopenReason, setReopenReason] = useState<string>('El participante solicitó ampliar sus testimonios');
+  const [reopenReason, setReopenReason] = useState<string>('El participante solicitó ampliar sus testimonios y opciones de edición de libro');
+  const [reopenLayoutEdits, setReopenLayoutEdits] = useState<number>(1);
+  const [bookStudioAdminTarget, setBookStudioAdminTarget] = useState<EnrichedInterview | null>(null);
+  const [quotaRemainingInput, setQuotaRemainingInput] = useState<number>(1);
+  const [savingQuota, setSavingQuota] = useState<boolean>(false);
+  const [downloadingPdfVersionId, setDownloadingPdfVersionId] = useState<string | null>(null);
+  const [seedingStories, setSeedingStories] = useState<boolean>(false);
+  const [versionToDelete, setVersionToDelete] = useState<{
+    version: ParticipantBookVersionRecord;
+    interview: EnrichedInterview;
+  } | null>(null);
+  const [restoreQuotaOnDelete, setRestoreQuotaOnDelete] = useState<boolean>(false);
+  const [deletingVersion, setDeletingVersion] = useState<boolean>(false);
 
   const fetchInterviews = async () => {
     try {
@@ -113,24 +143,52 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
         let finalList = resInterviews.data;
         try {
           const cachedRaw = localStorage.getItem('foreveryou_interviews_cache');
-          if (cachedRaw) {
-            const cachedList: EnrichedInterview[] = JSON.parse(cachedRaw);
-            if (Array.isArray(cachedList) && cachedList.length > 0) {
-              const serverIds = new Set(finalList.map((i) => i.id));
-              const missingOnServer = cachedList.filter((c) => c && c.id && !serverIds.has(c.id));
-              if (missingOnServer.length > 0) {
-                const syncRes = await apiFetch<EnrichedInterview[]>('/api/interviews/restore-cache', {
-                  method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/json',
-                    'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
-                  },
-                  body: JSON.stringify({ interviews: missingOnServer }),
-                });
-                if (syncRes.ok && syncRes.data) {
-                  finalList = syncRes.data;
+          const cachedBvRaw = localStorage.getItem('foreveryou_book_versions_cache');
+          const cachedList: EnrichedInterview[] = cachedRaw ? JSON.parse(cachedRaw) : [];
+          const cachedBvList: ParticipantBookVersionRecord[] = cachedBvRaw ? JSON.parse(cachedBvRaw) : [];
+
+          const serverMap = new Map(finalList.map((i) => [i.id, i]));
+          const serverBvIds = new Set(
+            finalList.flatMap((i) => (i.bookVersions || []).map((bv) => bv.id))
+          );
+
+          const interviewsToSync = Array.isArray(cachedList)
+            ? cachedList.filter((c) => {
+                if (!c || !c.id) return false;
+                const s = serverMap.get(c.id);
+                if (!s) return true;
+                if (c.userDeclaredComplete && !s.userDeclaredComplete) {
+                  const serverReopenedTime = s.reopenedAt ? new Date(s.reopenedAt).getTime() : 0;
+                  const cachedClosedTime = c.closedAt ? new Date(c.closedAt).getTime() : 0;
+                  if (s.status === 'open' && (serverReopenedTime >= cachedClosedTime || !s.closedAt)) {
+                    return false;
+                  }
+                  return true;
                 }
-              }
+                if ((c.bookGeneratedCount ?? 0) > (s.bookGeneratedCount ?? 0)) return true;
+                if ((c.bookVersions?.length ?? 0) > (s.bookVersions?.length ?? 0)) return true;
+                return false;
+              })
+            : [];
+
+          const bookVersionsToSync = Array.isArray(cachedBvList)
+            ? cachedBvList.filter((bv) => bv && bv.id && !serverBvIds.has(bv.id))
+            : [];
+
+          if (interviewsToSync.length > 0 || bookVersionsToSync.length > 0) {
+            const syncRes = await apiFetch<EnrichedInterview[]>('/api/interviews/restore-cache', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
+              },
+              body: JSON.stringify({
+                interviews: interviewsToSync,
+                bookVersions: bookVersionsToSync,
+              }),
+            });
+            if (syncRes.ok && syncRes.data) {
+              finalList = syncRes.data;
             }
           }
           localStorage.setItem('foreveryou_interviews_cache', JSON.stringify(finalList));
@@ -276,17 +334,260 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
           'Content-Type': 'application/json',
           'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
         },
-        body: JSON.stringify({ newDays: reopenDays, reason: reopenReason }),
+        body: JSON.stringify({
+          newDays: reopenDays,
+          reason: reopenReason,
+          additionalLayoutEdits: reopenLayoutEdits,
+        }),
       });
       const data = await res.json();
       if (data.success) {
+        if (data.data) {
+          try {
+            const raw = localStorage.getItem('foreveryou_interviews_cache');
+            if (raw) {
+              const list = JSON.parse(raw);
+              if (Array.isArray(list)) {
+                const nextList = list.map((item: any) =>
+                  item && item.id === data.data.id ? { ...item, ...data.data } : item
+                );
+                localStorage.setItem('foreveryou_interviews_cache', JSON.stringify(nextList));
+              }
+            }
+          } catch (_e) {}
+        }
         setShowReopenModal(null);
         fetchInterviews();
-        setNoticeMessage(`Entrevista reabierta por ${reopenDays} días naturales.`);
+        setNoticeMessage(
+          `Entrevista y cuestionario reabiertos por ${reopenDays} días naturales con ${reopenLayoutEdits} opción(es) de edición de maquetación.`
+        );
         setTimeout(() => setNoticeMessage(null), 4000);
       }
     } catch (err) {
       console.error(err);
+    }
+  };
+
+  const handleSaveLayoutQuota = async () => {
+    if (!bookStudioAdminTarget) return;
+    try {
+      setSavingQuota(true);
+      const res = await fetch(`/api/interviews/${bookStudioAdminTarget.id}/layout-quota`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
+        },
+        body: JSON.stringify({
+          remainingEdits: Math.max(0, quotaRemainingInput),
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        await fetchInterviews();
+        setBookStudioAdminTarget((prev) =>
+          prev
+            ? {
+                ...prev,
+                ...data.data,
+                bookVersions: data.data?.bookVersions || prev.bookVersions || [],
+              }
+            : null
+        );
+        setNoticeMessage(
+          `Cuota de edición de maquetación actualizada: ${quotaRemainingInput} modificación(es) permitida(s) para el entrevistado.`
+        );
+        setTimeout(() => setNoticeMessage(null), 4000);
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setSavingQuota(false);
+    }
+  };
+
+  const handleOpenBookStudioModal = async (inv: EnrichedInterview) => {
+    const qStatus = computeLayoutEditQuotaStatus(inv);
+    setQuotaRemainingInput(qStatus.remainingEdits);
+    setBookStudioAdminTarget(inv);
+
+    try {
+      const res = await fetch(`/api/interviews/${inv.id}/book-versions`, {
+        headers: {
+          'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
+        },
+      });
+      const data = await res.json();
+      if (data.success && Array.isArray(data.data)) {
+        const fetchedVersions: ParticipantBookVersionRecord[] = data.data;
+        setBookStudioAdminTarget((prev) =>
+          prev && prev.id === inv.id
+            ? {
+                ...prev,
+                bookVersions: fetchedVersions,
+                bookVersionsCount: fetchedVersions.length,
+              }
+            : prev
+        );
+        setInterviews((prevList) =>
+          prevList.map((item) =>
+            item.id === inv.id
+              ? {
+                  ...item,
+                  bookVersions: fetchedVersions,
+                  bookVersionsCount: fetchedVersions.length,
+                }
+              : item
+          )
+        );
+      }
+    } catch (_err) {
+      // Ignore network errors; fallback to inv.bookVersions
+    }
+  };
+
+  const handleDownloadParticipantVersionPdf = async (
+    inv: EnrichedInterview,
+    ver: ParticipantBookVersionRecord
+  ) => {
+    try {
+      setDownloadingPdfVersionId(ver.id);
+      const composed = composeBookPages({
+        manuscript: ver.manuscript,
+        editorialConfig: ver.editorialConfig,
+        coverPhoto: ver.coverPhoto || null,
+        chapterPhotos: ver.chapterPhotos || {},
+        customClosingPageText: ver.closingPageText || inv.participantClosingText || undefined,
+        maxContentPages: 60,
+      });
+
+      const { blobUrl } = generateRealDemoBookPdf({
+        composed,
+        profile: {
+          mode: ver.manuscript.mode,
+          fullName: ver.authors || ver.participantName || inv.title,
+          displayName: ver.authors || ver.participantName || inv.title,
+          partner1Name: ver.participantName || '',
+          partner2Name: '',
+          hasAcceptedTemporaryNotice: true,
+        },
+      });
+
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      link.download = ver.fileName || `ForeverYou_${inv.id}_v${ver.versionNumber}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
+    } catch (err) {
+      console.error('Error downloading participant PDF version:', err);
+    } finally {
+      setDownloadingPdfVersionId(null);
+    }
+  };
+
+  const handleSeedTestStories = async () => {
+    try {
+      setSeedingStories(true);
+      const res = await fetch('/api/interviews/seed-test-stories', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
+        },
+      });
+      const data = await res.json();
+      if (data.success) {
+        await fetchInterviews();
+        setNoticeMessage(
+          `¡Éxito! Se sembraron 7 historias completas de prueba con al menos 100 respuestas por cada miembro participante (umbral operativo 100) y listas para maquetación.`
+        );
+        setTimeout(() => setNoticeMessage(null), 7000);
+      } else {
+        setNoticeMessage(data.error || 'Error al sembrar historias de prueba.');
+      }
+    } catch (_err) {
+      setNoticeMessage('Error de conexión al sembrar historias de prueba.');
+    } finally {
+      setSeedingStories(false);
+    }
+  };
+
+  const handleConfirmDeleteVersion = async () => {
+    if (!versionToDelete) return;
+    const { version, interview } = versionToDelete;
+    try {
+      setDeletingVersion(true);
+      const res = await fetch(
+        `/api/participant-book-versions/${encodeURIComponent(version.id)}?restoreQuota=${restoreQuotaOnDelete}`,
+        {
+          method: 'DELETE',
+          headers: {
+            'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
+          },
+        }
+      );
+      const data = await res.json();
+      if (data.success) {
+        if (bookStudioAdminTarget && bookStudioAdminTarget.id === interview.id) {
+          const updatedVersions = (bookStudioAdminTarget.bookVersions || []).filter(
+            (v) => v.id !== version.id
+          );
+          const nextQuotaRemaining = restoreQuotaOnDelete
+            ? quotaRemainingInput + 1
+            : quotaRemainingInput;
+          setQuotaRemainingInput(nextQuotaRemaining);
+          setBookStudioAdminTarget({
+            ...bookStudioAdminTarget,
+            bookVersions: updatedVersions,
+            bookVersionsCount: updatedVersions.length,
+            layoutEditsUsed: restoreQuotaOnDelete
+              ? Math.max(0, (bookStudioAdminTarget.layoutEditsUsed || 1) - 1)
+              : bookStudioAdminTarget.layoutEditsUsed,
+          });
+        }
+
+        setInterviews((prevList) =>
+          prevList.map((item) => {
+            if (item.id !== interview.id) return item;
+            const updatedVersions = (item.bookVersions || []).filter((v) => v.id !== version.id);
+            return {
+              ...item,
+              bookVersions: updatedVersions,
+              bookVersionsCount: updatedVersions.length,
+              layoutEditsUsed: restoreQuotaOnDelete
+                ? Math.max(0, (item.layoutEditsUsed || 1) - 1)
+                : item.layoutEditsUsed,
+            };
+          })
+        );
+
+        try {
+          const cachedRaw = localStorage.getItem('foreveryou_book_versions_cache');
+          if (cachedRaw) {
+            const parsed: ParticipantBookVersionRecord[] = JSON.parse(cachedRaw);
+            const filtered = parsed.filter((v) => v.id !== version.id);
+            localStorage.setItem('foreveryou_book_versions_cache', JSON.stringify(filtered));
+          }
+        } catch (_e) {
+          // ignore
+        }
+
+        setNoticeMessage(
+          `La versión PDF v${version.versionNumber} de «${interview.title}» fue eliminada permanentemente${
+            restoreQuotaOnDelete ? ' y se reintegró 1 intento de edición al participante.' : '.'
+          }`
+        );
+        setTimeout(() => setNoticeMessage(null), 5000);
+        setVersionToDelete(null);
+      } else {
+        setNoticeMessage(data.error || 'Error al eliminar la versión PDF.');
+      }
+    } catch (_err) {
+      setNoticeMessage('Error de red al eliminar la versión PDF.');
+    } finally {
+      setDeletingVersion(false);
     }
   };
 
@@ -533,13 +834,25 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
           </p>
         </div>
 
-        <button
-          onClick={() => setShowCreateModal(true)}
-          className="inline-flex items-center space-x-1.5 px-4 py-2.5 bg-amber-700 hover:bg-amber-800 text-white rounded-lg text-xs font-semibold shadow-sm transition"
-        >
-          <Plus className="w-4 h-4" />
-          <span>Nueva Entrevista</span>
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={handleSeedTestStories}
+            disabled={seedingStories}
+            className="inline-flex items-center space-x-1.5 px-3.5 py-2.5 bg-stone-100 hover:bg-stone-200 border border-stone-300 text-stone-800 rounded-lg text-xs font-semibold shadow-xs transition disabled:opacity-50"
+            title="Carga 3 historias individuales variadas y 4 compartidas (de 2 a 5 participantes) con al menos 100 respuestas por cada miembro y umbral 100"
+          >
+            <Sparkles className="w-4 h-4 text-amber-700" />
+            <span>{seedingStories ? 'Sembrando Historias (100+ c/u)...' : 'Sembrar Historias de Prueba (100+ c/u)'}</span>
+          </button>
+
+          <button
+            onClick={() => setShowCreateModal(true)}
+            className="inline-flex items-center space-x-1.5 px-4 py-2.5 bg-amber-700 hover:bg-amber-800 text-white rounded-lg text-xs font-semibold shadow-sm transition"
+          >
+            <Plus className="w-4 h-4" />
+            <span>Nueva Entrevista</span>
+          </button>
+        </div>
       </div>
 
       {noticeMessage && (
@@ -755,8 +1068,20 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
                       )}
                     </button>
 
+                    {/* Libros PDF Generados por el Entrevistado & Cuota de Edición */}
+                    <button
+                      onClick={() => handleOpenBookStudioModal(inv)}
+                      className="inline-flex items-center space-x-1.5 px-3 py-1.5 bg-amber-800 hover:bg-amber-900 text-white rounded-lg text-xs font-semibold shadow-xs transition"
+                      title="Ver y descargar versiones del libro en PDF generadas por el entrevistado y configurar cuántas veces puede editar la maquetación"
+                    >
+                      <BookOpen className="w-3.5 h-3.5" />
+                      <span>
+                        Libros PDF &amp; Cuota ({inv.bookVersions?.length || inv.bookVersionsCount || 0})
+                      </span>
+                    </button>
+
                     {/* Extend or Reopen */}
-                    {inv.status === 'open' && (
+                    {inv.status === 'open' && !inv.userDeclaredComplete && (
                       <button
                         onClick={() => setShowExtendModal(inv)}
                         className="inline-flex items-center space-x-1 px-2.5 py-1.5 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-lg text-xs font-medium transition"
@@ -766,13 +1091,16 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
                       </button>
                     )}
 
-                    {(inv.status === 'completed' || inv.status === 'expired') && (
+                    {(inv.status === 'completed' || inv.status === 'expired' || inv.userDeclaredComplete) && (
                       <button
-                        onClick={() => setShowReopenModal(inv)}
+                        onClick={() => {
+                          setReopenLayoutEdits(1);
+                          setShowReopenModal(inv);
+                        }}
                         className="inline-flex items-center space-x-1 px-2.5 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-lg text-xs font-medium transition"
                       >
                         <RotateCcw className="w-3.5 h-3.5 text-emerald-600" />
-                        <span>Reabrir</span>
+                        <span>Reabrir Cuestionario y Edición</span>
                       </button>
                     )}
 
@@ -799,7 +1127,7 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
                 </div>
 
                 {/* Progress & Sufficiency Metrics */}
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 py-3 border-b border-stone-100 text-xs">
+                <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 py-3 border-b border-stone-100 text-xs">
                   <div>
                     <span className="text-stone-500 block">Preguntas Completadas:</span>
                     <span className="font-semibold text-stone-800 text-sm">
@@ -820,12 +1148,24 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
                     <span className="font-medium text-stone-800">
                       {inv.userDeclaredComplete ? (
                         <span className="text-blue-700 font-semibold">
-                          Declarada por el participante
+                          Cerrada por el entrevistado (Solo lectura)
                         </span>
                       ) : (
                         <span className="text-stone-400">En curso</span>
                       )}
                     </span>
+                  </div>
+
+                  <div>
+                    <span className="text-stone-500 block">Libro PDF del Entrevistado:</span>
+                    <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
+                      <span className="px-2 py-0.5 rounded bg-amber-50 text-amber-900 border border-amber-200 font-semibold text-[11px]">
+                        {inv.bookVersions?.length || inv.bookVersionsCount || 0} PDF(s) guardados
+                      </span>
+                      <span className="text-[11px] text-stone-600">
+                        • {computeLayoutEditQuotaStatus(inv).remainingEdits} cambio(s) disp.
+                      </span>
+                    </div>
                   </div>
                 </div>
 
@@ -1151,16 +1491,19 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
         </div>
       )}
 
-      {/* Modal: Reopen Interview */}
+      {/* Modal: Reopen Interview & Book Editing */}
       {showReopenModal && (
         <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-white rounded-xl max-w-md w-full p-5 shadow-xl border border-stone-200 text-xs space-y-4">
             <h3 className="font-serif text-base font-bold text-stone-900">
-              Reabrir Entrevista Cerrada o Vencida
+              Reabrir Cuestionario y Opciones de Edición del Libro
             </h3>
             <p className="text-stone-500">
               Entrevista: <strong>{showReopenModal.title}</strong>
             </p>
+            <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-[11px] text-emerald-950 leading-relaxed">
+              Al reabrir, el entrevistado podrá contestar o editar nuevamente su cuestionario y, al confirmar su cierre, volver a generar su libro en PDF. Las versiones de PDF antiguas se mantienen intactas y disponibles para descarga.
+            </div>
 
             <div>
               <label className="block font-semibold text-stone-700 mb-1">
@@ -1174,6 +1517,23 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
                 onChange={(e) => setReopenDays(parseInt(e.target.value) || 1)}
                 className="w-full px-3 py-2 border border-stone-300 rounded-lg text-xs"
               />
+            </div>
+
+            <div>
+              <label className="block font-semibold text-stone-700 mb-1">
+                Opciones de edición de maquetación permitidas para el entrevistado
+              </label>
+              <input
+                type="number"
+                min="0"
+                max="20"
+                value={reopenLayoutEdits}
+                onChange={(e) => setReopenLayoutEdits(Math.max(0, parseInt(e.target.value) || 0))}
+                className="w-full px-3 py-2 border border-stone-300 rounded-lg text-xs"
+              />
+              <p className="text-[10px] text-stone-400 mt-1">
+                Configura cuántas veces podrá el entrevistado editar la maquetación de su libro después de generarlo.
+              </p>
             </div>
 
             <div>
@@ -1203,6 +1563,232 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
                 className="px-4 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg font-semibold"
               >
                 Confirmar Reapertura
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Libros PDF del Entrevistado & Cuota de Edición */}
+      {bookStudioAdminTarget && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-2xl w-full p-6 shadow-2xl border border-stone-200 text-xs space-y-5 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between pb-3 border-b border-stone-200">
+              <div className="flex items-center space-x-2.5">
+                <div className="p-2 bg-amber-100 text-amber-800 rounded-xl">
+                  <BookOpen className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-serif text-base font-bold text-stone-900">
+                    Libros en PDF del Entrevistado &amp; Cuota de Edición
+                  </h3>
+                  <p className="text-[11px] text-stone-500">
+                    Historia: <strong>{bookStudioAdminTarget.title}</strong>
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setBookStudioAdminTarget(null)}
+                className="text-stone-400 hover:text-stone-600 p-1"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Quota Configuration & Reopen Controls */}
+            <div className="p-4 bg-stone-50 rounded-xl border border-stone-200 space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div>
+                  <span className="font-bold text-stone-900 flex items-center space-x-1.5">
+                    <Settings className="w-4 h-4 text-amber-700" />
+                    <span>Configurar Opciones de Edición de Maquetación Permitidas</span>
+                  </span>
+                  <p className="text-[11px] text-stone-600 mt-0.5">
+                    Define cuántas veces adicionales puede el entrevistado modificar la maquetación y generar una nueva versión de su libro en PDF.
+                  </p>
+                </div>
+                <span className="px-2.5 py-1 rounded-full bg-amber-100 text-amber-900 font-bold text-[11px] shrink-0 self-start">
+                  Usadas: {bookStudioAdminTarget.layoutEditsUsed || 0} • Restantes:{' '}
+                  {computeLayoutEditQuotaStatus(bookStudioAdminTarget).remainingEdits}
+                </span>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <div className="flex items-center space-x-2">
+                  <label className="text-stone-700 font-semibold">
+                    Ediciones adicionales disponibles:
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    max="25"
+                    value={quotaRemainingInput}
+                    onChange={(e) =>
+                      setQuotaRemainingInput(Math.max(0, parseInt(e.target.value) || 0))
+                    }
+                    className="w-20 px-2.5 py-1.5 border border-stone-300 rounded-lg text-xs font-bold text-stone-900 bg-white"
+                  />
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleSaveLayoutQuota}
+                  disabled={savingQuota}
+                  className="px-3.5 py-1.5 bg-amber-700 hover:bg-amber-800 text-white rounded-lg font-semibold transition disabled:opacity-50"
+                >
+                  {savingQuota ? 'Guardando...' : 'Actualizar Cuota de Maquetación'}
+                </button>
+
+                {(bookStudioAdminTarget.userDeclaredComplete ||
+                  bookStudioAdminTarget.status === 'completed' ||
+                  bookStudioAdminTarget.status === 'expired') && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const target = bookStudioAdminTarget;
+                      setBookStudioAdminTarget(null);
+                      setReopenLayoutEdits(Math.max(1, quotaRemainingInput));
+                      setShowReopenModal(target);
+                    }}
+                    className="inline-flex items-center space-x-1 px-3 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg font-semibold transition"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>Reabrir Cuestionario y Maquetación</span>
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Historical PDF Versions List */}
+            <div className="space-y-2.5">
+              <div className="flex items-center justify-between">
+                <h4 className="font-serif text-sm font-bold text-stone-900">
+                  Historial de Versiones PDF Generadas ({bookStudioAdminTarget.bookVersions?.length || 0})
+                </h4>
+                <span className="text-[11px] text-stone-500">
+                  Las versiones antiguas se conservan permanentemente
+                </span>
+              </div>
+
+              {!bookStudioAdminTarget.bookVersions ||
+              bookStudioAdminTarget.bookVersions.length === 0 ? (
+                <div className="p-8 bg-stone-50 rounded-xl border border-stone-200 text-center text-stone-500 space-y-1">
+                  <BookOpen className="w-6 h-6 mx-auto text-stone-400 mb-1" />
+                  <p className="font-semibold text-stone-700">
+                    El entrevistado aún no ha generado su libro en PDF.
+                  </p>
+                  <p className="text-[11px]">
+                    Una vez que el entrevistado confirme el cierre de su entrevista y configure su maquetación, todas las versiones generadas aparecerán aquí para descarga.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {bookStudioAdminTarget.bookVersions.map((ver, idx) => {
+                    const narrativeObj = DEMO_NARRATIVE_STYLES.find(
+                      (s) => s.id === ver.narrativeStyle
+                    );
+                    const coverObj = DEMO_COVER_DESIGNS.find(
+                      (c) => c.id === ver.editorialConfig.coverDesignId
+                    );
+                    const interiorObj = DEMO_INTERIOR_STYLES.find(
+                      (s) => s.id === ver.editorialConfig.interiorStyleId
+                    );
+                    const formatObj = DEMO_BOOK_FORMATS.find(
+                      (f) => f.id === ver.editorialConfig.bookFormatId
+                    );
+
+                    return (
+                      <div
+                        key={ver.id}
+                        className="p-3.5 bg-white rounded-xl border border-stone-200 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                      >
+                        <div className="space-y-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="px-2 py-0.5 rounded bg-amber-800 text-white font-bold text-[10px] uppercase">
+                              Versión {ver.versionNumber}
+                            </span>
+                            {idx === 0 && (
+                              <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 border border-emerald-200 font-semibold text-[10px]">
+                                Más reciente
+                              </span>
+                            )}
+                            <span className="font-serif font-bold text-stone-900 text-sm">
+                              {ver.title || ver.manuscript.title}
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-stone-600 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                            <span>
+                              <strong>Estilo:</strong>{' '}
+                              {narrativeObj?.individualTitle || ver.narrativeStyle}
+                            </span>
+                            <span>•</span>
+                            <span>
+                              <strong>Portada:</strong>{' '}
+                              {coverObj?.name || ver.editorialConfig.coverDesignId}
+                            </span>
+                            <span>•</span>
+                            <span>
+                              <strong>Interior:</strong>{' '}
+                              {interiorObj?.name || ver.editorialConfig.interiorStyleId}
+                            </span>
+                            <span>•</span>
+                            <span>
+                              <strong>Formato:</strong>{' '}
+                              {formatObj?.name || ver.editorialConfig.bookFormatId}
+                            </span>
+                          </div>
+                          <div className="text-[10px] text-stone-400">
+                            Generado el {new Date(ver.createdAt).toLocaleString('es-MX')} por{' '}
+                            {ver.participantName}
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2 shrink-0 self-start sm:self-center">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleDownloadParticipantVersionPdf(bookStudioAdminTarget, ver)
+                            }
+                            disabled={downloadingPdfVersionId === ver.id}
+                            className="inline-flex items-center space-x-1.5 px-3.5 py-2 bg-stone-900 hover:bg-stone-800 text-white rounded-lg text-xs font-semibold transition disabled:opacity-50"
+                          >
+                            <Download className="w-3.5 h-3.5 text-amber-400" />
+                            <span>
+                              {downloadingPdfVersionId === ver.id
+                                ? 'Generando PDF...'
+                                : `Descargar PDF (v${ver.versionNumber})`}
+                            </span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setVersionToDelete({
+                                version: ver,
+                                interview: bookStudioAdminTarget,
+                              })
+                            }
+                            className="p-2 text-rose-600 hover:text-rose-800 hover:bg-rose-50 border border-rose-200 rounded-lg transition"
+                            title="Eliminar este libro PDF maquetado permanentemente"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end pt-2 border-t border-stone-200">
+              <button
+                type="button"
+                onClick={() => setBookStudioAdminTarget(null)}
+                className="px-4 py-2 border border-stone-300 text-stone-700 rounded-lg hover:bg-stone-50"
+              >
+                Cerrar
               </button>
             </div>
           </div>
@@ -1348,6 +1934,90 @@ Tus recuerdos y testimonios serán preservados con total fidelidad para nuestra 
                 className="px-4 py-2 border border-stone-300 text-stone-700 rounded-lg hover:bg-stone-50 text-xs"
               >
                 Cerrar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Confirm Delete Participant Book Version PDF */}
+      {versionToDelete && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl max-w-lg w-full p-6 shadow-2xl border-2 border-rose-200">
+            <div className="flex items-center space-x-3 text-rose-600 mb-3">
+              <div className="p-3 bg-rose-100 rounded-xl">
+                <Trash2 className="w-6 h-6 text-rose-600" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-stone-900">
+                  ¿Eliminar versión de libro PDF (v{versionToDelete.version.versionNumber})?
+                </h3>
+                <p className="text-xs text-rose-600 font-semibold">
+                  Alerta: Esta versión se perderá permanentemente
+                </p>
+              </div>
+            </div>
+
+            <p className="text-xs text-stone-600 leading-relaxed mb-3">
+              Estás a punto de eliminar de forma definitiva este libro PDF maquetado. Esta acción es útil para depurar pruebas de maquetación:
+            </p>
+
+            <div className="bg-stone-50 border border-stone-200 rounded-lg p-3.5 mb-4 text-xs space-y-1.5">
+              <div className="font-serif font-bold text-stone-900 text-sm">
+                {versionToDelete.version.title || versionToDelete.interview.title}
+              </div>
+              <div className="text-[11px] text-stone-600">
+                <strong>Archivo:</strong> {versionToDelete.version.fileName || `ForeverYou_${versionToDelete.interview.id}_v${versionToDelete.version.versionNumber}.pdf`}
+              </div>
+              <div className="text-[11px] text-stone-600">
+                <strong>Participante:</strong> {versionToDelete.version.participantName || versionToDelete.interview.title}
+              </div>
+              <div className="text-[10px] text-stone-400">
+                Generado el: {new Date(versionToDelete.version.createdAt).toLocaleString('es-MX')}
+              </div>
+            </div>
+
+            <div className="p-3 bg-rose-50 border border-rose-200 rounded-lg mb-4 text-[11px] text-rose-900 flex items-start space-x-2">
+              <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+              <span>
+                <strong>Atención:</strong> El archivo PDF y su configuración maquetada se eliminarán permanentemente tanto de la base de datos como de la vista del participante.
+              </span>
+            </div>
+
+            <div className="p-3 bg-amber-50/70 border border-amber-200 rounded-lg mb-4">
+              <label className="flex items-start space-x-2.5 cursor-pointer text-xs text-amber-950 font-medium select-none">
+                <input
+                  type="checkbox"
+                  checked={restoreQuotaOnDelete}
+                  onChange={(e) => setRestoreQuotaOnDelete(e.target.checked)}
+                  className="mt-0.5 w-4 h-4 rounded text-amber-700 border-amber-300 focus:ring-amber-500"
+                />
+                <div className="space-y-0.5">
+                  <span className="font-bold text-stone-900">Restablecer 1 intento de edición de maquetación</span>
+                  <p className="text-[11px] text-stone-600">
+                    Si activas esta opción, el entrevistado recuperará 1 oportunidad adicional para volver a maquetar su libro en su portal.
+                  </p>
+                </div>
+              </label>
+            </div>
+
+            <div className="flex justify-center items-center gap-3 pt-3 border-t border-stone-200">
+              <button
+                type="button"
+                onClick={() => setVersionToDelete(null)}
+                disabled={deletingVersion}
+                className="px-4 py-2 border border-stone-300 text-stone-700 rounded-lg hover:bg-stone-50 text-xs font-semibold"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDeleteVersion}
+                disabled={deletingVersion}
+                className="px-4 py-2 bg-rose-700 hover:bg-rose-800 disabled:opacity-50 text-white rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition shadow-sm"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>{deletingVersion ? 'Eliminando...' : 'Sí, eliminar PDF permanentemente'}</span>
               </button>
             </div>
           </div>

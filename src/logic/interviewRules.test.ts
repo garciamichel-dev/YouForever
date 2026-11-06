@@ -63,14 +63,14 @@ test('1. Finalización voluntaria antes del umbral', () => {
     'El participante decidió concluir su testimonio anticipadamente.'
   );
 
-  // Ordinary answers must be rejected when declared complete
+  // Both ordinary answers and additional information ("Añadir Información Adicional") must be rejected once closure is confirmed
   const canSubmit = canSubmitAnswer(result);
   assert.equal(canSubmit.allowed, false);
   assert.match(canSubmit.reason || '', /finalizada voluntariamente/);
 
-  // Additional information ("Añadir Información Adicional") is still allowed while not expired
   const canSubmitAdditional = canSubmitAnswer(result, Date.now(), true);
-  assert.equal(canSubmitAdditional.allowed, true);
+  assert.equal(canSubmitAdditional.allowed, false);
+  assert.match(canSubmitAdditional.reason || '', /solo lectura/);
 });
 
 test('2. Umbral alcanzado con información insuficiente o suficiente', () => {
