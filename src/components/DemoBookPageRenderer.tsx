@@ -8,6 +8,7 @@ import {
   DemoInteriorStyleSpec,
   DemoThematicIllustrationId,
 } from '../logic/demoStoryRules.ts';
+import { ForeverYouInfinitySymbol } from './ForeverYouLogo.tsx';
 
 export const ThematicIllustrationSvg: React.FC<{
   id: DemoThematicIllustrationId;
@@ -197,10 +198,11 @@ export const DemoCoverThumbnailCard: React.FC<{
         </div>
 
         <div
-          className="relative z-10 text-[7px] text-center tracking-wider opacity-80"
+          className="relative z-10 flex items-center justify-center gap-1 text-[7px] text-center tracking-wider opacity-85"
           style={{ color: palette.subtextHex }}
         >
-          ForeverYou
+          <ForeverYouInfinitySymbol color={palette.accentHex} width={13} height={7} />
+          <span>ForeverYou</span>
         </div>
       </div>
 
@@ -317,6 +319,62 @@ export const DemoInteriorThumbnailCard: React.FC<{
   );
 };
 
+function renderOrnamentDivider(
+  ornamentStyle: DemoInteriorStyleSpec['ornamentStyle'],
+  accentHex: string
+): React.ReactNode {
+  if (ornamentStyle === 'minimal_bar') {
+    return (
+      <div className="flex items-center justify-center py-1" aria-hidden="true">
+        <span className="block w-8 h-[2px] rounded-full" style={{ backgroundColor: accentHex }} />
+      </div>
+    );
+  }
+  if (ornamentStyle === 'journal_script') {
+    return (
+      <div className="flex items-center justify-center gap-1.5 py-1" aria-hidden="true">
+        <span className="block w-5 h-[1px] opacity-75" style={{ backgroundColor: accentHex }} />
+        <span className="w-1 h-1 rounded-full" style={{ backgroundColor: accentHex }} />
+        <span className="w-1 h-1 rounded-full" style={{ backgroundColor: accentHex }} />
+        <span className="block w-5 h-[1px] opacity-75" style={{ backgroundColor: accentHex }} />
+      </div>
+    );
+  }
+  if (ornamentStyle === 'botanical_leaf') {
+    return (
+      <div className="flex flex-col items-center justify-center gap-0.5 py-1" aria-hidden="true">
+        <div className="flex items-center gap-1.5">
+          <span className="block w-6 h-[1.5px]" style={{ backgroundColor: accentHex }} />
+          <span className="text-[10px] leading-none" style={{ color: accentHex }}>
+            ❦
+          </span>
+          <span className="block w-6 h-[1.5px]" style={{ backgroundColor: accentHex }} />
+        </div>
+        <span className="block w-8 h-[1px] opacity-70" style={{ backgroundColor: accentHex }} />
+      </div>
+    );
+  }
+  if (ornamentStyle === 'diamond_flourish') {
+    return (
+      <div className="flex items-center justify-center gap-1.5 py-1" aria-hidden="true">
+        <span className="block w-6 h-[1px] opacity-75" style={{ backgroundColor: accentHex }} />
+        <span className="w-1 h-1 rounded-full" style={{ backgroundColor: accentHex }} />
+        <span className="w-1.5 h-1.5 rotate-45" style={{ backgroundColor: accentHex }} />
+        <span className="w-1 h-1 rounded-full" style={{ backgroundColor: accentHex }} />
+        <span className="block w-6 h-[1px] opacity-75" style={{ backgroundColor: accentHex }} />
+      </div>
+    );
+  }
+  // classic_line
+  return (
+    <div className="flex items-center justify-center gap-2 py-1" aria-hidden="true">
+      <span className="block w-7 h-[1px]" style={{ backgroundColor: accentHex }} />
+      <span className="w-1.5 h-1.5 rotate-45" style={{ backgroundColor: accentHex }} />
+      <span className="block w-7 h-[1px]" style={{ backgroundColor: accentHex }} />
+    </div>
+  );
+}
+
 /**
  * Renders any composed page (`cover`, `title_dedication`, `chapter_content`, `closing_mandatory`)
  * faithfully matching the generated PDF document.
@@ -329,7 +387,29 @@ export const DemoComposedPageView: React.FC<{
   const { format, coverDesign, coverPalette, interiorStyle, editorialConfig, coverPhoto } =
     composed;
 
-  const renderPhotoBox = (photo: DemoInMemoryPhoto, heightClass: string) => {
+  // Format-dependent padding and typography scale so A5, 6x9", and Carta look visibly distinct
+  const formatPaddingClass =
+    format.id === 'carta'
+      ? 'p-7 sm:p-10'
+      : format.id === 'a5'
+      ? 'p-4 sm:p-6'
+      : 'p-5 sm:p-7';
+
+  const bodyFontSizeClass =
+    format.id === 'carta'
+      ? 'text-xs sm:text-[13.5px]'
+      : format.id === 'a5'
+      ? 'text-[11px] sm:text-xs'
+      : 'text-xs sm:text-[12.5px]';
+
+  const chapterTitleSizeClass =
+    format.id === 'carta'
+      ? 'text-base sm:text-lg'
+      : format.id === 'a5'
+      ? 'text-xs sm:text-sm'
+      : 'text-sm sm:text-base';
+
+  const renderPhotoBox = (photo: DemoInMemoryPhoto, heightClass: string, borderColorHex: string) => {
     const objectPos =
       photo.focusY === 'top'
         ? 'center top'
@@ -340,7 +420,7 @@ export const DemoComposedPageView: React.FC<{
       <div className={`w-full ${heightClass} flex flex-col items-center justify-center my-2`}>
         <div
           className="relative w-4/5 h-full rounded-lg overflow-hidden border shadow-xs flex items-center justify-center bg-black/5"
-          style={{ borderColor: coverPalette.accentHex }}
+          style={{ borderColor: borderColorHex }}
         >
           <img
             src={photo.objectUrl || photo.dataUrl}
@@ -363,9 +443,15 @@ export const DemoComposedPageView: React.FC<{
 
   // PAGE 1: COVER
   if (page.kind === 'cover') {
+    const hasLeftSpine = coverDesign.id === 'clasica_eterna';
+    const coverPaddingClass = hasLeftSpine
+      ? 'pl-9 sm:pl-11 pr-6 sm:pr-8 py-7 sm:py-9'
+      : 'px-7 sm:px-9 py-7 sm:py-9';
+
     return (
       <div
-        className={`relative w-full overflow-hidden shadow-lg select-none flex flex-col justify-between p-6 sm:p-8 ${className}`}
+        data-testid={`book-page-cover-${format.id}`}
+        className={`relative w-full overflow-hidden shadow-lg select-none flex flex-col justify-between items-center ${coverPaddingClass} ${className}`}
         style={{
           aspectRatio: `${format.widthMm} / ${format.heightMm}`,
           backgroundColor: coverPalette.bgHex,
@@ -377,15 +463,15 @@ export const DemoComposedPageView: React.FC<{
         {coverDesign.id === 'clasica_eterna' && (
           <>
             <div
-              className="absolute inset-y-0 left-0 w-4 sm:w-5 shadow-inner"
+              className="absolute inset-y-0 left-0 w-3.5 sm:w-4 shadow-inner"
               style={{ backgroundColor: coverPalette.secondaryBgHex }}
             />
             <div
-              className="absolute inset-4 sm:inset-5 pointer-events-none"
+              className="absolute top-3.5 bottom-3.5 left-6 right-3.5 sm:top-4 sm:bottom-4 sm:left-7 sm:right-4 pointer-events-none"
               style={{ border: `2px solid ${coverPalette.accentHex}` }}
             />
             <div
-              className="absolute inset-5 sm:inset-6 pointer-events-none"
+              className="absolute top-4.5 bottom-4.5 left-7 right-4.5 sm:top-5 sm:bottom-5 sm:left-8 sm:right-5 pointer-events-none"
               style={{ border: `1px solid ${coverPalette.borderHex}` }}
             />
           </>
@@ -393,7 +479,7 @@ export const DemoComposedPageView: React.FC<{
 
         {coverDesign.id === 'recuerdos_marfil' && (
           <div
-            className="absolute inset-5 sm:inset-6 pointer-events-none"
+            className="absolute inset-4 sm:inset-5 pointer-events-none"
             style={{ border: `1px solid ${coverPalette.borderHex}` }}
           />
         )}
@@ -410,7 +496,7 @@ export const DemoComposedPageView: React.FC<{
 
         {coverDesign.id === 'raices_recuerdos' && (
           <div
-            className="absolute inset-4 sm:inset-5 pointer-events-none"
+            className="absolute inset-3.5 sm:inset-4.5 pointer-events-none"
             style={{ border: `1.5px solid ${coverPalette.borderHex}` }}
           />
         )}
@@ -425,17 +511,23 @@ export const DemoComposedPageView: React.FC<{
           />
         )}
 
-        {/* Header: Protagonist & Title */}
-        <div className="relative z-10 text-center space-y-2 pt-3 px-3">
+        {/* Header: Protagonist & Title symmetrically centered inside frame */}
+        <div className="relative z-10 w-full shrink-0 flex flex-col items-center text-center space-y-1.5 pt-1 px-2">
           <div
-            className="text-[11px] sm:text-xs uppercase tracking-[0.2em] font-semibold"
+            className="w-full text-center text-[9px] sm:text-[10px] uppercase tracking-[0.18em] font-semibold line-clamp-1"
             style={{ color: coverPalette.accentHex }}
           >
             {page.authors}
           </div>
 
           <h2
-            className="text-xl sm:text-2xl font-bold leading-snug"
+            className={`w-full text-center font-bold leading-snug line-clamp-3 ${
+              format.id === 'carta'
+                ? 'text-lg sm:text-xl'
+                : format.id === 'a5'
+                ? 'text-base sm:text-lg'
+                : 'text-lg sm:text-[19px]'
+            }`}
             style={{ fontFamily: coverDesign.titleFontFamily }}
           >
             {page.title}
@@ -443,7 +535,7 @@ export const DemoComposedPageView: React.FC<{
 
           {page.subtitle && (
             <p
-              className="text-xs sm:text-sm italic opacity-90 max-w-xs mx-auto"
+              className="w-full text-center text-[11px] sm:text-xs italic opacity-90 max-w-[92%] mx-auto line-clamp-2 leading-tight"
               style={{
                 color: coverPalette.subtextHex,
                 fontFamily: coverDesign.accentFontFamily || coverDesign.bodyFontFamily,
@@ -454,18 +546,32 @@ export const DemoComposedPageView: React.FC<{
           )}
         </div>
 
-        {/* Centerpiece: Photo, Thematic Illustration, or Typographic Ornament */}
-        <div className="relative z-10 flex-1 flex items-center justify-center my-2">
+        {/* Centerpiece: Photo, Thematic Illustration, or Typographic Ornament centered vertically & horizontally */}
+        <div className="relative z-10 w-full flex-1 min-h-0 flex items-center justify-center my-1.5 overflow-hidden">
           {editorialConfig.coverVisualType === 'photo' && coverPhoto ? (
-            renderPhotoBox(coverPhoto, 'h-36 sm:h-44')
+            renderPhotoBox(
+              coverPhoto,
+              format.id === 'a5'
+                ? 'h-24 sm:h-28 max-h-full'
+                : format.id === 'carta'
+                ? 'h-32 sm:h-36 max-h-full'
+                : 'h-28 sm:h-32 max-h-full',
+              coverPalette.accentHex
+            )
           ) : editorialConfig.coverVisualType === 'illustration' ? (
             <ThematicIllustrationSvg
               id={editorialConfig.coverIllustrationId}
               colorHex={coverPalette.accentHex}
-              className="w-24 h-24 sm:w-28 sm:h-28"
+              className={
+                format.id === 'carta'
+                  ? 'w-24 h-24 sm:w-28 sm:h-28 max-h-full mx-auto'
+                  : format.id === 'a5'
+                  ? 'w-16 h-16 sm:w-20 sm:h-20 max-h-full mx-auto'
+                  : 'w-20 h-20 sm:w-24 sm:h-24 max-h-full mx-auto'
+              }
             />
           ) : (
-            <div className="flex items-center gap-3 opacity-80">
+            <div className="flex items-center justify-center gap-3 opacity-80 mx-auto">
               <span
                 className="block w-10 h-[1px]"
                 style={{ backgroundColor: coverPalette.accentHex }}
@@ -479,12 +585,20 @@ export const DemoComposedPageView: React.FC<{
           )}
         </div>
 
-        {/* Footer: ForeverYou Imprint */}
+        {/* Footer: ForeverYou Imprint strictly inside cover border */}
         <div
-          className="relative z-10 text-center text-[10px] tracking-widest uppercase pb-1"
+          data-testid="cover-footer-imprint"
+          className="relative z-10 w-full shrink-0 flex items-center justify-center gap-1.5 text-center text-[8.5px] sm:text-[9.5px] tracking-[0.14em] uppercase pt-1 pb-1 px-2 leading-tight"
           style={{ color: coverPalette.subtextHex }}
         >
-          ForeverYou • Edición Conmemorativa
+          {composed.useOfficialForeverYouLogo && (
+            <ForeverYouInfinitySymbol
+              color={coverPalette.accentHex}
+              width={18}
+              height={10}
+            />
+          )}
+          <span>ForeverYou • Edición Conmemorativa</span>
         </div>
       </div>
     );
@@ -494,7 +608,7 @@ export const DemoComposedPageView: React.FC<{
   if (page.kind === 'title_dedication') {
     return (
       <div
-        className={`relative w-full overflow-hidden shadow-lg flex flex-col justify-between p-6 sm:p-9 ${className}`}
+        className={`relative w-full overflow-hidden shadow-lg flex flex-col justify-between ${formatPaddingClass} ${className}`}
         style={{
           aspectRatio: `${format.widthMm} / ${format.heightMm}`,
           backgroundColor: interiorStyle.pageBgHex,
@@ -502,9 +616,16 @@ export const DemoComposedPageView: React.FC<{
           fontFamily: interiorStyle.bodyFontFamily,
         }}
       >
-        <div className="space-y-4 text-center pt-4">
+        {(interiorStyle.id === 'legado_familiar' || interiorStyle.id === 'diario_intimo') && (
+          <div
+            className="absolute inset-3 pointer-events-none"
+            style={{ border: `1px solid ${interiorStyle.accentHex}40` }}
+          />
+        )}
+
+        <div className="relative z-10 space-y-3 text-center pt-3">
           <h3
-            className="text-lg sm:text-xl font-bold leading-snug"
+            className={`${chapterTitleSizeClass} font-bold leading-snug`}
             style={{ fontFamily: interiorStyle.titleFontFamily }}
           >
             {page.title}
@@ -518,25 +639,14 @@ export const DemoComposedPageView: React.FC<{
             </div>
           )}
 
-          <div className="flex items-center justify-center gap-2 py-1">
-            <span
-              className="block w-8 h-[1px]"
-              style={{ backgroundColor: interiorStyle.accentHex }}
-            />
-            <span className="text-xs" style={{ color: interiorStyle.accentHex }}>
-              ✦
-            </span>
-            <span
-              className="block w-8 h-[1px]"
-              style={{ backgroundColor: interiorStyle.accentHex }}
-            />
-          </div>
+          {renderOrnamentDivider(interiorStyle.ornamentStyle, interiorStyle.accentHex)}
 
           {page.dedication && (
             <blockquote
-              className="text-xs sm:text-sm italic px-4 py-2 max-w-sm mx-auto leading-relaxed"
+              className="text-xs sm:text-sm italic px-4 py-1.5 max-w-sm mx-auto leading-relaxed"
               style={{
                 fontFamily: interiorStyle.accentFontFamily || interiorStyle.bodyFontFamily,
+                color: interiorStyle.textHex,
               }}
             >
               «{renderFormattedInlineText(page.dedication)}»
@@ -545,9 +655,12 @@ export const DemoComposedPageView: React.FC<{
         </div>
 
         {page.introduction && (
-          <div className="my-auto pt-4 border-t border-stone-200/70">
+          <div
+            className="relative z-10 my-auto pt-3 border-t"
+            style={{ borderColor: `${interiorStyle.accentHex}33` }}
+          >
             <p
-              className="text-xs sm:text-[13px] leading-relaxed"
+              className={`${bodyFontSizeClass} leading-relaxed`}
               style={{
                 color: interiorStyle.mutedHex,
                 textAlign: interiorStyle.textAlign,
@@ -558,7 +671,20 @@ export const DemoComposedPageView: React.FC<{
           </div>
         )}
 
-        <div className="text-[10px] text-center opacity-50">ForeverYou</div>
+        <div
+          data-testid="title-dedication-footer-brand"
+          className="relative z-10 flex items-center justify-center gap-1.5 text-[10px] text-center opacity-80"
+          style={{ color: interiorStyle.mutedHex }}
+        >
+          {composed.useOfficialForeverYouLogo && (
+            <ForeverYouInfinitySymbol
+              color={interiorStyle.accentHex}
+              width={20}
+              height={11}
+            />
+          )}
+          <span className="font-semibold tracking-wide">ForeverYou</span>
+        </div>
       </div>
     );
   }
@@ -568,7 +694,7 @@ export const DemoComposedPageView: React.FC<{
     return (
       <div
         data-testid="demo-mandatory-closing-page"
-        className={`relative w-full overflow-hidden shadow-lg flex flex-col justify-between p-7 sm:p-10 ${className}`}
+        className={`relative w-full overflow-hidden shadow-lg flex flex-col justify-between ${formatPaddingClass} ${className}`}
         style={{
           aspectRatio: `${format.widthMm} / ${format.heightMm}`,
           backgroundColor: interiorStyle.pageBgHex,
@@ -576,9 +702,17 @@ export const DemoComposedPageView: React.FC<{
           fontFamily: interiorStyle.bodyFontFamily,
         }}
       >
+        {(interiorStyle.id === 'legado_familiar' || interiorStyle.id === 'diario_intimo') && (
+          <div
+            className="absolute inset-3 pointer-events-none"
+            style={{ border: `1px solid ${interiorStyle.accentHex}40` }}
+          />
+        )}
+
         <div />
 
-        <div className="my-auto text-center px-4">
+        <div className="relative z-10 my-auto text-center px-4 space-y-2">
+          {renderOrnamentDivider(interiorStyle.ornamentStyle, interiorStyle.accentHex)}
           <p
             className="text-lg sm:text-xl italic font-medium tracking-wide"
             style={{ fontFamily: interiorStyle.titleFontFamily }}
@@ -587,13 +721,33 @@ export const DemoComposedPageView: React.FC<{
           </p>
         </div>
 
-        <div className="w-full flex justify-end">
-          <span
-            className="text-xs font-serif tracking-wider"
-            style={{ color: interiorStyle.accentHex }}
-          >
-            {page.bottomRightBrand || '<< ForeverYou >>'}
-          </span>
+        <div className="relative z-10 w-full flex justify-end">
+          {composed.useOfficialForeverYouLogo ? (
+            <div
+              data-testid="closing-page-official-brand-lockup"
+              className="inline-flex items-center gap-1.5"
+              style={{ color: interiorStyle.accentHex }}
+            >
+              <ForeverYouInfinitySymbol
+                color={interiorStyle.accentHex}
+                width={26}
+                height={14}
+              />
+              <span
+                className="text-xs font-bold tracking-tight"
+                style={{ fontFamily: "'Plus Jakarta Sans', 'Manrope', sans-serif" }}
+              >
+                ForeverYou
+              </span>
+            </div>
+          ) : (
+            <span
+              className="text-xs font-serif tracking-wider"
+              style={{ color: interiorStyle.accentHex }}
+            >
+              {page.bottomRightBrand || '<< ForeverYou >>'}
+            </span>
+          )}
         </div>
       </div>
     );
@@ -602,7 +756,8 @@ export const DemoComposedPageView: React.FC<{
   // MIDDLE PAGES: CHAPTER CONTENT
   return (
     <div
-      className={`relative w-full overflow-hidden shadow-lg flex flex-col justify-between p-6 sm:p-8 ${className}`}
+      data-testid={`book-page-content-${interiorStyle.id}-${format.id}`}
+      className={`relative w-full overflow-hidden shadow-lg flex flex-col justify-between ${formatPaddingClass} ${className}`}
       style={{
         aspectRatio: `${format.widthMm} / ${format.heightMm}`,
         backgroundColor: interiorStyle.pageBgHex,
@@ -610,26 +765,29 @@ export const DemoComposedPageView: React.FC<{
         fontFamily: interiorStyle.bodyFontFamily,
       }}
     >
+      {(interiorStyle.id === 'legado_familiar' || interiorStyle.id === 'diario_intimo') && (
+        <div
+          className="absolute inset-2.5 pointer-events-none"
+          style={{ border: `1px solid ${interiorStyle.accentHex}38` }}
+        />
+      )}
+
       {/* Running header */}
       <div
-        className="text-[9px] italic text-center tracking-wide pb-2 border-b border-stone-200/50 truncate"
-        style={{ color: interiorStyle.mutedHex }}
+        className="relative z-10 text-[9px] italic text-center tracking-wide pb-1.5 border-b truncate"
+        style={{
+          color: interiorStyle.mutedHex,
+          borderColor: `${interiorStyle.accentHex}28`,
+        }}
       >
         {composed.editorialConfig.customTitle || 'ForeverYou • Memoria Autobiográfica'}
       </div>
 
       {/* Chapter Sections */}
-      <div className="flex-1 overflow-y-auto py-2 space-y-4 scrollbar-none">
+      <div className="relative z-10 flex-1 overflow-y-auto py-2 space-y-4 scrollbar-none">
         {(page.sections || []).map((sec, sIdx) => (
-          <div key={`${sec.chapterId}_${sIdx}`} className="space-y-2.5">
-            {sIdx > 0 && (
-              <div className="flex justify-center py-1">
-                <span
-                  className="block w-8 h-[1px]"
-                  style={{ backgroundColor: interiorStyle.accentHex }}
-                />
-              </div>
-            )}
+          <div key={`${sec.chapterId}_${sIdx}`} className="space-y-2">
+            {sIdx > 0 && renderOrnamentDivider(interiorStyle.ornamentStyle, interiorStyle.accentHex)}
 
             {!sec.isContinuation ? (
               <div className="text-center space-y-1">
@@ -640,17 +798,12 @@ export const DemoComposedPageView: React.FC<{
                   Capítulo {sec.partNumber}
                 </div>
                 <h4
-                  className="text-sm sm:text-base font-bold leading-snug"
+                  className={`${chapterTitleSizeClass} font-bold leading-snug`}
                   style={{ fontFamily: interiorStyle.titleFontFamily }}
                 >
                   {sec.title}
                 </h4>
-                <div className="flex justify-center pt-0.5">
-                  <span
-                    className="block w-7 h-[1px]"
-                    style={{ backgroundColor: interiorStyle.accentHex }}
-                  />
-                </div>
+                {renderOrnamentDivider(interiorStyle.ornamentStyle, interiorStyle.accentHex)}
               </div>
             ) : (
               <div
@@ -661,19 +814,25 @@ export const DemoComposedPageView: React.FC<{
               </div>
             )}
 
-            {sec.photo && !sec.isContinuation && renderPhotoBox(sec.photo, 'h-28 sm:h-32')}
+            {sec.photo &&
+              !sec.isContinuation &&
+              renderPhotoBox(sec.photo, 'h-28 sm:h-32', interiorStyle.accentHex)}
 
             <div className="space-y-2">
               {sec.paragraphs.map((para, pIdx) => {
+                const cleanDropCheck = para.replace(/^(\*\*|\*)+/, '');
                 const useDrop =
-                  interiorStyle.useDropCap && !sec.isContinuation && pIdx === 0 && para.length > 1;
-                const firstChar = useDrop ? para.charAt(0) : '';
-                const restText = useDrop ? para.slice(1) : para;
+                  interiorStyle.useDropCap &&
+                  !sec.isContinuation &&
+                  pIdx === 0 &&
+                  cleanDropCheck.length > 1;
+                const firstChar = useDrop ? cleanDropCheck.charAt(0) : '';
+                const restText = useDrop ? cleanDropCheck.slice(1) : para;
 
                 return (
                   <p
                     key={pIdx}
-                    className="text-xs sm:text-[13px] leading-relaxed"
+                    className={`${bodyFontSizeClass} leading-relaxed`}
                     style={{ textAlign: interiorStyle.textAlign }}
                   >
                     {useDrop && (
@@ -712,7 +871,7 @@ export const DemoComposedPageView: React.FC<{
       {/* Footer Page Number */}
       {page.showPageNumber && (
         <div
-          className="text-[10px] text-center pt-1.5"
+          className="relative z-10 text-[10px] text-center pt-1.5"
           style={{ color: interiorStyle.mutedHex }}
         >
           — {page.pageNumber} —
@@ -721,3 +880,4 @@ export const DemoComposedPageView: React.FC<{
     </div>
   );
 };
+

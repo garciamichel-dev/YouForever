@@ -61,12 +61,13 @@ import {
   clearDemoSessionFromStorage,
   createInitialDemoSessionState,
 } from '../utils/demoSessionManager.ts';
-import { generateRealDemoBookPdf } from '../utils/demoPdfGenerator.ts';
+import { generateRealDemoBookPdf, preloadBookResourcesForPdf } from '../utils/demoPdfGenerator.ts';
 import {
   DemoCoverThumbnailCard,
   DemoInteriorThumbnailCard,
   DemoComposedPageView,
 } from './DemoBookPageRenderer.tsx';
+import { ForeverYouLogo } from './ForeverYouLogo';
 import {
   InquiryFormInput,
   validateInquiryForm,
@@ -253,23 +254,33 @@ export const DemoFreeTrialView: React.FC<DemoFreeTrialViewProps> = ({
   // Regenerate the real vector PDF whenever composedBook changes
   useEffect(() => {
     if (!composedBook) return;
+    let cancelled = false;
     setSystemStatusMessage('Componiendo las páginas y generando el PDF...');
-    const timer = setTimeout(() => {
+    const timer = setTimeout(async () => {
       try {
+        await preloadBookResourcesForPdf(composedBook);
+        if (cancelled) return;
         const generated = generateRealDemoBookPdf({
           composed: composedBook,
           profile,
         });
+        if (cancelled) {
+          if (generated.blobUrl) URL.revokeObjectURL(generated.blobUrl);
+          return;
+        }
         setPdfArtifact((prev) => {
           if (prev?.blobUrl) URL.revokeObjectURL(prev.blobUrl);
           return generated;
         });
         setSystemStatusMessage(null);
       } catch (_err) {
-        setSystemStatusMessage(null);
+        if (!cancelled) setSystemStatusMessage(null);
       }
     }, 80);
-    return () => clearTimeout(timer);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   }, [composedBook, profile]);
 
   // Keyboard navigation in interactive book viewer
@@ -799,16 +810,18 @@ export const DemoFreeTrialView: React.FC<DemoFreeTrialViewProps> = ({
   };
 
   // Download generated PDF
-  const handleDownloadPdf = () => {
+  const handleDownloadPdf = async () => {
     if (!composedBook) return;
     try {
       setSystemStatusMessage('Preparando descarga del PDF...');
-      const generated =
-        pdfArtifact ||
-        generateRealDemoBookPdf({
+      let generated = pdfArtifact;
+      if (!generated) {
+        await preloadBookResourcesForPdf(composedBook);
+        generated = generateRealDemoBookPdf({
           composed: composedBook,
           profile,
         });
+      }
       const a = document.createElement('a');
       a.href = generated.blobUrl;
       a.download = generated.filename;
@@ -882,22 +895,15 @@ export const DemoFreeTrialView: React.FC<DemoFreeTrialViewProps> = ({
       <header className="sticky top-0 z-40 bg-stone-900 text-stone-100 border-b border-stone-800 shadow-xs">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-3">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-lg bg-amber-700/80 border border-amber-500/40 flex items-center justify-center text-amber-100">
-              <BookOpen className="w-5 h-5 text-amber-200" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="font-serif text-base sm:text-lg font-bold text-amber-50">
-                  ForeverYou
-                </span>
-                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-800/90 text-amber-100 border border-amber-600/50">
-                  Prueba gratuita
-                </span>
-              </div>
-              <span className="block text-[11px] text-stone-400">
-                Mi historia en 8 preguntas • Sin registro ni guardado en base de datos
-              </span>
-            </div>
+            <ForeverYouLogo
+              variant="horizontal"
+              theme="light"
+              size="sm"
+              subtitle="Mi historia en 8 preguntas • Sin registro ni guardado en base de datos"
+            />
+            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-800/90 text-amber-100 border border-amber-600/50 shrink-0">
+              Prueba gratuita
+            </span>
           </div>
 
           <div className="flex items-center gap-2">
@@ -969,6 +975,9 @@ export const DemoFreeTrialView: React.FC<DemoFreeTrialViewProps> = ({
         {phase === 'welcome' && (
           <div className="max-w-4xl mx-auto space-y-10">
             <div className="bg-white rounded-3xl border border-stone-200/90 shadow-sm p-8 sm:p-12 text-center space-y-6">
+              <div className="flex justify-center">
+                <ForeverYouLogo variant="stacked" theme="navy" size="lg" />
+              </div>
               <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-amber-100/90 text-amber-950 text-xs font-semibold">
                 <Sparkles className="w-3.5 h-3.5 text-amber-800" />
                 <span>Prueba gratuita — Mi historia en 8 preguntas</span>

@@ -38,6 +38,7 @@ import {
   isQuestionnaireFlowComplete,
   validatePhotoAttachments,
   extractCleanTokenOrCode,
+  shouldDisplayReopenedBanner,
 } from '../logic/interviewRules.ts';
 import { QuestionPhotoUploader, DraftPhotoItem } from './QuestionPhotoUploader.tsx';
 import { VoiceRecorder, VoiceRecorderHandle, SavedVoiceAudiosList } from './VoiceRecorder.tsx';
@@ -47,6 +48,7 @@ import { PrivacyConsentScreen } from './PrivacyConsentScreen.tsx';
 import { ParticipantAdminPanel } from './ParticipantAdminPanel.tsx';
 import { ParticipantBookStudio } from './ParticipantBookStudio.tsx';
 import { ParticipantBookVersionRecord } from '../logic/demoStoryRules.ts';
+import { ForeverYouLogo } from './ForeverYouLogo';
 import {
   getActiveParticipantSession,
   saveActiveParticipantSession,
@@ -56,6 +58,8 @@ import {
   getQuestionDraft,
   saveQuestionDraft,
   clearQuestionDraft,
+  getDismissedReopenedAt,
+  saveDismissedReopenedAt,
 } from '../utils/participantSessionStorage.ts';
 
 function mapAttachmentsToDraftItems(attachments?: AnswerPhotoAttachment[]): DraftPhotoItem[] {
@@ -113,9 +117,13 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
   const [currentAudios, setCurrentAudios] = useState<AnswerVoiceAttachment[]>([]);
   const currentAudio = currentAudios.length > 0 ? currentAudios[currentAudios.length - 1] : null;
   const voiceRecorderRef = useRef<VoiceRecorderHandle | null>(null);
+  const adaptiveVoiceRecorderRef = useRef<VoiceRecorderHandle | null>(null);
   const answerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const adaptiveTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const additionalTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const questionViewTopRef = useRef<HTMLDivElement | null>(null);
+  const adaptiveCardRef = useRef<HTMLDivElement | null>(null);
+  const initialLoadedQuestionIdRef = useRef<string | null>(null);
   const [branchChoice, setBranchChoice] = useState<'yes' | 'no' | null>(null);
   const [savingAnswer, setSavingAnswer] = useState(false);
   const [saveSuccessNotice, setSaveSuccessNotice] = useState<string | null>(null);
@@ -136,6 +144,10 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
   const [adaptiveAnswerText, setAdaptiveAnswerText] = useState('');
   const [adaptivePhotos, setAdaptivePhotos] = useState<DraftPhotoItem[]>([]);
   const [adaptiveAudio, setAdaptiveAudio] = useState<AnswerVoiceAttachment | null>(null);
+  const [isAdaptiveTextareaExpanded, setIsAdaptiveTextareaExpanded] = useState(false);
+
+  // One-time reopen banner state (tracks the `reopenedAt` timestamp already dismissed by changing question)
+  const [dismissedReopenedAt, setDismissedReopenedAt] = useState<string | null>(null);
 
   // Additional free information modal ("Añadir Información Adicional")
   const [showAdditionalMemoryModal, setShowAdditionalMemoryModal] = useState(false);
@@ -298,6 +310,12 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
           participantName: data.data.participant.name,
         });
 
+        const storedDismissedReopen = getDismissedReopenedAt(
+          data.data.interview.id,
+          participantId
+        );
+        setDismissedReopenedAt(storedDismissedReopen);
+
         const participantAnswers: AnswerRecord[] = data.data.answers.filter(
           (a: AnswerRecord) => a.participantId === participantId
         );
@@ -317,6 +335,8 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
           savedProgress?.currentQuestionId &&
           seq.some((item) => item.question.id === savedProgress.currentQuestionId);
 
+        let landingQuestionId: string | null = null;
+
         if (isReopened) {
           // If the interview was reopened by admin, land on Question 1 with previous responses pre-loaded,
           // unless the user already resumed this reopened session and navigated to another step.
@@ -328,12 +348,12 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
             savedProgress.reopenedAt === data.data.interview.reopenedAt &&
             !savedProgress.showCompletionScreen
           ) {
-            setCurrentQuestionId(savedProgress.currentQuestionId);
+            landingQuestionId = savedProgress.currentQuestionId;
           } else if (seq.length > 0) {
-            setCurrentQuestionId(seq[0].question.id);
+            landingQuestionId = seq[0].question.id;
           }
         } else if (savedProgress && hasValidSavedQuestion) {
-          setCurrentQuestionId(savedProgress.currentQuestionId);
+          landingQuestionId = savedProgress.currentQuestionId;
           setActiveTab(savedProgress.activeTab === 'history' ? 'history' : 'interview');
           setShowCompletionScreen(Boolean(savedProgress.showCompletionScreen));
         } else {
@@ -345,17 +365,22 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
           const firstUnanswered = seq.find((item) => !answeredIds.has(item.question.id));
 
           if (firstUnanswered) {
-            setCurrentQuestionId(firstUnanswered.question.id);
+            landingQuestionId = firstUnanswered.question.id;
             setShowCompletionScreen(false);
           } else if (seq.length > 0) {
             if (isInterviewOpen) {
-              setCurrentQuestionId(seq[0].question.id);
+              landingQuestionId = seq[0].question.id;
               setShowCompletionScreen(false);
             } else {
-              setCurrentQuestionId(seq[seq.length - 1].question.id);
+              landingQuestionId = seq[seq.length - 1].question.id;
               setShowCompletionScreen(true);
             }
           }
+        }
+
+        initialLoadedQuestionIdRef.current = landingQuestionId;
+        if (landingQuestionId) {
+          setCurrentQuestionId(landingQuestionId);
         }
       } else {
         setErrorMsg(data.error || 'No se pudo validar el enlace de invitación.');
@@ -432,6 +457,62 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
     setValidationNotice(null);
     hydratedQuestionKeyRef.current = questionKey;
   }, [currentQuestion?.id, sessionData?.participant.id]);
+
+  // Dismiss the "Cuestionario Reabierto para Edición Completa" banner permanently for the current reopen cycle
+  const dismissReopenedBannerOnQuestionChange = () => {
+    const reopenedStamp = sessionData?.interview?.reopenedAt;
+    if (!reopenedStamp || !sessionData?.interview?.id || !sessionData?.participant?.id) return;
+    setDismissedReopenedAt(reopenedStamp);
+    saveDismissedReopenedAt(
+      sessionData.interview.id,
+      sessionData.participant.id,
+      reopenedStamp
+    );
+  };
+
+  // Blur active bottom bar button and bring the main question + "Toca para hablar" into view
+  const scrollAndFocusQuestionTop = () => {
+    if (typeof window === 'undefined') return;
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
+    }
+    setTimeout(() => {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }, 30);
+  };
+
+  // Blur active button and scroll smoothly to the autonomous deepening card + its "Toca para hablar" button
+  const scrollAndFocusAdaptiveCard = () => {
+    if (typeof window === 'undefined') return;
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
+    }
+    setTimeout(() => {
+      adaptiveCardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 80);
+  };
+
+  // Whenever currentQuestionId changes after initial load, dismiss the reopen banner and scroll to top
+  useEffect(() => {
+    if (!currentQuestionId || !sessionData) return;
+    if (
+      initialLoadedQuestionIdRef.current !== null &&
+      currentQuestionId !== initialLoadedQuestionIdRef.current
+    ) {
+      dismissReopenedBannerOnQuestionChange();
+      initialLoadedQuestionIdRef.current = currentQuestionId;
+    }
+    if (!adaptiveQuestion) {
+      scrollAndFocusQuestionTop();
+    }
+  }, [currentQuestionId]);
+
+  // Whenever an autonomous deepening question appears, collapse its keyboard and scroll it into view
+  useEffect(() => {
+    if (!adaptiveQuestion) return;
+    setIsAdaptiveTextareaExpanded(false);
+    scrollAndFocusAdaptiveCard();
+  }, [adaptiveQuestion?.text, adaptiveQuestion?.followUpIndex]);
 
   // Persist current question progress in localStorage so reloads or future logins resume at exact step
   useEffect(() => {
@@ -755,6 +836,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
     }
 
     const currentIdx = updatedSeq.findIndex((item) => item.question.id === answeredQuestionId);
+    dismissReopenedBannerOnQuestionChange();
     if (nextStep.completedInstrument || !nextStep.nextItem) {
       if (currentIdx >= 0 && currentIdx < updatedSeq.length - 1) {
         setShowCompletionScreen(false);
@@ -766,6 +848,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
       setShowCompletionScreen(false);
       setCurrentQuestionId(nextStep.nextItem.question.id);
     }
+    scrollAndFocusQuestionTop();
   };
 
   // Save current question answer
@@ -935,16 +1018,19 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
           setAdaptiveAnswerText('');
           setAdaptivePhotos([]);
           setAdaptiveAudio(null);
+          setIsAdaptiveTextareaExpanded(false);
           setSaveSuccessNotice(
             'Respuesta guardada. Hemos preparado una pregunta para profundizar en este recuerdo.'
           );
           setTimeout(() => setSaveSuccessNotice(null), 4000);
+          scrollAndFocusAdaptiveCard();
         } else {
           // Clear any pending adaptive state and advance to the next question in the flow
           setAdaptiveQuestion(null);
           setAdaptiveAnswerText('');
           setAdaptivePhotos([]);
           setAdaptiveAudio(null);
+          setIsAdaptiveTextareaExpanded(false);
           advanceInFlowAfterQuestion(currentQuestion.id, updatedAnswers);
         }
       } else {
@@ -962,17 +1048,42 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
   const handleSaveAdaptive = async () => {
     if (!sessionData || !adaptiveQuestion) return;
 
+    let currentAdaptAudio = adaptiveAudio;
+    let currentAdaptText = adaptiveAnswerText.trim();
+
+    if (adaptiveVoiceRecorderRef.current?.isRecordingOrActive()) {
+      try {
+        setSavingAnswer(true);
+        const freshlyRecorded = await adaptiveVoiceRecorderRef.current.finalizeAndUpload();
+        if (freshlyRecorded) {
+          currentAdaptAudio = freshlyRecorded;
+          setAdaptiveAudio(freshlyRecorded);
+          if (freshlyRecorded.transcription && freshlyRecorded.transcription.trim().length > 0) {
+            const transcript = freshlyRecorded.transcription.trim();
+            currentAdaptText = currentAdaptText
+              ? `${currentAdaptText}\n\n[Nota de voz]: ${transcript}`
+              : transcript;
+            setAdaptiveAnswerText(currentAdaptText);
+            setIsAdaptiveTextareaExpanded(true);
+          }
+        }
+      } catch (voiceErr) {
+        console.warn('Error auto-finalizing adaptive voice recording:', voiceErr);
+      }
+    }
+
     if (adaptivePhotos.length > 0) {
       const photoCheck = validatePhotoAttachments(adaptivePhotos);
       if (!photoCheck.valid) {
         setValidationNotice(photoCheck.error || 'Por favor describe la fotografía adjunta.');
+        setSavingAnswer(false);
         return;
       }
     }
 
     const trimmedAdaptive =
-      adaptiveAnswerText.trim() ||
-      (adaptiveAudio ? adaptiveAudio.transcription : '') ||
+      currentAdaptText ||
+      (currentAdaptAudio ? currentAdaptAudio.transcription : '') ||
       (adaptivePhotos.length > 0
         ? adaptivePhotos.map((p) => p.caption.trim()).join('. ')
         : '');
@@ -981,6 +1092,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
       setValidationNotice(
         'Escribe una respuesta o graba una nota de voz para la profundización, o pulsa «Omitir profundización y avanzar».'
       );
+      setSavingAnswer(false);
       return;
     }
 
@@ -1003,7 +1115,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
           parentQuestionId: parentId,
           deepeningReason: adaptiveQuestion.reason,
           photos: adaptivePhotos,
-          audio: adaptiveAudio || undefined,
+          audio: currentAdaptAudio || undefined,
           idempotencyKey,
         }),
       });
@@ -1031,10 +1143,15 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
           });
           setAdaptiveAnswerText('');
           setAdaptivePhotos([]);
+          setAdaptiveAudio(null);
+          setIsAdaptiveTextareaExpanded(false);
+          scrollAndFocusAdaptiveCard();
         } else {
           setAdaptiveQuestion(null);
           setAdaptiveAnswerText('');
           setAdaptivePhotos([]);
+          setAdaptiveAudio(null);
+          setIsAdaptiveTextareaExpanded(false);
           advanceInFlowAfterQuestion(parentId, updatedAnswers);
         }
       } else {
@@ -1217,8 +1334,8 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
   if (!sessionData) {
     return (
       <div className="max-w-md mx-auto my-12 bg-white p-8 rounded-2xl border border-stone-200 shadow-md text-stone-800">
-        <div className="w-12 h-12 bg-amber-100 text-amber-800 rounded-xl flex items-center justify-center mx-auto mb-4">
-          <HeartHandshake className="w-6 h-6" />
+        <div className="flex justify-center mb-4">
+          <ForeverYouLogo variant="stacked" theme="navy" size="lg" />
         </div>
         <h2 className="font-serif text-xl font-bold text-center text-stone-900 mb-1">
           Bienvenido a tu Entrevista de Legado
@@ -1358,9 +1475,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
         <div className="max-w-4xl mx-auto w-full px-3 sm:px-4 h-14 flex items-center justify-between gap-2">
           {/* Brand Wordmark & Story Context */}
           <div className="flex items-center gap-2 sm:gap-3 min-w-0">
-            <span className="font-serif font-black text-amber-900 text-lg sm:text-xl tracking-tight shrink-0 select-none">
-              ForeverYou
-            </span>
+            <ForeverYouLogo variant="horizontal" theme="navy" size="sm" />
             <span className="text-stone-300 hidden xs:inline select-none">|</span>
             <div className="min-w-0 hidden sm:block">
               <span className="text-xs font-semibold text-stone-800 truncate block max-w-xs" title={interview.title}>
@@ -1527,6 +1642,17 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
             style={{ width: `${progressPercent}%` }}
           />
         </div>
+
+        {/* Subtle Mobile Interviewee Name Strip (visible only on mobile screens < 640px) */}
+        <div className="sm:hidden bg-stone-50/90 border-t border-stone-200/70 px-3 py-1 flex items-center justify-between text-[11px] text-stone-600">
+          <span className="truncate font-medium text-stone-700">
+            {participant.name}{' '}
+            <span className="text-stone-400 font-normal">({participant.relationship})</span>
+          </span>
+          <span className="text-[10px] text-stone-400 shrink-0 ml-2 truncate max-w-[45%]">
+            {interview.title}
+          </span>
+        </div>
       </header>
 
       {/* Global Feedback Notices */}
@@ -1545,8 +1671,8 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
           </div>
         )}
 
-        {/* Notice Banner: Reopened Interview for Questionnaire & Book Editing */}
-        {interview.status === 'open' && !interview.userDeclaredComplete && interview.reopenedAt && (
+        {/* Notice Banner: Reopened Interview for Questionnaire & Book Editing (shown once per reopen cycle until question changes) */}
+        {shouldDisplayReopenedBanner({ interview, dismissedReopenedAt }) && (
           <div className="p-3.5 bg-gradient-to-r from-amber-50 to-stone-50 border border-amber-300 rounded-xl text-amber-950 text-xs shadow-2xs flex items-start space-x-3">
             <div className="w-7 h-7 rounded-lg bg-amber-100 flex items-center justify-center shrink-0 text-amber-800 mt-0.5">
               <Sparkles className="w-3.5 h-3.5" />
@@ -1579,7 +1705,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
       {(activeTab === 'interview' || activeTab === 'book') && (
         <div className="flex-1 flex flex-col">
           {interview.userDeclaredComplete || activeTab === 'book' ? (
-            <div className="max-w-4xl mx-auto w-full px-4 pt-4 pb-12">
+            <div className="max-w-6xl mx-auto w-full px-4 pt-4 pb-12">
               <ParticipantBookStudio
                 token={activeToken}
                 interview={interview}
@@ -1680,7 +1806,10 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
             </div>
           ) : currentQuestion ? (
             /* 2. MAIN INTERVIEW ZONE (Zero scroll mobile layout: Question + Protagonist Mic) */
-            <main className="flex-1 max-w-2xl mx-auto w-full px-4 pt-3 sm:pt-5 pb-28 sm:pb-32 space-y-4 sm:space-y-5">
+            <main
+              ref={questionViewTopRef}
+              className="flex-1 max-w-2xl mx-auto w-full px-4 pt-3 sm:pt-5 pb-28 sm:pb-32 space-y-4 sm:space-y-5 scroll-mt-20"
+            >
               {/* Sub-flow Active Banner */}
               {currentFlowItem?.isSubFlow && (
                 <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl flex items-center justify-between text-xs text-emerald-950">
@@ -1808,6 +1937,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                     setCurrentAudios(allAudios);
                     const cleanTranscript = (transcription || '').trim();
                     if (cleanTranscript.length > 0) {
+                      setIsTextareaExpanded(true);
                       setCurrentAnswerText((prev) => {
                         const cleanPrev = prev.trim();
                         if (!cleanPrev || cleanPrev === 'No aplica a mi historia.') {
@@ -1990,7 +2120,11 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                         disabled={currentIndex === 0}
                         onClick={() => {
                           const prevItem = flowSequence[Math.max(0, currentIndex - 1)];
-                          if (prevItem) setCurrentQuestionId(prevItem.question.id);
+                          if (prevItem) {
+                            dismissReopenedBannerOnQuestionChange();
+                            setCurrentQuestionId(prevItem.question.id);
+                            scrollAndFocusQuestionTop();
+                          }
                         }}
                         className="p-2 border border-stone-200 text-stone-600 rounded-lg hover:bg-stone-100 disabled:opacity-30 transition cursor-pointer"
                       >
@@ -2008,11 +2142,16 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                         type="button"
                         aria-label="Siguiente pregunta"
                         onClick={() => {
+                          dismissReopenedBannerOnQuestionChange();
                           if (currentIndex < flowSequence.length - 1) {
                             const nextItem = flowSequence[currentIndex + 1];
-                            if (nextItem) setCurrentQuestionId(nextItem.question.id);
+                            if (nextItem) {
+                              setCurrentQuestionId(nextItem.question.id);
+                              scrollAndFocusQuestionTop();
+                            }
                           } else {
                             setShowCompletionScreen(true);
+                            scrollAndFocusQuestionTop();
                           }
                         }}
                         className="p-2 border border-stone-200 text-stone-600 rounded-lg hover:bg-stone-100 transition cursor-pointer"
@@ -2037,7 +2176,10 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
 
               {/* Autonomous Deepening Question Card (generated automatically by the system from the participant's answer) */}
               {adaptiveQuestion && isInterviewOpen && (
-                <div className="mt-4 p-6 bg-amber-50/90 rounded-2xl border-2 border-amber-300 shadow-sm space-y-4">
+                <div
+                  ref={adaptiveCardRef}
+                  className="mt-4 p-6 bg-amber-50/90 rounded-2xl border-2 border-amber-300 shadow-sm space-y-4 scroll-mt-24"
+                >
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="flex items-center space-x-2 text-amber-950">
                       <Sparkles className="w-4 h-4 text-amber-700" />
@@ -2057,48 +2199,91 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                     </p>
                   )}
 
-                  <p className="font-serif text-lg text-stone-900 font-bold leading-snug">
+                  <p className="font-serif text-lg sm:text-xl text-stone-900 font-bold leading-snug text-center pt-1">
                     «{adaptiveQuestion.text}»
                   </p>
 
-                  <textarea
-                    ref={adaptiveTextareaRef}
-                    rows={4}
-                    placeholder="Profundiza en este recuerdo con los detalles, emociones o anécdotas que desees compartir..."
-                    value={adaptiveAnswerText}
-                    onChange={(e) => setAdaptiveAnswerText(e.target.value)}
-                    className="w-full p-3.5 border border-amber-300 bg-white rounded-xl text-sm text-stone-900 focus:outline-none focus:ring-2 focus:ring-amber-300"
-                  />
-
-                  {/* Voice recording for adaptive deepening question */}
-                  <VoiceRecorder
-                    token={activeToken}
-                    questionId={`adapt_${adaptiveQuestion.parentQuestionId}`}
-                    questionText={adaptiveQuestion.text}
-                    initialAudio={adaptiveAudio}
-                    onFocusKeyboard={() => {
-                      adaptiveTextareaRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                      adaptiveTextareaRef.current?.focus();
-                    }}
-                    onVoiceSubmitted={(audio, transcription, _allAudios, diagnosis) => {
-                      setAdaptiveAudio(audio);
-                      const cleanTranscript = (transcription || '').trim();
-                      if (cleanTranscript.length > 0) {
-                        setAdaptiveAnswerText((prev) => {
-                          const cleanPrev = prev.trim();
-                          if (!cleanPrev) return cleanTranscript;
-                          return `${cleanPrev}\n\n[Nota de voz]: ${cleanTranscript}`;
-                        });
-                        if (diagnosis?.audioQuality !== 'noisy') {
-                          setSaveSuccessNotice(
-                            'Archivo de voz para profundización guardado con éxito en la base de datos.'
-                          );
-                          setTimeout(() => setSaveSuccessNotice(null), 3500);
+                  {/* 1. First: Voice recording for adaptive deepening question */}
+                  <div className="pt-1 pb-1">
+                    <VoiceRecorder
+                      ref={adaptiveVoiceRecorderRef}
+                      token={activeToken}
+                      questionId={`adapt_${adaptiveQuestion.parentQuestionId}_${adaptiveQuestion.followUpIndex || 1}`}
+                      questionText={adaptiveQuestion.text}
+                      initialAudio={adaptiveAudio}
+                      frameless={true}
+                      onFocusKeyboard={() => {
+                        setIsAdaptiveTextareaExpanded(true);
+                        setTimeout(() => {
+                          adaptiveTextareaRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                          adaptiveTextareaRef.current?.focus();
+                        }, 100);
+                      }}
+                      onVoiceSubmitted={(audio, transcription, _allAudios, diagnosis) => {
+                        setAdaptiveAudio(audio);
+                        const cleanTranscript = (transcription || '').trim();
+                        if (cleanTranscript.length > 0) {
+                          setIsAdaptiveTextareaExpanded(true);
+                          setAdaptiveAnswerText((prev) => {
+                            const cleanPrev = prev.trim();
+                            if (!cleanPrev) return cleanTranscript;
+                            if (cleanPrev.includes(cleanTranscript)) return cleanPrev;
+                            return `${cleanPrev}\n\n[Nota de voz]: ${cleanTranscript}`;
+                          });
+                          if (diagnosis?.audioQuality !== 'noisy') {
+                            setSaveSuccessNotice(
+                              'Archivo de voz para profundización guardado con éxito en la base de datos.'
+                            );
+                            setTimeout(() => setSaveSuccessNotice(null), 3500);
+                          }
                         }
-                      }
-                    }}
-                    onVoiceDeleted={(_id) => setAdaptiveAudio(null)}
-                  />
+                      }}
+                      onVoiceDeleted={(_id) => setAdaptiveAudio(null)}
+                    />
+                  </div>
+
+                  {/* 2. Below: Optional collapsible keyboard input (auto-expands after transcription) */}
+                  {!isAdaptiveTextareaExpanded && !adaptiveAnswerText.trim() ? (
+                    <div className="text-center pt-0.5">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsAdaptiveTextareaExpanded(true);
+                          setTimeout(() => adaptiveTextareaRef.current?.focus(), 100);
+                        }}
+                        className="inline-flex items-center gap-2 px-3.5 py-1.5 text-xs text-stone-700 hover:text-amber-900 hover:bg-amber-100/70 rounded-lg transition font-medium cursor-pointer"
+                      >
+                        <Edit3 className="w-3.5 h-3.5 text-amber-700" />
+                        <span>O si lo prefieres, escribe tu respuesta con el teclado</span>
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="bg-white p-3.5 sm:p-4 rounded-xl border border-amber-300 shadow-2xs space-y-2 transition-all">
+                      <div className="flex items-center justify-between text-xs text-stone-600">
+                        <span className="font-semibold text-stone-800 flex items-center gap-1.5">
+                          <Edit3 className="w-3.5 h-3.5 text-amber-700" />
+                          <span>Tu respuesta de profundización:</span>
+                        </span>
+                        {!adaptiveAnswerText.trim() && (
+                          <button
+                            type="button"
+                            onClick={() => setIsAdaptiveTextareaExpanded(false)}
+                            className="text-[11px] text-stone-400 hover:text-stone-600 cursor-pointer"
+                          >
+                            Ocultar teclado
+                          </button>
+                        )}
+                      </div>
+                      <textarea
+                        ref={adaptiveTextareaRef}
+                        rows={4}
+                        placeholder="Profundiza en este recuerdo con los detalles, emociones o anécdotas que desees compartir..."
+                        value={adaptiveAnswerText}
+                        onChange={(e) => setAdaptiveAnswerText(e.target.value)}
+                        className="w-full p-3 border border-amber-300 bg-white rounded-xl text-sm text-stone-900 focus:outline-none focus:ring-2 focus:ring-amber-300"
+                      />
+                    </div>
+                  )}
 
                   <QuestionPhotoUploader
                     photos={adaptivePhotos}
@@ -2119,9 +2304,11 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                         setAdaptiveQuestion(null);
                         setAdaptiveAnswerText('');
                         setAdaptivePhotos([]);
+                        setAdaptiveAudio(null);
+                        setIsAdaptiveTextareaExpanded(false);
                         advanceInFlowAfterQuestion(parentId, sessionData.answers);
                       }}
-                      className="px-3.5 py-2 text-stone-600 hover:text-stone-900 bg-white border border-stone-300 rounded-lg text-xs font-medium"
+                      className="px-3.5 py-2 text-stone-600 hover:text-stone-900 bg-white border border-stone-300 rounded-lg text-xs font-medium cursor-pointer"
                     >
                       Omitir profundización y avanzar
                     </button>
@@ -2130,7 +2317,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                       type="button"
                       onClick={handleSaveAdaptive}
                       disabled={savingAnswer}
-                      className="inline-flex items-center space-x-1.5 px-5 py-2 bg-amber-800 hover:bg-amber-900 text-white rounded-lg text-xs font-semibold shadow-xs disabled:opacity-50"
+                      className="inline-flex items-center space-x-1.5 px-5 py-2 bg-amber-800 hover:bg-amber-900 text-white rounded-lg text-xs font-semibold shadow-xs disabled:opacity-50 cursor-pointer"
                     >
                       <Save className="w-3.5 h-3.5" />
                       <span>
@@ -2358,10 +2545,13 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                             <button
                               type="button"
                               onClick={() => {
+                                if (ans.questionId !== currentQuestionId) {
+                                  dismissReopenedBannerOnQuestionChange();
+                                }
                                 setCurrentQuestionId(ans.questionId);
                                 setShowCompletionScreen(false);
                                 setActiveTab('interview');
-                                window.scrollTo({ top: 0, behavior: 'smooth' });
+                                scrollAndFocusQuestionTop();
                               }}
                               className="inline-flex items-center space-x-1.5 px-3 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-lg text-xs font-semibold transition"
                             >

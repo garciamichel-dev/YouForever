@@ -4,6 +4,7 @@ import {
   applyAdminReopen,
   evaluateAnswerIncrement,
   buildParticipantFlowSequence,
+  shouldDisplayReopenedBanner,
   type InterviewRecord,
   type QuestionRecord,
   type AnswerRecord,
@@ -168,3 +169,49 @@ test('Secuencia biográfica con respuestas completas: avance ordenado y pre-carg
   // Al aterrizar en la entrevista reabierta, el primer paso corresponde a la pregunta 1
   assert.equal(seq[0].question.id, 'q_1', 'La primera pregunta debe ser q_1');
 });
+
+test('Aviso de cuestionario reabierto: aparece una vez, desaparece al cambiar de pregunta y reaparece si se vuelve a reabrir', () => {
+  const reopenTime1 = '2026-11-05T10:00:00.000Z';
+  const reopenTime2 = '2026-11-06T15:30:00.000Z';
+
+  // 1. Recién reabierta: nunca se ha descartado
+  assert.equal(
+    shouldDisplayReopenedBanner({
+      interview: { status: 'open', userDeclaredComplete: false, reopenedAt: reopenTime1 },
+      dismissedReopenedAt: null,
+    }),
+    true,
+    'Debe mostrarse inicialmente tras la primera reapertura'
+  );
+
+  // 2. El participante cambia de pregunta: se registra reopenTime1 como descartado
+  assert.equal(
+    shouldDisplayReopenedBanner({
+      interview: { status: 'open', userDeclaredComplete: false, reopenedAt: reopenTime1 },
+      dismissedReopenedAt: reopenTime1,
+    }),
+    false,
+    'Debe ocultarse definitivamente tras cambiar de pregunta en la misma reapertura'
+  );
+
+  // 3. El cuestionario se cierra y se vuelve a reabrir con una nueva marca reopenTime2
+  assert.equal(
+    shouldDisplayReopenedBanner({
+      interview: { status: 'open', userDeclaredComplete: false, reopenedAt: reopenTime2 },
+      dismissedReopenedAt: reopenTime1,
+    }),
+    true,
+    'Debe volver a aparecer cuando la entrevista se cierra y se reabre nuevamente'
+  );
+
+  // 4. Al cambiar de pregunta en la segunda reapertura, se vuelve a ocultar
+  assert.equal(
+    shouldDisplayReopenedBanner({
+      interview: { status: 'open', userDeclaredComplete: false, reopenedAt: reopenTime2 },
+      dismissedReopenedAt: reopenTime2,
+    }),
+    false,
+    'Debe ocultarse nuevamente tras cambiar de pregunta en la segunda reapertura'
+  );
+});
+

@@ -1220,4 +1220,23 @@ export function computeDocumentSha256(content: string | Record<string, unknown>)
   }
 }
 
-
+/**
+ * Determines whether the "Cuestionario Reabierto para Edición Completa" banner
+ * should be displayed.
+ * - Appears only when the interview is open, not declared complete, and has a `reopenedAt` timestamp.
+ * - Disappears permanently for that `reopenedAt` cycle as soon as the participant changes question.
+ * - Reappears automatically if the interview is closed and reopened again (generating a new `reopenedAt`).
+ */
+export function shouldDisplayReopenedBanner(params: {
+  interview: Pick<InterviewRecord, 'status' | 'userDeclaredComplete' | 'reopenedAt'>;
+  dismissedReopenedAt: string | null | undefined;
+}): boolean {
+  const { interview, dismissedReopenedAt } = params;
+  if (interview.status !== 'open' || interview.userDeclaredComplete) {
+    return false;
+  }
+  if (!interview.reopenedAt) {
+    return false;
+  }
+  return interview.reopenedAt !== dismissedReopenedAt;
+}

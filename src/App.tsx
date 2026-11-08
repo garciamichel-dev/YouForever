@@ -16,6 +16,7 @@ import { auth, googleProvider } from './firebase/config.ts';
 import { onAuthStateChanged, signInWithPopup, signOut } from 'firebase/auth';
 import { Clock, HelpCircle } from 'lucide-react';
 import { getActiveParticipantSession } from './utils/participantSessionStorage.ts';
+import { ForeverYouLogo } from './components/ForeverYouLogo';
 
 export default function App() {
   const [currentView, setCurrentView] = useState<'admin' | 'participant' | 'conoceme' | 'demo'>(() => {
@@ -234,9 +235,12 @@ export default function App() {
       {!isParticipantInterviewActive && (
         <footer className="bg-stone-900 text-stone-400 py-6 text-center text-xs border-t border-stone-800">
           <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-3">
-            <p className="font-serif text-stone-300">
-              ForeverYou • Plataforma de Entrevistas de Vida &amp; Patrimonio Testimonial
-            </p>
+            <div className="flex items-center gap-2.5">
+              <ForeverYouLogo variant="app_icon" size="xs" />
+              <p className="font-serif text-stone-300">
+                ForeverYou • Plataforma de Entrevistas de Vida &amp; Patrimonio Testimonial
+              </p>
+            </div>
             <div className="flex items-center space-x-4 text-[11px] text-stone-400">
               <button
                 onClick={() => setIsFaqOpen(true)}

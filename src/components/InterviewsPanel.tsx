@@ -43,7 +43,7 @@ import {
   DEMO_BOOK_FORMATS,
   DEMO_NARRATIVE_STYLES,
 } from '../logic/demoStoryRules.ts';
-import { generateRealDemoBookPdf } from '../utils/demoPdfGenerator.ts';
+import { generateRealDemoBookPdf, preloadBookResourcesForPdf } from '../utils/demoPdfGenerator.ts';
 import { apiFetch } from '../utils/apiClient.ts';
 
 
@@ -458,8 +458,10 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
         coverPhoto: ver.coverPhoto || null,
         chapterPhotos: ver.chapterPhotos || {},
         customClosingPageText: ver.closingPageText || inv.participantClosingText || undefined,
-        maxContentPages: 60,
+        maxContentPages: 500,
       });
+
+      await preloadBookResourcesForPdf(composed);
 
       const { blobUrl } = generateRealDemoBookPdf({
         composed,

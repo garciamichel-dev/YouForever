@@ -19,6 +19,7 @@ import {
   PRIVACY_NOTICE_VERSION,
   PRIVACY_NOTICE_EFFECTIVE_DATE,
 } from '../logic/privacyNoticeContent.ts';
+import { ForeverYouLogo } from './ForeverYouLogo';
 import { buildConsentDeclarationText } from '../logic/privacyRules.ts';
 
 interface PrivacyConsentScreenProps {
@@ -65,9 +66,12 @@ export const PrivacyConsentScreen: React.FC<PrivacyConsentScreenProps> = ({
       <div className="bg-white rounded-3xl border border-stone-200 shadow-sm p-6 sm:p-10 space-y-6">
         {/* Title & Badge */}
         <div className="space-y-3 text-center sm:text-left">
-          <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-100 text-amber-900 text-xs font-semibold">
-            <Shield className="w-3.5 h-3.5 text-amber-800" />
-            <span>ForeverYou • Protección de Patrimonio Testimonial</span>
+          <div className="flex flex-wrap items-center justify-center sm:justify-between gap-3">
+            <ForeverYouLogo variant="horizontal" theme="navy" size="md" />
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-100 text-amber-900 text-xs font-semibold">
+              <Shield className="w-3.5 h-3.5 text-amber-800" />
+              <span>ForeverYou • Protección de Patrimonio Testimonial</span>
+            </div>
           </div>
 
           <h2 className="font-serif text-2xl sm:text-3xl font-bold text-stone-900 tracking-tight">

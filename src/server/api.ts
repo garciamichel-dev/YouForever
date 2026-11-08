@@ -1271,7 +1271,13 @@ apiRouter.post('/participant/finish', async (req: Request, res: Response) => {
 // Participant Book Studio: Generate AI manuscript in chosen narrative style (A, B, or C)
 apiRouter.post('/participant/book/generate-manuscript', async (req: Request, res: Response) => {
   try {
-    const { token, narrativeStyle } = req.body;
+    const {
+      token,
+      narrativeStyle,
+      scope,
+      lockedPreviewManuscript,
+      lockedPreviewGroups,
+    } = req.body;
     if (!token) {
       res.status(400).json({ success: false, error: 'Token de invitación requerido.' });
       return;
@@ -1279,6 +1285,9 @@ apiRouter.post('/participant/book/generate-manuscript', async (req: Request, res
     const result = await storage.generateParticipantBookManuscript({
       plainToken: token,
       narrativeStyle: narrativeStyle || 'first_person_literary',
+      scope: scope === 'preview' ? 'preview' : 'full',
+      lockedPreviewManuscript: lockedPreviewManuscript || null,
+      lockedPreviewGroups: lockedPreviewGroups || null,
     });
     res.json({ success: true, data: result });
   } catch (err: unknown) {

@@ -43,6 +43,7 @@ import {
   ensurePhotosPlacedInManuscript,
 } from '../logic/interviewRules.ts';
 import {
+  ComposedChapterSectionBlock,
   DemoEditorialConfig,
   DemoInMemoryPhoto,
   DemoManuscript,
@@ -51,6 +52,7 @@ import {
   buildSafeDemoPdfFilename,
   buildParticipantInitialManuscriptFromAnswers,
   composeBookPages,
+  hasUpdatedAnswersSinceBookVersion,
 } from '../logic/demoStoryRules.ts';
 import {
   PrivacyConsentRecord,
@@ -2576,11 +2578,10 @@ class StorageManager {
       existingManuscripts.length,
       interview.bookGeneratedCount ?? 0
     );
-    if (targetCount <= 0 || existingBookVersions.length >= targetCount) {
+    if (targetCount <= 0) {
       return;
     }
 
-    const existingVersionNumbers = new Set(existingBookVersions.map((v) => v.versionNumber));
     const participants = Array.from(this.participants.values()).filter(
       (p) => p.interviewId === interviewId
     );
@@ -2620,13 +2621,13 @@ class StorageManager {
         bookFormatId: '6x9',
       },
       {
-        narrativeStyle: 'first_person_simple',
+        narrativeStyle: 'first_person_literary',
         coverDesignId: 'recuerdos_marfil',
         interiorStyleId: 'memorias_elegantes',
         bookFormatId: 'a5',
       },
       {
-        narrativeStyle: 'third_person_biography',
+        narrativeStyle: 'first_person_literary',
         coverDesignId: 'raices_recuerdos',
         interiorStyleId: 'legado_familiar',
         bookFormatId: 'carta',
@@ -2635,7 +2636,23 @@ class StorageManager {
 
     let createdAny = false;
     for (let vNum = 1; vNum <= targetCount; vNum++) {
-      if (existingVersionNumbers.has(vNum)) continue;
+      const versionId = `pbv_${interviewId}_v${vNum}`;
+      const existingRealOrSynth = existingBookVersions.find((v) => v.versionNumber === vNum);
+      // Only skip if a user-saved version (with timestamp suffix) exists, or if the synthesized version already uses 'first_person_literary' and has all current answers
+      if (existingRealOrSynth) {
+        const isSynthesizedId = existingRealOrSynth.id === versionId;
+        const needsRefresh =
+          isSynthesizedId &&
+          (existingRealOrSynth.narrativeStyle !== 'first_person_literary' ||
+            hasUpdatedAnswersSinceBookVersion({
+              answers,
+              interviewReopenedAt: interview.reopenedAt,
+              latestBookVersion: existingRealOrSynth,
+            }));
+        if (!needsRefresh) {
+          continue;
+        }
+      }
 
       const matchingManu = existingManuscripts.find((m) => m.version === vNum);
       const preset = stylePresets[(vNum - 1) % stylePresets.length];
@@ -2670,7 +2687,7 @@ class StorageManager {
         coverPhoto: null,
         chapterPhotos: built.chapterPhotos,
         customClosingPageText: closingPageText || undefined,
-        maxContentPages: 45,
+        maxContentPages: 500,
       });
 
       const baseFilename = buildSafeDemoPdfFilename({
@@ -2682,7 +2699,6 @@ class StorageManager {
         hasAcceptedTemporaryNotice: true,
       }).replace(/\.pdf$/i, `_v${vNum}.pdf`);
 
-      const versionId = `pbv_${interviewId}_v${vNum}`;
       const record: ParticipantBookVersionRecord = {
         id: versionId,
         interviewId,
@@ -2754,10 +2770,14 @@ class StorageManager {
   public async generateParticipantBookManuscript(params: {
     plainToken: string;
     narrativeStyle: DemoNarrativeStyleId;
+    scope?: 'preview' | 'full';
+    lockedPreviewManuscript?: DemoManuscript | null;
+    lockedPreviewGroups?: ComposedChapterSectionBlock[][] | null;
   }): Promise<{
     manuscript: DemoManuscript;
     chapterPhotos: Record<string, DemoInMemoryPhoto | null>;
     closingPageText: string;
+    scope: 'preview' | 'full';
   }> {
     const { interview } = this.resolveToken(params.plainToken);
     if (!interview.userDeclaredComplete) {
@@ -2782,19 +2802,23 @@ class StorageManager {
     const questions = this.getQuestionsForVersion(interview.questionnaireVersionId);
     const closingPageText = (interview.participantClosingText || '').trim();
 
-    const { manuscript, chapterPhotos } = await generateParticipantBookManuscriptWithAI({
+    const { manuscript, chapterPhotos, scope } = await generateParticipantBookManuscriptWithAI({
       interview,
       participants,
       answers,
       questions,
-      narrativeStyle: params.narrativeStyle,
+      narrativeStyle: params.narrativeStyle || 'first_person_literary',
       closingDedicationText: closingPageText,
+      scope: params.scope || 'full',
+      lockedPreviewManuscript: params.lockedPreviewManuscript || null,
+      lockedPreviewGroups: params.lockedPreviewGroups || null,
     });
 
     return {
       manuscript,
       chapterPhotos,
       closingPageText,
+      scope,
     };
   }
 
@@ -2821,8 +2845,14 @@ class StorageManager {
     const existingVersions = this.getBookVersionsForInterview(interview.id);
     const hasExistingBook = existingVersions.length > 0 || (interview.bookGeneratedCount ?? 0) > 0;
     const quota = computeLayoutEditQuotaStatus(interview);
+    const answers = this.getAnswersForInterview(interview.id);
+    const hasUpdatedAnswers = hasUpdatedAnswersSinceBookVersion({
+      answers,
+      interviewReopenedAt: interview.reopenedAt,
+      latestBookVersion: existingVersions[0] || null,
+    });
 
-    if (hasExistingBook && !quota.canModifyLayout) {
+    if (hasExistingBook && !quota.canModifyLayout && !hasUpdatedAnswers) {
       throw new Error(
         'Has agotado tus opciones adicionales de modificación de maquetación. Para más modificaciones y/o actualizaciones por favor ponte en contacto con ForeverYou.'
       );

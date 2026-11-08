@@ -158,3 +158,37 @@ export function clearQuestionDraft(participantId: string, questionId: string): v
     // Ignore localStorage errors
   }
 }
+
+const REOPEN_BANNER_DISMISSED_PREFIX = 'foreveryou_reopen_banner_dismissed_v1:';
+
+export function getDismissedReopenedAt(
+  interviewId: string,
+  participantId: string
+): string | null {
+  if (typeof window === 'undefined' || !interviewId || !participantId) return null;
+  try {
+    return (
+      window.localStorage.getItem(
+        `${REOPEN_BANNER_DISMISSED_PREFIX}${interviewId}:${participantId}`
+      ) || null
+    );
+  } catch (_err) {
+    return null;
+  }
+}
+
+export function saveDismissedReopenedAt(
+  interviewId: string,
+  participantId: string,
+  reopenedAt: string
+): void {
+  if (typeof window === 'undefined' || !interviewId || !participantId || !reopenedAt) return;
+  try {
+    window.localStorage.setItem(
+      `${REOPEN_BANNER_DISMISSED_PREFIX}${interviewId}:${participantId}`,
+      reopenedAt
+    );
+  } catch (_err) {
+    // Ignore localStorage errors
+  }
+}

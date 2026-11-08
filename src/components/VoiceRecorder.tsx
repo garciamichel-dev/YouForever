@@ -1131,7 +1131,7 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
               </div>
               <div className="max-w-md">
                 <h5 className="text-sm font-bold text-stone-900">
-                  Guardando tu audio y transcribiendo con inteligencia artificial...
+                  Estamos guardando tu audio y transcribiendo...
                 </h5>
                 <p className="text-xs text-stone-500 mt-1 leading-relaxed">
                   Escuchando con atención tu testimonio para transcribirlo fidedignamente al texto de tu respuesta.

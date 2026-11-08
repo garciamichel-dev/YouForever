@@ -50,13 +50,15 @@ import {
   ParticipantBookVersionRecord,
   buildParticipantInitialManuscriptFromAnswers,
   composeBookPages,
+  hasUpdatedAnswersSinceBookVersion,
 } from '../logic/demoStoryRules.ts';
 import {
   DemoComposedPageView,
   DemoCoverThumbnailCard,
   DemoInteriorThumbnailCard,
 } from './DemoBookPageRenderer.tsx';
-import { generateRealDemoBookPdf } from '../utils/demoPdfGenerator.ts';
+import { generateRealDemoBookPdf, preloadBookResourcesForPdf } from '../utils/demoPdfGenerator.ts';
+import { ForeverYouLogo } from './ForeverYouLogo';
 
 interface ParticipantBookStudioProps {
   token: string;
@@ -124,16 +126,26 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
     return bookVersions.find((v) => v.id === selectedVersionId) || bookVersions[0];
   }, [hasSavedVersions, bookVersions, selectedVersionId]);
 
-  // If no book version has been saved yet, studio starts open for initial creation (Version 1).
-  // Once Version 1 exists, studio starts in view/download mode and requires confirmation modal to unlock modification.
-  const [isEditingLayout, setIsEditingLayout] = useState<boolean>(!hasSavedVersions);
+  const hasUpdatedAnswers = useMemo(() => {
+    return hasUpdatedAnswersSinceBookVersion({
+      answers,
+      interviewReopenedAt: interview.reopenedAt,
+      latestBookVersion: activeSavedVersion,
+    });
+  }, [answers, interview.reopenedAt, activeSavedVersion]);
+
+  // If no book version has been saved yet, or if the interview was reopened and has newer/more answers,
+  // studio starts open for creation/update with all current answers.
+  const [isEditingLayout, setIsEditingLayout] = useState<boolean>(
+    !hasSavedVersions || hasUpdatedAnswers
+  );
   const [showQuotaConfirmModal, setShowQuotaConfirmModal] = useState<boolean>(false);
 
   useEffect(() => {
-    if (!hasSavedVersions) {
+    if (!hasSavedVersions || hasUpdatedAnswers) {
       setIsEditingLayout(true);
     }
-  }, [hasSavedVersions]);
+  }, [hasSavedVersions, hasUpdatedAnswers]);
 
   // Initial local fallback manuscript built immediately from participant's real answers & photos
   const initialLocalData = useMemo(() => {
@@ -154,43 +166,67 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
     });
   }, [interview.title, interview.storyMode, participantNames, answers, questions, closingDedicationText]);
 
-  // Studio Editor State
-  const [narrativeStyle, setNarrativeStyle] = useState<DemoNarrativeStyleId>(
-    activeSavedVersion?.narrativeStyle || 'first_person_literary'
+  const useFreshDraft = !activeSavedVersion || hasUpdatedAnswers;
+
+  // Track whether the user has explicitly selected a Narrative Style during the current editing session.
+  // Per user specification: nothing is selected by default when entering layout creation/modification,
+  // and no 5-page preview PDF is generated until the user clicks a literary style option.
+  const [hasSelectedStyleInSession, setHasSelectedStyleInSession] = useState<boolean>(false);
+
+  const [narrativeStyle, setNarrativeStyle] = useState<DemoNarrativeStyleId | null>(
+    isEditingLayout ? null : activeSavedVersion?.narrativeStyle || 'first_person_literary'
   );
   const [editorialConfig, setEditorialConfig] = useState<DemoEditorialConfig>(() => {
-    if (activeSavedVersion?.editorialConfig) {
+    if (activeSavedVersion?.editorialConfig && !useFreshDraft) {
       return { ...activeSavedVersion.editorialConfig };
     }
     return {
       narrativeStyle: 'first_person_literary',
-      coverDesignId: 'clasica_eterna',
-      coverColorVariantIdx: 0,
-      coverVisualType: 'illustration',
-      coverIllustrationId: 'arbol_raices',
-      interiorStyleId: 'clasico_editorial',
-      bookFormatId: '6x9',
-      customTitle: interview.title,
-      customSubtitle: isCouple
-        ? 'Libro biográfico de memorias compartidas'
-        : 'Libro autobiográfico y legado familiar',
-      customAuthors: participantNames.join(' y '),
-      dedication: '',
+      coverDesignId: activeSavedVersion?.editorialConfig?.coverDesignId || 'clasica_eterna',
+      coverColorVariantIdx: activeSavedVersion?.editorialConfig?.coverColorVariantIdx ?? 0,
+      coverVisualType: activeSavedVersion?.editorialConfig?.coverVisualType || 'illustration',
+      coverIllustrationId:
+        activeSavedVersion?.editorialConfig?.coverIllustrationId || 'arbol_raices',
+      interiorStyleId: activeSavedVersion?.editorialConfig?.interiorStyleId || 'clasico_editorial',
+      bookFormatId: activeSavedVersion?.editorialConfig?.bookFormatId || '6x9',
+      customTitle: activeSavedVersion?.editorialConfig?.customTitle || interview.title,
+      customSubtitle:
+        activeSavedVersion?.editorialConfig?.customSubtitle ||
+        (isCouple
+          ? 'Libro biográfico de memorias compartidas'
+          : 'Libro autobiográfico y legado familiar'),
+      customAuthors:
+        activeSavedVersion?.editorialConfig?.customAuthors || participantNames.join(' y '),
+      dedication: activeSavedVersion?.editorialConfig?.dedication || '',
     };
   });
 
   const [manuscript, setManuscript] = useState<DemoManuscript>(
-    () => activeSavedVersion?.manuscript || initialLocalData.manuscript
+    () => (useFreshDraft ? initialLocalData.manuscript : activeSavedVersion.manuscript)
   );
   const [aiOriginalManuscript, setAiOriginalManuscript] = useState<DemoManuscript>(
-    () => activeSavedVersion?.manuscript || initialLocalData.manuscript
+    () => (useFreshDraft ? initialLocalData.manuscript : activeSavedVersion.manuscript)
   );
   const [coverPhoto, setCoverPhoto] = useState<DemoInMemoryPhoto | null>(
     () => activeSavedVersion?.coverPhoto || null
   );
   const [chapterPhotos, setChapterPhotos] = useState<Record<string, DemoInMemoryPhoto | null>>(
-    () => activeSavedVersion?.chapterPhotos || initialLocalData.chapterPhotos
+    () =>
+      useFreshDraft
+        ? initialLocalData.chapterPhotos
+        : activeSavedVersion?.chapterPhotos || initialLocalData.chapterPhotos
   );
+
+  // Keep draft synchronized if answers update (e.g. after reopening questionnaire)
+  const lastSyncedAnswerCountRef = useRef<number>(answers.length);
+  useEffect(() => {
+    if (answers.length !== lastSyncedAnswerCountRef.current || useFreshDraft) {
+      lastSyncedAnswerCountRef.current = answers.length;
+      setManuscript(initialLocalData.manuscript);
+      setAiOriginalManuscript(initialLocalData.manuscript);
+      setChapterPhotos(initialLocalData.chapterPhotos);
+    }
+  }, [answers.length, useFreshDraft, initialLocalData]);
 
   // Undo/Redo history for manual text editing
   const [manuscriptHistory, setManuscriptHistory] = useState<DemoManuscript[]>([]);
@@ -201,16 +237,48 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
     paraIdx: number;
   } | null>(null);
 
+  // Always start on Tab 1: 'estilo' (Estilo Literario) when entering layout modification
   const [studioTab, setStudioTab] = useState<
     'estilo' | 'portada' | 'interior' | 'formato' | 'texto'
-  >('portada');
+  >('estilo');
   const [previewMode, setPreviewMode] = useState<'flipbook' | 'pdf_reader'>('flipbook');
   const [currentPageIdx, setCurrentPageIdx] = useState<number>(0);
 
   const [isGeneratingAI, setIsGeneratingAI] = useState<boolean>(false);
   const [isSavingBook, setIsSavingBook] = useState<boolean>(false);
+  const [showSaveConfirmModal, setShowSaveConfirmModal] = useState<boolean>(false);
   const [studioError, setStudioError] = useState<string | null>(null);
   const [studioSuccessMsg, setStudioSuccessMsg] = useState<string | null>(null);
+
+  // Refs to ensure focus & scroll always move to where the user needs to act
+  const studioWorkspaceRef = useRef<HTMLDivElement | null>(null);
+  const firstStyleOptionRef = useRef<HTMLButtonElement | null>(null);
+  const viewerPanelRef = useRef<HTMLDivElement | null>(null);
+
+  const scrollAndFocusActionArea = (target: 'editor' | 'viewer' = 'editor') => {
+    setTimeout(() => {
+      if (target === 'viewer' && viewerPanelRef.current) {
+        viewerPanelRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        return;
+      }
+      if (studioWorkspaceRef.current) {
+        studioWorkspaceRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+      if (firstStyleOptionRef.current) {
+        firstStyleOptionRef.current.focus({ preventScroll: true });
+      }
+    }, 80);
+  };
+
+  // When entering layout editing mode on initial load, focus the Estilo Literario section
+  const didInitialFocusRef = useRef<boolean>(false);
+  useEffect(() => {
+    if (isEditingLayout && !didInitialFocusRef.current) {
+      didInitialFocusRef.current = true;
+      setStudioTab('estilo');
+      scrollAndFocusActionArea('editor');
+    }
+  }, [isEditingLayout]);
 
   // Collect all photos uploaded by the participant across their answers so they can also pick one for the cover
   const allInterviewPhotos = useMemo(() => {
@@ -235,7 +303,9 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
     return list;
   }, [answers]);
 
-  // Compose live book document (either for active editor or selected saved version)
+  // Compose live book document:
+  // - When editing layout (`isEditingLayout === true`), generate ONLY the first 5 pages as a sample preview (`previewSampleOnly: true`).
+  // - When viewing a saved version (`isEditingLayout === false`), compose the complete book (`previewSampleOnly: false`).
   const composedBook = useMemo(() => {
     const targetManuscript = isEditingLayout
       ? manuscript
@@ -259,7 +329,8 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
       coverPhoto: targetCoverPhoto,
       chapterPhotos: targetChapterPhotos,
       customClosingPageText: targetClosingText,
-      maxContentPages: 45,
+      maxContentPages: 500,
+      previewSampleOnly: isEditingLayout,
     });
   }, [
     isEditingLayout,
@@ -270,6 +341,19 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
     closingDedicationText,
     activeSavedVersion,
   ]);
+
+  // Distinct container width & max-width per physical book format so changing format visibly resizes the viewer
+  const viewerFormatMaxWidthClass = useMemo(() => {
+    const fmtId = composedBook.format.id;
+    if (fmtId === 'a5') {
+      return 'w-[76%] max-w-[300px] mx-auto transition-all duration-300';
+    }
+    if (fmtId === 'carta') {
+      return 'w-full max-w-[440px] mx-auto transition-all duration-300';
+    }
+    // 6x9 default
+    return 'w-[88%] max-w-[360px] mx-auto transition-all duration-300';
+  }, [composedBook.format.id]);
 
   // Clamp currentPageIdx if page count changes
   useEffect(() => {
@@ -328,25 +412,78 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
     pushManuscriptEdit({ ...manuscript, chapters: nextChapters });
   };
 
-  // Trigger AI redaction when switching narrative style
+  const styleRequestIdRef = useRef<number>(0);
+  const styleAbortControllerRef = useRef<AbortController | null>(null);
+
+  // Trigger redaction for the 5-page sample preview (`scope: 'preview'`) EVERY time the user clicks a narrative style
   const handleSelectNarrativeStyle = async (styleId: DemoNarrativeStyleId) => {
+    const reqId = ++styleRequestIdRef.current;
+    if (styleAbortControllerRef.current) {
+      styleAbortControllerRef.current.abort();
+    }
+    const controller = new AbortController();
+    styleAbortControllerRef.current = controller;
+
+    setHasSelectedStyleInSession(true);
     setNarrativeStyle(styleId);
     setEditorialConfig((prev) => ({ ...prev, narrativeStyle: styleId }));
-    setIsGeneratingAI(true);
     setStudioError(null);
+    setCurrentPageIdx(0);
+
+    // Immediately regenerate and update the 5-page preview manuscript with the newly chosen style
+    // so the user sees the style transformation on the very first click without delay or stale state
+    const immediateStyled = buildParticipantInitialManuscriptFromAnswers({
+      interviewTitle: editorialConfig.customTitle || interview.title,
+      storyMode: interview.storyMode,
+      participantNames,
+      answers: answers.map((a) => ({
+        ...a,
+        photos: (a.photos || []).map((p) => ({
+          ...p,
+          imageUrl: p.imageUrl || `/api/photos/${p.id}`,
+        })),
+      })),
+      questions,
+      narrativeStyle: styleId,
+      closingDedicationText,
+    });
+    const immediateManu: DemoManuscript = {
+      ...immediateStyled.manuscript,
+      narrativeStyle: styleId,
+      lockedPreviewGroups: undefined,
+    };
+    setManuscript(immediateManu);
+    setAiOriginalManuscript(JSON.parse(JSON.stringify(immediateManu)));
+    setManuscriptHistory([immediateManu]);
+    setHistoryIdx(0);
+    setChapterPhotos(immediateStyled.chapterPhotos);
+
+    setIsGeneratingAI(true);
 
     try {
+      const timeoutId = setTimeout(() => controller.abort(), 25000);
       const res = await fetch('/api/participant/book/generate-manuscript', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           token,
           narrativeStyle: styleId,
+          scope: 'preview',
         }),
+        signal: controller.signal,
       });
+      clearTimeout(timeoutId);
+      if (reqId !== styleRequestIdRef.current) return;
+
       const data = await res.json();
+      if (reqId !== styleRequestIdRef.current) return;
+
       if (res.ok && data.success && data.data?.manuscript) {
-        const aiManu = data.data.manuscript as DemoManuscript;
+        const aiManu: DemoManuscript = {
+          ...(data.data.manuscript as DemoManuscript),
+          narrativeStyle: styleId,
+          lockedPreviewGroups: undefined,
+        };
         setManuscript(aiManu);
         setAiOriginalManuscript(JSON.parse(JSON.stringify(aiManu)));
         setManuscriptHistory([aiManu]);
@@ -354,51 +491,20 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
         if (data.data.chapterPhotos) {
           setChapterPhotos(data.data.chapterPhotos);
         }
-      } else {
-        // Fallback local builder in chosen style
-        const fallback = buildParticipantInitialManuscriptFromAnswers({
-          interviewTitle: editorialConfig.customTitle || interview.title,
-          storyMode: interview.storyMode,
-          participantNames,
-          answers: answers.map((a) => ({
-            ...a,
-            photos: (a.photos || []).map((p) => ({
-              ...p,
-              imageUrl: p.imageUrl || `/api/photos/${p.id}`,
-            })),
-          })),
-          questions,
-          narrativeStyle: styleId,
-          closingDedicationText,
-        });
-        setManuscript(fallback.manuscript);
-        setAiOriginalManuscript(JSON.parse(JSON.stringify(fallback.manuscript)));
       }
     } catch (_err) {
-      const fallback = buildParticipantInitialManuscriptFromAnswers({
-        interviewTitle: editorialConfig.customTitle || interview.title,
-        storyMode: interview.storyMode,
-        participantNames,
-        answers: answers.map((a) => ({
-          ...a,
-          photos: (a.photos || []).map((p) => ({
-            ...p,
-            imageUrl: p.imageUrl || `/api/photos/${p.id}`,
-          })),
-        })),
-        questions,
-        narrativeStyle: styleId,
-        closingDedicationText,
-      });
-      setManuscript(fallback.manuscript);
-      setAiOriginalManuscript(JSON.parse(JSON.stringify(fallback.manuscript)));
+      // If aborted or network error, `immediateManu` in the chosen style is already active and displayed
     } finally {
-      setIsGeneratingAI(false);
+      if (reqId === styleRequestIdRef.current) {
+        setIsGeneratingAI(false);
+      }
     }
   };
 
   // Convert an image URL or File into a base64 dataUrl so jsPDF can embed it reliably
-  const ensureDataUrlForPdf = async (photo: DemoInMemoryPhoto | null | undefined): Promise<DemoInMemoryPhoto | null> => {
+  const ensureDataUrlForPdf = async (
+    photo: DemoInMemoryPhoto | null | undefined
+  ): Promise<DemoInMemoryPhoto | null> => {
     if (!photo) return null;
     if (photo.dataUrl && photo.dataUrl.startsWith('data:image/')) {
       return photo;
@@ -449,23 +555,33 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
     reader.readAsDataURL(file);
   };
 
-  // Download any saved version (or current composed book) as a real vector PDF
-  const handleDownloadBookVersionPdf = async (version: ParticipantBookVersionRecord) => {
+  // Download any saved version (or pre-composed book) as a real vector PDF respecting its exact editorialConfig
+  const handleDownloadBookVersionPdf = async (
+    version: ParticipantBookVersionRecord,
+    preComposedBook?: ReturnType<typeof composeBookPages>
+  ) => {
     try {
-      const resolvedCover = await ensureDataUrlForPdf(version.coverPhoto);
-      const resolvedChapterPhotos: Record<string, DemoInMemoryPhoto | null> = {};
-      for (const [k, v] of Object.entries(version.chapterPhotos || {})) {
-        resolvedChapterPhotos[k] = await ensureDataUrlForPdf(v);
+      let composedForVersion = preComposedBook;
+      if (!composedForVersion) {
+        const resolvedCover = await ensureDataUrlForPdf(version.coverPhoto);
+        const resolvedChapterPhotos: Record<string, DemoInMemoryPhoto | null> = {};
+        for (const [k, v] of Object.entries(version.chapterPhotos || {})) {
+          resolvedChapterPhotos[k] = await ensureDataUrlForPdf(v);
+        }
+
+        composedForVersion = composeBookPages({
+          manuscript: version.manuscript,
+          editorialConfig: version.editorialConfig,
+          coverPhoto: resolvedCover,
+          chapterPhotos: resolvedChapterPhotos,
+          customClosingPageText: version.closingPageText ?? closingDedicationText,
+          maxContentPages: 500,
+          previewSampleOnly: false,
+          lockedLeadingContentGroups: version.manuscript.lockedPreviewGroups,
+        });
       }
 
-      const composedForVersion = composeBookPages({
-        manuscript: version.manuscript,
-        editorialConfig: version.editorialConfig,
-        coverPhoto: resolvedCover,
-        chapterPhotos: resolvedChapterPhotos,
-        customClosingPageText: version.closingPageText ?? closingDedicationText,
-        maxContentPages: 45,
-      });
+      await preloadBookResourcesForPdf(composedForVersion);
 
       const pdfResult = generateRealDemoBookPdf({
         composed: composedForVersion,
@@ -475,7 +591,7 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
           fullName: participant.name,
           partner1Name: participantNames[0] || participant.name,
           partner2Name: participantNames[1] || 'Pareja',
-          customTitle: version.title,
+          customTitle: version.editorialConfig?.customTitle || version.title,
           hasAcceptedTemporaryNotice: true,
         },
       });
@@ -492,11 +608,44 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
     }
   };
 
-  // Save new book version to database and download PDF
+  // Compute how many layout modifications will remain AFTER saving the new PDF version
+  const remainingEditsAfterSave = useMemo(() => {
+    if (!hasSavedVersions) {
+      // Saving Version 1 (initial creation) leaves all additional layout edits available (default: 1)
+      return quotaStatus.layoutEditsAllowed;
+    }
+    return Math.max(0, quotaStatus.remainingEdits - 1);
+  }, [hasSavedVersions, quotaStatus.layoutEditsAllowed, quotaStatus.remainingEdits]);
+
+  // Open warning confirmation modal before generating & saving final PDF version
+  const handleRequestSaveAndGenerateBook = () => {
+    if (!hasSelectedStyleInSession || !narrativeStyle) {
+      setStudioError(
+        'Por favor selecciona primero un Estilo Narrativo para generar la muestra de 5 páginas antes de guardar tu libro.'
+      );
+      setStudioTab('estilo');
+      scrollAndFocusActionArea('editor');
+      return;
+    }
+    setStudioError(null);
+    setShowSaveConfirmModal(true);
+  };
+
+  // Save new book version to database: generates the complete manuscript (`scope: 'full'`) while keeping
+  // the exact first 5 pages shown in the preview, saves the complete version with the active editorialConfig,
+  // and downloads the full PDF
   const handleSaveAndGenerateBookVersion = async () => {
+    setShowSaveConfirmModal(false);
     setIsSavingBook(true);
     setStudioError(null);
     setStudioSuccessMsg(null);
+
+    const activeStyle: DemoNarrativeStyleId =
+      narrativeStyle || editorialConfig.narrativeStyle || 'first_person_literary';
+    const currentEditorialConfig: DemoEditorialConfig = {
+      ...editorialConfig,
+      narrativeStyle: activeStyle,
+    };
 
     try {
       const resolvedCover = await ensureDataUrlForPdf(coverPhoto);
@@ -505,17 +654,85 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
         resolvedChapters[k] = await ensureDataUrlForPdf(v);
       }
 
+      // 1. Capture the exact content page groups from Pages 3..5 of the current 5-page preview using currentEditorialConfig
+      const previewBook = composeBookPages({
+        manuscript,
+        editorialConfig: currentEditorialConfig,
+        coverPhoto: resolvedCover,
+        chapterPhotos: resolvedChapters,
+        customClosingPageText: closingDedicationText,
+        maxContentPages: 500,
+        previewSampleOnly: true,
+      });
+      const lockedPreviewGroups = previewBook.pages
+        .filter((p) => p.kind === 'chapter_content' && Array.isArray(p.sections))
+        .map((p) => p.sections!);
+
+      // 2. Request full book manuscript generation (`scope: 'full'`) preserving the locked preview pages verbatim
+      let fullManuscriptToSave: DemoManuscript = {
+        ...manuscript,
+        lockedPreviewGroups,
+        useOfficialForeverYouLogo: true,
+      };
+
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 12000);
+        const genRes = await fetch('/api/participant/book/generate-manuscript', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            token,
+            narrativeStyle: activeStyle,
+            scope: 'full',
+            lockedPreviewManuscript: manuscript,
+            lockedPreviewGroups,
+          }),
+          signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+        const genData = await genRes.json();
+        if (genRes.ok && genData.success && genData.data?.manuscript) {
+          fullManuscriptToSave = {
+            ...(genData.data.manuscript as DemoManuscript),
+            lockedPreviewGroups,
+            useOfficialForeverYouLogo: true,
+          };
+        }
+      } catch (_fullGenErr) {
+        fullManuscriptToSave = {
+          ...manuscript,
+          lockedPreviewGroups,
+          useOfficialForeverYouLogo: true,
+        };
+      }
+
+      // 3. Compose the complete book (Pages 1..5 identical to preview + Pages 6..N with the rest of the complete story)
+      const fullComposedBook = composeBookPages({
+        manuscript: fullManuscriptToSave,
+        editorialConfig: currentEditorialConfig,
+        coverPhoto: resolvedCover,
+        chapterPhotos: resolvedChapters,
+        customClosingPageText: closingDedicationText,
+        maxContentPages: 500,
+        previewSampleOnly: false,
+        lockedLeadingContentGroups: lockedPreviewGroups,
+      });
+
+      setManuscript(fullManuscriptToSave);
+      setEditorialConfig(currentEditorialConfig);
+
       const res = await fetch('/api/participant/book/save-version', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           token,
-          narrativeStyle,
-          editorialConfig,
-          manuscript,
+          narrativeStyle: activeStyle,
+          editorialConfig: currentEditorialConfig,
+          manuscript: fullManuscriptToSave,
           coverPhoto: resolvedCover,
           chapterPhotos: resolvedChapters,
-          pageCount: composedBook.pages.length,
+          pageCount: fullComposedBook.pages.length,
         }),
       });
 
@@ -524,14 +741,23 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
         throw new Error(data.error || 'No se pudo guardar la versión del libro.');
       }
 
-      const savedVersion = data.data.bookVersion as ParticipantBookVersionRecord;
+      const savedVersion: ParticipantBookVersionRecord = {
+        ...(data.data.bookVersion as ParticipantBookVersionRecord),
+        editorialConfig: currentEditorialConfig,
+        narrativeStyle: activeStyle,
+        manuscript: fullManuscriptToSave,
+      };
       const updatedInterview = data.data.interview as InterviewRecord;
-      const allVersions = data.data.allVersions as ParticipantBookVersionRecord[];
+      const allVersions = (data.data.allVersions as ParticipantBookVersionRecord[]).map((v) =>
+        v.id === savedVersion.id ? savedVersion : v
+      );
 
       // Sync to browser localStorage cache so Admin Panel & future sessions preserve book versions across container restarts
       try {
         const rawBvCache = localStorage.getItem('foreveryou_book_versions_cache');
-        const existingBvList: ParticipantBookVersionRecord[] = rawBvCache ? JSON.parse(rawBvCache) : [];
+        const existingBvList: ParticipantBookVersionRecord[] = rawBvCache
+          ? JSON.parse(rawBvCache)
+          : [];
         const mergedBvMap = new Map<string, ParticipantBookVersionRecord>();
         if (Array.isArray(existingBvList)) {
           for (const bv of existingBvList) {
@@ -576,12 +802,14 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
 
       setSelectedVersionId(savedVersion.id);
       setIsEditingLayout(false);
+      setCurrentPageIdx(0);
       setStudioSuccessMsg(
-        `¡Tu libro en PDF (Versión ${savedVersion.versionNumber}) ha sido generado y guardado en tu Portal del Participante!`
+        `¡Tu libro completo en PDF (Versión ${savedVersion.versionNumber}) ha sido generado y guardado en tu Portal del Participante!`
       );
 
-      // Automatically trigger PDF download for the newly saved version
-      await handleDownloadBookVersionPdf(savedVersion);
+      // Automatically trigger PDF download using the exact fullComposedBook
+      await handleDownloadBookVersionPdf(savedVersion, fullComposedBook);
+      scrollAndFocusActionArea('viewer');
     } catch (err: any) {
       setStudioError(err?.message || 'Error al guardar la versión del libro.');
     } finally {
@@ -596,10 +824,10 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
     setShowQuotaConfirmModal(true);
   };
 
-  // Confirm modification inside modal -> unlock editor populated with latest version
+  // Confirm modification inside modal -> unlock editor starting on "1. Estilo Narrativo" with NO style preselected
+  // so no 5-page PDF is generated until the user clicks a literary style option
   const handleConfirmAcceptQuotaAndEdit = () => {
-    if (activeSavedVersion) {
-      setNarrativeStyle(activeSavedVersion.narrativeStyle);
+    if (activeSavedVersion && !hasUpdatedAnswers) {
       setEditorialConfig({ ...activeSavedVersion.editorialConfig });
       setManuscript(JSON.parse(JSON.stringify(activeSavedVersion.manuscript)));
       setAiOriginalManuscript(JSON.parse(JSON.stringify(activeSavedVersion.manuscript)));
@@ -607,9 +835,21 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
       setChapterPhotos(activeSavedVersion.chapterPhotos || initialLocalData.chapterPhotos);
       setManuscriptHistory([JSON.parse(JSON.stringify(activeSavedVersion.manuscript))]);
       setHistoryIdx(0);
+    } else {
+      setManuscript(JSON.parse(JSON.stringify(initialLocalData.manuscript)));
+      setAiOriginalManuscript(JSON.parse(JSON.stringify(initialLocalData.manuscript)));
+      setChapterPhotos(initialLocalData.chapterPhotos);
+      setManuscriptHistory([JSON.parse(JSON.stringify(initialLocalData.manuscript))]);
+      setHistoryIdx(0);
     }
+    // Reset style selection so nothing is selected by default and 5-page preview waits for user click
+    setHasSelectedStyleInSession(false);
+    setNarrativeStyle(null);
+    setStudioTab('estilo');
+    setCurrentPageIdx(0);
     setShowQuotaConfirmModal(false);
     setIsEditingLayout(true);
+    scrollAndFocusActionArea('editor');
   };
 
   return (
@@ -617,20 +857,23 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
       {/* Top Status & Read-Only Answers Notice Banner */}
       <div className="bg-gradient-to-r from-stone-900 via-stone-800 to-amber-950 text-white rounded-3xl p-6 sm:p-8 shadow-lg">
         <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">
-          <div className="space-y-2">
-            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-500/20 border border-amber-400/30 text-amber-200 text-xs font-semibold tracking-wide uppercase">
-              <Sparkles className="w-3.5 h-3.5" />
-              Estudio Editorial ForeverYou • Entrevista Concluida
+          <div className="space-y-2.5">
+            <div className="flex flex-wrap items-center gap-3">
+              <ForeverYouLogo variant="horizontal" theme="light" size="sm" />
+              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-500/20 border border-amber-400/30 text-amber-200 text-xs font-semibold tracking-wide uppercase">
+                <Sparkles className="w-3.5 h-3.5" />
+                Estudio Editorial ForeverYou • Entrevista Concluida
+              </div>
             </div>
             <h2 className="text-2xl sm:text-3xl font-serif font-bold">
-              {hasSavedVersions
+              {hasSavedVersions && !isEditingLayout
                 ? 'Tu Libro Autobiográfico en PDF'
                 : 'Configura la Maquetación de tu Libro'}
             </h2>
             <p className="text-stone-300 text-sm max-w-2xl leading-relaxed">
-              {hasSavedVersions
+              {hasSavedVersions && !isEditingLayout
                 ? 'Tu libro generado se encuentra guardado de forma permanente en tu Portal del Participante para que puedas consultarlo y descargarlo en PDF cuando lo desees.'
-                : 'Has confirmado el cierre de tu historia. Elige entre los 3 estilos narrativos, 5 diseños de portada, 5 estilos de diseño interior y 3 formatos físicos reales para generar tu libro en PDF.'}
+                : 'Elige primero el Estilo Literario para generar la muestra de 5 páginas y después personaliza portada, diseño interior y formato físico antes de generar tu libro completo en PDF.'}
             </p>
           </div>
 
@@ -659,6 +902,18 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
                   : `Creación inicial + ${quotaStatus.layoutEditsAllowed} modificación adicional`}
               </span>
             </div>
+
+            {!isEditingLayout && hasSavedVersions && quotaStatus.remainingEdits > 0 && (
+              <button
+                type="button"
+                onClick={handleRequestModifyLayout}
+                data-testid="btn-request-modify-layout-top"
+                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-amber-700 hover:bg-amber-600 text-white text-xs font-semibold shadow-xs transition-colors cursor-pointer"
+              >
+                <Palette className="w-4 h-4" />
+                Modificar maquetación ({quotaStatus.remainingEdits})
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -677,161 +932,17 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
         </div>
       )}
 
-      {/* Saved PDF Versions & Download Section (Always visible once at least 1 version exists) */}
-      {hasSavedVersions && (
-        <div
-          className="bg-white rounded-3xl border border-stone-200/80 shadow-xs p-6 sm:p-8 space-y-6"
-          data-testid="saved-book-versions-panel"
-        >
-          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 border-b border-stone-100 pb-5">
-            <div>
-              <h3 className="text-lg font-serif font-bold text-stone-900 flex items-center gap-2">
-                <History className="w-5 h-5 text-amber-800" />
-                Versiones de tu Libro en PDF Guardadas ({bookVersions.length})
-              </h3>
-              <p className="text-xs text-stone-500 mt-1">
-                Todas las versiones generadas de tu libro se conservan íntegras y disponibles para descarga bajo demanda.
-              </p>
-            </div>
-
-            {/* Action to Modify Layout (or Notice if Quota Exhausted) */}
-            {!isEditingLayout && (
-              <div className="flex flex-wrap items-center gap-3">
-                {quotaStatus.remainingEdits > 0 ? (
-                  <button
-                    type="button"
-                    onClick={handleRequestModifyLayout}
-                    data-testid="btn-request-modify-layout"
-                    className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-amber-800 hover:bg-amber-900 text-white text-sm font-medium shadow-xs transition-colors cursor-pointer"
-                  >
-                    <Palette className="w-4 h-4" />
-                    Modificar maquetación ({quotaStatus.remainingEdits} cambio
-                    {quotaStatus.remainingEdits === 1 ? '' : 's'} restante
-                    {quotaStatus.remainingEdits === 1 ? '' : 's'})
-                  </button>
-                ) : (
-                  <div
-                    className="bg-amber-50 border border-amber-200 rounded-2xl px-4 py-3 text-xs text-amber-950 max-w-md"
-                    data-testid="quota-exhausted-banner"
-                  >
-                    <p className="font-semibold flex items-center gap-1.5">
-                      <Lock className="w-3.5 h-3.5 text-amber-800 shrink-0" />
-                      Has utilizado todas tus opciones de modificación de maquetación (0 restantes).
-                    </p>
-                    <p className="text-amber-800 mt-1">
-                      Para más modificaciones y/o actualizaciones de tu libro, por favor ponte en contacto con{' '}
-                      <strong className="font-bold">ForeverYou</strong>.
-                    </p>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-
-          {/* List of Saved PDF Versions */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {bookVersions.map((ver, idx) => {
-              const isSelected = activeSavedVersion?.id === ver.id;
-              const coverSpec =
-                DEMO_COVER_DESIGNS.find((c) => c.id === ver.editorialConfig.coverDesignId) ||
-                DEMO_COVER_DESIGNS[0];
-              const interiorSpec =
-                DEMO_INTERIOR_STYLES.find((i) => i.id === ver.editorialConfig.interiorStyleId) ||
-                DEMO_INTERIOR_STYLES[0];
-              const formatSpec =
-                DEMO_BOOK_FORMATS.find((f) => f.id === ver.editorialConfig.bookFormatId) ||
-                DEMO_BOOK_FORMATS[0];
-              const styleSpec =
-                DEMO_NARRATIVE_STYLES.find((s) => s.id === ver.narrativeStyle) ||
-                DEMO_NARRATIVE_STYLES[1];
-
-              return (
-                <div
-                  key={ver.id}
-                  data-testid={`saved-book-version-card-${ver.versionNumber}`}
-                  className={`rounded-2xl p-4 border-2 transition-all flex flex-col justify-between gap-4 ${
-                    isSelected
-                      ? 'border-amber-700 bg-amber-50/40 shadow-xs'
-                      : 'border-stone-200 bg-stone-50/50 hover:border-stone-300'
-                  }`}
-                >
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-bold bg-stone-900 text-white">
-                        Versión {ver.versionNumber}
-                        {idx === 0 ? ' • Más reciente' : ' • Histórica'}
-                      </span>
-                      <span className="text-[11px] text-stone-500">
-                        {new Date(ver.createdAt).toLocaleString('es-MX', {
-                          dateStyle: 'medium',
-                          timeStyle: 'short',
-                        })}
-                      </span>
-                    </div>
-
-                    <h4 className="font-serif font-bold text-stone-900 text-base">
-                      {ver.title}
-                    </h4>
-
-                    <div className="grid grid-cols-2 gap-1.5 text-[11px] text-stone-600 pt-1">
-                      <div>
-                        <span className="text-stone-400">Estilo:</span>{' '}
-                        {isCouple ? styleSpec.coupleTitle : styleSpec.individualTitle}
-                      </div>
-                      <div>
-                        <span className="text-stone-400">Portada:</span> {coverSpec.name}
-                      </div>
-                      <div>
-                        <span className="text-stone-400">Interior:</span> {interiorSpec.name}
-                      </div>
-                      <div>
-                        <span className="text-stone-400">Formato:</span> {formatSpec.name} (
-                        {ver.pageCount} págs.)
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-stone-200/70">
-                    <button
-                      type="button"
-                      onClick={() => handleDownloadBookVersionPdf(ver)}
-                      data-testid={`btn-download-pdf-v${ver.versionNumber}`}
-                      className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl bg-stone-900 hover:bg-stone-800 text-white text-xs font-semibold transition-colors cursor-pointer"
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                      Descargar PDF (v{ver.versionNumber})
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSelectedVersionId(ver.id);
-                        setIsEditingLayout(false);
-                      }}
-                      className={`px-3 py-2 rounded-xl text-xs font-medium border transition-colors cursor-pointer inline-flex items-center gap-1.5 ${
-                        isSelected && !isEditingLayout
-                          ? 'bg-amber-100 border-amber-300 text-amber-900'
-                          : 'bg-white border-stone-200 text-stone-700 hover:bg-stone-100'
-                      }`}
-                    >
-                      <Eye className="w-3.5 h-3.5" />
-                      Visualizar
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
       {/* Main Studio Area: Left Configuration Controls (when editing) + Right Interactive Book Preview */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+      <div
+        ref={studioWorkspaceRef}
+        className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start scroll-mt-20"
+      >
         {isEditingLayout && (
           <div className="lg:col-span-7 bg-white rounded-3xl border border-stone-200/80 shadow-xs overflow-hidden">
             {/* Studio Navigation Tabs */}
             <div className="border-b border-stone-200 bg-stone-50/70 p-2 flex flex-wrap gap-1.5">
               {[
-                { id: 'estilo', label: '1. Estilo Narrativo (3)', icon: Sparkles },
+                { id: 'estilo', label: '1. Estilo Literario (3)', icon: Sparkles },
                 { id: 'portada', label: '2. Portada (5)', icon: Palette },
                 { id: 'interior', label: '3. Diseño Interior (5)', icon: Layers },
                 { id: 'formato', label: '4. Formato Físico (3)', icon: BookOpen },
@@ -839,18 +950,41 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
               ].map((t) => {
                 const Icon = t.icon;
                 const active = studioTab === t.id;
+                const isLockedTab = t.id !== 'estilo' && !hasSelectedStyleInSession;
                 return (
                   <button
                     key={t.id}
                     type="button"
-                    onClick={() => setStudioTab(t.id as any)}
-                    className={`flex-1 min-w-[130px] inline-flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
+                    disabled={isLockedTab}
+                    data-testid={`studio-tab-${t.id}`}
+                    onClick={() => {
+                      if (isLockedTab) return;
+                      setStudioTab(t.id as any);
+                      if (t.id === 'portada') {
+                        setCurrentPageIdx(0);
+                      } else if (t.id === 'interior' && currentPageIdx === 0) {
+                        setCurrentPageIdx(2);
+                      }
+                      scrollAndFocusActionArea('editor');
+                    }}
+                    title={
+                      isLockedTab
+                        ? 'Primero selecciona un Estilo Literario en el paso 1'
+                        : t.label
+                    }
+                    className={`flex-1 min-w-[130px] inline-flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-xl text-xs font-semibold transition-all ${
                       active
-                        ? 'bg-stone-900 text-white shadow-xs'
-                        : 'text-stone-600 hover:bg-stone-200/60'
+                        ? 'bg-stone-900 text-white shadow-xs cursor-pointer'
+                        : isLockedTab
+                        ? 'text-stone-400 bg-stone-100/60 opacity-60 cursor-not-allowed'
+                        : 'text-stone-600 hover:bg-stone-200/60 cursor-pointer'
                     }`}
                   >
-                    <Icon className="w-3.5 h-3.5" />
+                    {isLockedTab ? (
+                      <Lock className="w-3 h-3 text-stone-400" />
+                    ) : (
+                      <Icon className="w-3.5 h-3.5" />
+                    )}
                     {t.label}
                   </button>
                 );
@@ -860,37 +994,41 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
             <div className="p-6 space-y-6">
               {/* TAB 1: 3 NARRATIVE STYLES */}
               {studioTab === 'estilo' && (
-                <div className="space-y-4">
-                  <div className="flex items-center justify-between">
+                <div className="space-y-4" data-testid="studio-panel-estilo">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
                     <div>
                       <h3 className="text-base font-serif font-bold text-stone-900">
-                        Elige el Estilo Narrativo de tu Obra
+                        Paso 1: Elige el Estilo Literario de tu Obra
                       </h3>
                       <p className="text-xs text-stone-500">
-                        Adapta el tono literario con el que se redactan tus respuestas reales.
+                        Haz clic en un estilo literario para generar las primeras 5 páginas de muestra. Para continuar a las siguientes secciones, primero debes elegir una opción.
                       </p>
                     </div>
                     {isGeneratingAI && (
-                      <span className="inline-flex items-center gap-1.5 text-xs text-amber-800 font-medium">
+                      <span
+                        className="inline-flex items-center gap-1.5 text-xs text-amber-800 font-medium bg-amber-50 px-3 py-1.5 rounded-xl border border-amber-200"
+                        data-testid="generating-5-page-sample-badge"
+                      >
                         <Loader2 className="w-4 h-4 animate-spin" />
-                        Adaptando estilo con IA...
+                        Generando muestra de 5 páginas...
                       </span>
                     )}
                   </div>
 
                   <div className="space-y-3">
-                    {DEMO_NARRATIVE_STYLES.map((st) => {
-                      const selected = narrativeStyle === st.id;
+                    {DEMO_NARRATIVE_STYLES.map((st, idx) => {
+                      const selected = hasSelectedStyleInSession && narrativeStyle === st.id;
                       return (
                         <button
                           key={st.id}
+                          ref={idx === 1 ? firstStyleOptionRef : undefined}
                           type="button"
-                          disabled={isGeneratingAI}
+                          data-testid={`narrative-style-card-${st.id}`}
                           onClick={() => handleSelectNarrativeStyle(st.id)}
-                          className={`w-full text-left rounded-2xl p-4 border-2 transition-all cursor-pointer ${
+                          className={`w-full text-left rounded-2xl p-4 border-2 transition-all cursor-pointer focus:outline-none focus:ring-2 focus:ring-amber-500 ${
                             selected
                               ? 'border-amber-700 bg-amber-50/50 shadow-xs'
-                              : 'border-stone-200 bg-white hover:border-stone-300'
+                              : 'border-stone-200 bg-white hover:border-amber-400/70'
                           }`}
                         >
                           <div className="flex items-center justify-between gap-2">
@@ -899,8 +1037,11 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
                             </span>
                             <div className="flex items-center gap-2">
                               {st.recommended && (
-                                <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 text-[10px] font-bold">
-                                  Recomendado por defecto
+                                <span
+                                  className="px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-900 text-[10px] font-bold"
+                                  data-testid="recommended-style-badge"
+                                >
+                                  Opción recomendada
                                 </span>
                               )}
                               {selected && (
@@ -920,12 +1061,32 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
                       );
                     })}
                   </div>
+
+                  {hasSelectedStyleInSession && (
+                    <div className="flex items-center justify-between bg-emerald-50/80 border border-emerald-200 rounded-2xl p-3.5">
+                      <span className="text-xs text-emerald-900 font-medium">
+                        ✓ Muestra de 5 páginas aplicada al estilo seleccionado. Ahora puedes personalizar Portada, Diseño Interior y Formato Físico.
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setStudioTab('portada');
+                          setCurrentPageIdx(0);
+                          scrollAndFocusActionArea('editor');
+                        }}
+                        data-testid="btn-continue-to-portada"
+                        className="px-4 py-2 rounded-xl bg-stone-900 hover:bg-stone-800 text-white text-xs font-semibold shrink-0 cursor-pointer"
+                      >
+                        Continuar a Portada →
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
 
               {/* TAB 2: 5 COVER DESIGNS + COLOR VARIANTS + OPTIONAL VISUAL ELEMENT */}
               {studioTab === 'portada' && (
-                <div className="space-y-6">
+                <div className="space-y-6" data-testid="studio-panel-portada">
                   <div>
                     <h3 className="text-base font-serif font-bold text-stone-900">
                       5 Diseños de Portada Conmemorativa
@@ -949,13 +1110,14 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
                           title={editorialConfig.customTitle || interview.title}
                           authors={editorialConfig.customAuthors || participant.name}
                           selected={isSel}
-                          onSelect={() =>
+                          onSelect={() => {
                             setEditorialConfig((prev) => ({
                               ...prev,
                               coverDesignId: design.id as DemoCoverDesignId,
                               coverColorVariantIdx: 0,
-                            }))
-                          }
+                            }));
+                            setCurrentPageIdx(0);
+                          }}
                         />
                       );
                     })}
@@ -978,12 +1140,13 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
                               <button
                                 key={variant.name}
                                 type="button"
-                                onClick={() =>
+                                onClick={() => {
                                   setEditorialConfig((prev) => ({
                                     ...prev,
                                     coverColorVariantIdx: vIdx,
-                                  }))
-                                }
+                                  }));
+                                  setCurrentPageIdx(0);
+                                }}
                                 className={`flex items-center gap-2.5 p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
                                   active
                                     ? 'border-amber-800 bg-amber-50/70 font-semibold shadow-2xs'
@@ -1019,12 +1182,13 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
                         <button
                           key={opt.id}
                           type="button"
-                          onClick={() =>
+                          onClick={() => {
                             setEditorialConfig((prev) => ({
                               ...prev,
                               coverVisualType: opt.id as any,
-                            }))
-                          }
+                            }));
+                            setCurrentPageIdx(0);
+                          }}
                           className={`px-3 py-2 rounded-xl text-xs font-medium border transition-all cursor-pointer ${
                             editorialConfig.coverVisualType === opt.id
                               ? 'border-amber-800 bg-amber-800 text-white'
@@ -1042,12 +1206,13 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
                           <button
                             key={ill.id}
                             type="button"
-                            onClick={() =>
+                            onClick={() => {
                               setEditorialConfig((prev) => ({
                                 ...prev,
                                 coverIllustrationId: ill.id as DemoThematicIllustrationId,
-                              }))
-                            }
+                              }));
+                              setCurrentPageIdx(0);
+                            }}
                             className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
                               editorialConfig.coverIllustrationId === ill.id
                                 ? 'border-amber-700 bg-amber-50/70'
@@ -1093,7 +1258,10 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
                                 <button
                                   key={ph.id}
                                   type="button"
-                                  onClick={() => setCoverPhoto(ph)}
+                                  onClick={() => {
+                                    setCoverPhoto(ph);
+                                    setCurrentPageIdx(0);
+                                  }}
                                   className={`w-14 h-14 rounded-lg overflow-hidden border-2 cursor-pointer ${
                                     coverPhoto?.id === ph.id
                                       ? 'border-amber-700 ring-2 ring-amber-400'
@@ -1118,13 +1286,13 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
 
               {/* TAB 3: 5 INTERIOR DESIGN STYLES */}
               {studioTab === 'interior' && (
-                <div className="space-y-4">
+                <div className="space-y-4" data-testid="studio-panel-interior">
                   <div>
                     <h3 className="text-base font-serif font-bold text-stone-900">
                       5 Estilos de Diseño Interior
                     </h3>
                     <p className="text-xs text-stone-500">
-                      Define la tipografía de lectura, capitulares, ornamentos y tono de papel.
+                      Define la tipografía de lectura, capitulares, ornamentos y tono de papel tanto en la vista previa como en el PDF final.
                     </p>
                   </div>
 
@@ -1134,12 +1302,16 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
                         key={styleSpec.id}
                         styleSpec={styleSpec}
                         selected={editorialConfig.interiorStyleId === styleSpec.id}
-                        onSelect={() =>
+                        onSelect={() => {
                           setEditorialConfig((prev) => ({
                             ...prev,
                             interiorStyleId: styleSpec.id as DemoInteriorStyleId,
-                          }))
-                        }
+                          }));
+                          // Switch viewer to an interior chapter page (Page 3) if currently on cover so user immediately sees the interior style change
+                          if (currentPageIdx === 0 && composedBook.pages.length >= 3) {
+                            setCurrentPageIdx(2);
+                          }
+                        }}
                       />
                     ))}
                   </div>
@@ -1148,13 +1320,13 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
 
               {/* TAB 4: 3 PHYSICAL FORMATS */}
               {studioTab === 'formato' && (
-                <div className="space-y-4">
+                <div className="space-y-4" data-testid="studio-panel-formato">
                   <div>
                     <h3 className="text-base font-serif font-bold text-stone-900">
                       3 Formatos Físicos Reales de Impresión
                     </h3>
                     <p className="text-xs text-stone-500">
-                      El motor de paginación ajusta automáticamente márgenes, caja tipográfica y número de páginas en el PDF.
+                      El motor de paginación y el visualizador ajustan automáticamente el tamaño de página, márgenes, proporción y tipografía en tiempo real y en el PDF final.
                     </p>
                   </div>
 
@@ -1165,6 +1337,7 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
                         <button
                           key={fmt.id}
                           type="button"
+                          data-testid={`format-option-${fmt.id}`}
                           onClick={() =>
                             setEditorialConfig((prev) => ({
                               ...prev,
@@ -1203,14 +1376,14 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
 
               {/* TAB 5: MANUAL PARAGRAPH & METADATA EDITING */}
               {studioTab === 'texto' && (
-                <div className="space-y-5">
+                <div className="space-y-5" data-testid="studio-panel-texto">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div>
                       <h3 className="text-base font-serif font-bold text-stone-900">
                         Edición Manual de Título y Párrafos del Libro
                       </h3>
                       <p className="text-xs text-stone-500">
-                        Afina cualquier frase o párrafo de tu libro antes de generar tu versión en PDF.
+                        Afina cualquier frase o párrafo con negritas o cursivas antes de generar tu versión final en PDF.
                       </p>
                     </div>
 
@@ -1402,16 +1575,21 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
               {/* Primary Save & Generate PDF Version Button */}
               <div className="pt-4 border-t border-stone-200 flex flex-wrap items-center justify-between gap-4">
                 <div className="text-xs text-stone-500">
-                  {hasSavedVersions
-                    ? `Se guardará como Versión ${bookVersions.length + 1} (consumirá 1 cambio de maquetación).`
-                    : 'Se guardará como Versión 1 de tu libro en PDF y tendrás 1 cambio adicional disponible.'}
+                  {!hasSelectedStyleInSession
+                    ? 'Selecciona un Estilo Literario arriba para habilitar la generación del PDF.'
+                    : hasSavedVersions
+                    ? `Se guardará como Versión ${bookVersions.length + 1} (te quedarán ${remainingEditsAfterSave} modificación(es) después).`
+                    : `Se guardará como Versión 1 de tu libro completo en PDF y te quedará(n) ${remainingEditsAfterSave} modificación(es) adicional(es).`}
                 </div>
 
                 <div className="flex items-center gap-3">
                   {hasSavedVersions && (
                     <button
                       type="button"
-                      onClick={() => setIsEditingLayout(false)}
+                      onClick={() => {
+                        setIsEditingLayout(false);
+                        scrollAndFocusActionArea('viewer');
+                      }}
                       className="px-4 py-2.5 rounded-xl border border-stone-300 text-stone-700 text-xs font-medium hover:bg-stone-100 cursor-pointer"
                     >
                       Cancelar edición
@@ -1420,10 +1598,10 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
 
                   <button
                     type="button"
-                    disabled={isSavingBook || isGeneratingAI}
-                    onClick={handleSaveAndGenerateBookVersion}
+                    disabled={isSavingBook || isGeneratingAI || !hasSelectedStyleInSession}
+                    onClick={handleRequestSaveAndGenerateBook}
                     data-testid="btn-save-participant-book-version"
-                    className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-amber-800 hover:bg-amber-900 disabled:opacity-50 text-white text-sm font-semibold shadow-sm transition-all cursor-pointer"
+                    className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-amber-800 hover:bg-amber-900 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-semibold shadow-sm transition-all cursor-pointer"
                   >
                     {isSavingBook ? (
                       <>
@@ -1447,52 +1625,96 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
 
         {/* Right / Full-Width Live Book Preview (Mode A: Flipbook & Mode B: Continuous PDF Reader) */}
         <div
+          ref={viewerPanelRef}
+          data-testid="book-preview-viewer-panel"
           className={`${
             isEditingLayout ? 'lg:col-span-5' : 'lg:col-span-12'
-          } bg-stone-900 rounded-3xl p-5 sm:p-7 text-white space-y-5 shadow-xl`}
+          } bg-stone-900 rounded-3xl p-5 sm:p-7 text-white space-y-5 shadow-xl scroll-mt-20`}
         >
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 pb-4">
-            <div>
+            <div className="space-y-1">
               <span className="text-[11px] uppercase tracking-widest text-amber-300 font-semibold block">
                 {isEditingLayout
-                  ? 'Vista Previa Editorial en Tiempo Real'
-                  : `Visualizando Versión ${activeSavedVersion?.versionNumber || 1}`}
+                  ? 'Vista Previa Editorial (Muestra de las primeras 5 páginas)'
+                  : `Visualizando Libro Completo • Versión ${activeSavedVersion?.versionNumber || 1}`}
               </span>
-              <h4 className="text-base font-serif font-bold">
+              <h4
+                className="text-base font-serif font-bold"
+                data-testid="viewer-format-dimensions-heading"
+              >
                 {composedBook.format.name} ({composedBook.format.dimensionsLabel}) •{' '}
-                {composedBook.pages.length} páginas
+                {isEditingLayout && !hasSelectedStyleInSession
+                  ? 'En espera de estilo literario'
+                  : `${composedBook.pages.length} páginas${
+                      isEditingLayout ? ' de muestra' : ' totales'
+                    }`}
               </h4>
+              <div className="flex flex-wrap items-center gap-2 text-[11px] text-stone-300">
+                <span className="px-2 py-0.5 rounded bg-white/10">
+                  Diseño interior: <strong>{composedBook.interiorStyle.name}</strong>
+                </span>
+                <span className="px-2 py-0.5 rounded bg-white/10">
+                  Portada: <strong>{composedBook.coverDesign.name}</strong>
+                </span>
+              </div>
             </div>
 
-            <div className="flex items-center gap-1.5 bg-white/10 p-1 rounded-xl">
-              <button
-                type="button"
-                onClick={() => setPreviewMode('flipbook')}
-                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer ${
-                  previewMode === 'flipbook'
-                    ? 'bg-amber-700 text-white'
-                    : 'text-stone-300 hover:text-white'
-                }`}
-              >
-                Modo Libro
-              </button>
-              <button
-                type="button"
-                onClick={() => setPreviewMode('pdf_reader')}
-                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer ${
-                  previewMode === 'pdf_reader'
-                    ? 'bg-amber-700 text-white'
-                    : 'text-stone-300 hover:text-white'
-                }`}
-              >
-                Modo Lector PDF
-              </button>
-            </div>
+            {(!isEditingLayout || hasSelectedStyleInSession) && (
+              <div className="flex items-center gap-1.5 bg-white/10 p-1 rounded-xl">
+                <button
+                  type="button"
+                  onClick={() => setPreviewMode('flipbook')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer ${
+                    previewMode === 'flipbook'
+                      ? 'bg-amber-700 text-white'
+                      : 'text-stone-300 hover:text-white'
+                  }`}
+                >
+                  Modo Libro
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPreviewMode('pdf_reader')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer ${
+                    previewMode === 'pdf_reader'
+                      ? 'bg-amber-700 text-white'
+                      : 'text-stone-300 hover:text-white'
+                  }`}
+                >
+                  Modo Lector PDF
+                </button>
+              </div>
+            )}
           </div>
 
-          {previewMode === 'flipbook' ? (
+          {/* Before user clicks a literary style in edit mode: brief prompt instead of pre-generated PDF */}
+          {isEditingLayout && !hasSelectedStyleInSession ? (
+            <div
+              data-testid="viewer-awaiting-style-prompt"
+              className="py-16 px-6 rounded-2xl border border-dashed border-white/20 bg-white/5 text-center space-y-3 my-4"
+            >
+              <div className="w-12 h-12 rounded-2xl bg-amber-500/20 border border-amber-400/30 flex items-center justify-center mx-auto text-amber-300">
+                <Sparkles className="w-6 h-6" />
+              </div>
+              <p className="text-sm font-serif font-semibold text-white max-w-xs mx-auto">
+                Selecciona un Estilo Literario a la izquierda para generar la muestra de 5 páginas.
+              </p>
+            </div>
+          ) : previewMode === 'flipbook' ? (
             <div className="space-y-4">
-              <div className="max-w-sm mx-auto">
+              {isEditingLayout && isGeneratingAI && (
+                <div
+                  data-testid="viewer-generating-sample-loader"
+                  className="flex items-center justify-center gap-2 py-1.5 px-3 rounded-xl bg-amber-500/15 border border-amber-400/30 text-amber-200 text-xs"
+                >
+                  <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                  <span>Puliendo redacción editorial del estilo seleccionado...</span>
+                </div>
+              )}
+              <div
+                className={viewerFormatMaxWidthClass}
+                data-testid={`viewer-page-container-${composedBook.format.id}`}
+              >
                 <DemoComposedPageView
                   composed={composedBook}
                   page={composedBook.pages[currentPageIdx] || composedBook.pages[0]}
@@ -1529,7 +1751,10 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
           ) : (
             <div className="max-h-[640px] overflow-y-auto space-y-6 pr-1">
               {composedBook.pages.map((pg) => (
-                <div key={pg.pageNumber} className="max-w-sm mx-auto space-y-1.5">
+                <div
+                  key={pg.pageNumber}
+                  className={`${viewerFormatMaxWidthClass} space-y-1.5`}
+                >
                   <div className="text-[11px] text-stone-400 text-center">
                     Página {pg.pageNumber} de {pg.totalPages}
                   </div>
@@ -1544,6 +1769,217 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
           )}
         </div>
       </div>
+
+      {/* Saved PDF Versions & Download Section — ALWAYS placed at the bottom below the PDF story viewer */}
+      {hasSavedVersions && (
+        <div
+          className="bg-white rounded-3xl border border-stone-200/80 shadow-xs p-6 sm:p-8 space-y-6"
+          data-testid="saved-book-versions-panel"
+        >
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 border-b border-stone-100 pb-5">
+            <div>
+              <h3 className="text-lg font-serif font-bold text-stone-900 flex items-center gap-2">
+                <History className="w-5 h-5 text-amber-800" />
+                Versiones de tu Libro en PDF Guardadas ({bookVersions.length})
+              </h3>
+              <p className="text-xs text-stone-500 mt-1">
+                Todas las versiones generadas de tu libro completo se conservan íntegras debajo del visualizador y disponibles para descarga bajo demanda.
+              </p>
+            </div>
+
+            {/* Action to Modify Layout (or Notice if Quota Exhausted) */}
+            {!isEditingLayout && (
+              <div className="flex flex-wrap items-center gap-3">
+                {quotaStatus.remainingEdits > 0 ? (
+                  <button
+                    type="button"
+                    onClick={handleRequestModifyLayout}
+                    data-testid="btn-request-modify-layout"
+                    className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-amber-800 hover:bg-amber-900 text-white text-sm font-medium shadow-xs transition-colors cursor-pointer"
+                  >
+                    <Palette className="w-4 h-4" />
+                    Modificar maquetación ({quotaStatus.remainingEdits} cambio
+                    {quotaStatus.remainingEdits === 1 ? '' : 's'} restante
+                    {quotaStatus.remainingEdits === 1 ? '' : 's'})
+                  </button>
+                ) : (
+                  <div
+                    className="bg-amber-50 border border-amber-200 rounded-2xl px-4 py-3 text-xs text-amber-950 max-w-md"
+                    data-testid="quota-exhausted-banner"
+                  >
+                    <p className="font-semibold flex items-center gap-1.5">
+                      <Lock className="w-3.5 h-3.5 text-amber-800 shrink-0" />
+                      Has utilizado todas tus opciones de modificación de maquetación (0 restantes).
+                    </p>
+                    <p className="text-amber-800 mt-1">
+                      Para más modificaciones y/o actualizaciones de tu libro, por favor ponte en contacto con{' '}
+                      <strong className="font-bold">ForeverYou</strong>.
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* List of Saved PDF Versions */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {bookVersions.map((ver, idx) => {
+              const isSelected = activeSavedVersion?.id === ver.id;
+              const coverSpec =
+                DEMO_COVER_DESIGNS.find((c) => c.id === ver.editorialConfig.coverDesignId) ||
+                DEMO_COVER_DESIGNS[0];
+              const interiorSpec =
+                DEMO_INTERIOR_STYLES.find((i) => i.id === ver.editorialConfig.interiorStyleId) ||
+                DEMO_INTERIOR_STYLES[0];
+              const formatSpec =
+                DEMO_BOOK_FORMATS.find((f) => f.id === ver.editorialConfig.bookFormatId) ||
+                DEMO_BOOK_FORMATS[0];
+              const styleSpec =
+                DEMO_NARRATIVE_STYLES.find((s) => s.id === ver.narrativeStyle) ||
+                DEMO_NARRATIVE_STYLES[1];
+
+              return (
+                <div
+                  key={ver.id}
+                  data-testid={`saved-book-version-card-${ver.versionNumber}`}
+                  className={`rounded-2xl p-4 border-2 transition-all flex flex-col justify-between gap-4 ${
+                    isSelected
+                      ? 'border-amber-700 bg-amber-50/40 shadow-xs'
+                      : 'border-stone-200 bg-stone-50/50 hover:border-stone-300'
+                  }`}
+                >
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-bold bg-stone-900 text-white">
+                        Versión {ver.versionNumber}
+                        {idx === 0 ? ' • Más reciente' : ' • Histórica'}
+                      </span>
+                      <span className="text-[11px] text-stone-500">
+                        {new Date(ver.createdAt).toLocaleString('es-MX', {
+                          dateStyle: 'medium',
+                          timeStyle: 'short',
+                        })}
+                      </span>
+                    </div>
+
+                    <h4 className="font-serif font-bold text-stone-900 text-base">
+                      {ver.title}
+                    </h4>
+
+                    <div className="grid grid-cols-2 gap-1.5 text-[11px] text-stone-600 pt-1">
+                      <div>
+                        <span className="text-stone-400">Estilo:</span>{' '}
+                        {isCouple ? styleSpec.coupleTitle : styleSpec.individualTitle}
+                      </div>
+                      <div>
+                        <span className="text-stone-400">Portada:</span> {coverSpec.name}
+                      </div>
+                      <div>
+                        <span className="text-stone-400">Interior:</span> {interiorSpec.name}
+                      </div>
+                      <div>
+                        <span className="text-stone-400">Formato:</span> {formatSpec.name} (
+                        {ver.pageCount} págs.)
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-stone-200/70">
+                    <button
+                      type="button"
+                      onClick={() => handleDownloadBookVersionPdf(ver)}
+                      data-testid={`btn-download-pdf-v${ver.versionNumber}`}
+                      className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl bg-stone-900 hover:bg-stone-800 text-white text-xs font-semibold transition-colors cursor-pointer"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      Descargar PDF (v{ver.versionNumber})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedVersionId(ver.id);
+                        setIsEditingLayout(false);
+                        setCurrentPageIdx(0);
+                        scrollAndFocusActionArea('viewer');
+                      }}
+                      className={`px-3 py-2 rounded-xl text-xs font-medium border transition-colors cursor-pointer inline-flex items-center gap-1.5 ${
+                        isSelected && !isEditingLayout
+                          ? 'bg-amber-100 border-amber-300 text-amber-900'
+                          : 'bg-white border-stone-200 text-stone-700 hover:bg-stone-100'
+                      }`}
+                    >
+                      <Eye className="w-3.5 h-3.5" />
+                      Visualizar
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Warning Modal before Generating & Downloading Final PDF Version */}
+      {showSaveConfirmModal && (
+        <div
+          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4"
+          data-testid="modal-confirm-save-final-pdf"
+        >
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 sm:p-8 shadow-2xl border border-stone-200 space-y-5">
+            <div className="flex items-center gap-3 text-amber-900">
+              <div className="w-11 h-11 rounded-2xl bg-amber-100 flex items-center justify-center shrink-0">
+                <ShieldAlert className="w-6 h-6 text-amber-800" />
+              </div>
+              <div>
+                <h3 className="text-lg font-serif font-bold text-stone-900">
+                  Confirmación para generar la versión final de tu PDF
+                </h3>
+                <p className="text-xs text-stone-500">
+                  Aviso antes de guardar y descargar tu libro completo
+                </p>
+              </div>
+            </div>
+
+            <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 space-y-2.5 text-sm text-stone-800 leading-relaxed">
+              <p className="font-semibold text-amber-950">
+                Al continuar se generará la versión final completa de tu libro en PDF (Versión{' '}
+                {bookVersions.length + 1}) con toda tu historia de vida.
+              </p>
+              <p
+                className="text-xs text-stone-800 font-medium bg-white/80 p-3 rounded-xl border border-amber-200"
+                data-testid="save-modal-remaining-modifications-text"
+              >
+                Después de generar este PDF te quedará(n){' '}
+                <strong className="text-amber-900 underline text-sm">
+                  {remainingEditsAfterSave} modificación(es) de maquetación
+                </strong>{' '}
+                disponible(s).
+              </p>
+              <p className="text-xs text-stone-600">
+                Se conservarán intactas las primeras 5 páginas de tu vista previa y se integrarán todos tus capítulos, respuestas de profundización, diseño interior («{composedBook.interiorStyle.name}») y formato físico («{composedBook.format.name}»).
+              </p>
+            </div>
+
+            <div className="flex flex-col sm:flex-row items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowSaveConfirmModal(false)}
+                className="w-full sm:w-auto px-4 py-2.5 rounded-xl border border-stone-300 text-stone-700 text-xs font-semibold hover:bg-stone-100 cursor-pointer"
+              >
+                Seguir revisando maquetación
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveAndGenerateBookVersion}
+                data-testid="btn-confirm-generate-final-pdf"
+                className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-amber-800 hover:bg-amber-900 text-white text-xs font-semibold shadow-xs cursor-pointer"
+              >
+                Sí, generar versión final y descargar PDF
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Mandatory Confirmation Modal before using an Additional Layout Modification */}
       {showQuotaConfirmModal && (

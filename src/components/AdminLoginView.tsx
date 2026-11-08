@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { Shield, Lock, ShieldAlert, LogIn } from 'lucide-react';
+import { Shield, ShieldAlert, LogIn } from 'lucide-react';
+import { ForeverYouLogo } from './ForeverYouLogo';
 
 interface AdminLoginViewProps {
   adminEmail: string | null;
@@ -95,8 +96,8 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({
       <div className="bg-white rounded-2xl shadow-xl border border-stone-200 overflow-hidden">
         {/* Card Header */}
         <div className="bg-stone-900 text-stone-100 p-8 text-center relative">
-          <div className="w-16 h-16 bg-amber-800/80 border border-amber-600/50 rounded-2xl flex items-center justify-center mx-auto mb-4 text-amber-200 shadow-md">
-            <Lock className="w-8 h-8" />
+          <div className="flex justify-center mb-4">
+            <ForeverYouLogo variant="stacked" theme="light" size="lg" />
           </div>
           <h2 className="font-serif text-2xl sm:text-3xl font-bold tracking-tight text-amber-50">
             Acceso Administrativo

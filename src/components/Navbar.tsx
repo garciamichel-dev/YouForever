@@ -1,5 +1,6 @@
 import React from 'react';
-import { BookOpen, ShieldCheck, LogOut, Sparkles } from 'lucide-react';
+import { ShieldCheck, LogOut, Sparkles } from 'lucide-react';
+import { ForeverYouLogo } from './ForeverYouLogo';
 
 interface NavbarProps {
   currentView: 'admin' | 'participant' | 'conoceme' | 'demo';
@@ -29,17 +30,12 @@ export const Navbar: React.FC<NavbarProps> = ({
             className="flex items-center space-x-3 cursor-pointer select-none"
             onClick={() => onSelectView(isAuthorizedAdmin ? 'admin' : 'participant')}
           >
-            <div className="w-10 h-10 rounded-lg bg-amber-700/80 border border-amber-600/50 flex items-center justify-center text-amber-100 shadow-inner">
-              <BookOpen className="w-5 h-5 text-amber-200" />
-            </div>
-            <div>
-              <span className="font-serif text-lg font-bold tracking-tight text-amber-50">
-                ForeverYou
-              </span>
-              <span className="block text-[11px] text-stone-400 font-sans tracking-wide">
-                Entrevistas de Vida &amp; Patrimonio Familiar
-              </span>
-            </div>
+            <ForeverYouLogo
+              variant="horizontal"
+              theme="light"
+              size="md"
+              subtitle="Entrevistas de Vida & Patrimonio Familiar"
+            />
           </div>
 
           {/* Navigation Tabs */}

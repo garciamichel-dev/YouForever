@@ -18,6 +18,7 @@ import {
   CURRENT_PRIVACY_POLICY_DATE,
   RESPONSIBLE_CONTACT_EMAIL,
 } from '../logic/interviewRules.ts';
+import { ForeverYouLogo } from './ForeverYouLogo';
 import { IntegralPrivacyNoticeModal } from './IntegralPrivacyNoticeModal.tsx';
 import { safeFetchJson } from '../utils/safeApi.ts';
 
@@ -162,7 +163,10 @@ export const ConsentScreen: React.FC<ConsentScreenProps> = ({
   return (
     <div className="max-w-2xl mx-auto space-y-8 pb-16 px-4">
       {/* Brand Header */}
-      <div className="text-center space-y-2 pt-4">
+      <div className="text-center space-y-3 pt-4">
+        <div className="flex justify-center">
+          <ForeverYouLogo variant="stacked" theme="navy" size="md" />
+        </div>
         <div className="inline-flex items-center space-x-2 px-3 py-1 rounded-full bg-amber-100/80 text-amber-950 text-xs font-semibold tracking-wide border border-amber-200">
           <Shield className="w-3.5 h-3.5 text-amber-800" />
           <span>Consentimiento Informado Obligatorio • ForeverYou</span>

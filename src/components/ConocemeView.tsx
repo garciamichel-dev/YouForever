@@ -34,6 +34,7 @@ import {
   buildMailtoInquiryUrl,
   InquiryFormInput,
 } from '../utils/conocemeLogic.ts';
+import { ForeverYouLogo } from './ForeverYouLogo';
 
 interface ConocemeViewProps {
   onNavigateToPortal?: () => void;
@@ -215,12 +216,12 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
       {/* Strict 3-Zone Top Bar Contract */}
       <header className="sticky top-0 z-40 bg-[#FAF8F5]/95 backdrop-blur-sm border-b border-stone-200/80">
         <div className="max-w-7xl mx-auto flex items-center justify-between gap-8 px-6 py-4">
-          {/* Zone 1: Single text element wordmark */}
+          {/* Zone 1: Official ForeverYou Horizontal Lockup */}
           <a
             href="/conoceme"
-            className="text-xl font-serif font-bold tracking-tight text-stone-900 whitespace-nowrap shrink-0"
+            className="inline-flex items-center whitespace-nowrap shrink-0"
           >
-            ForeverYou
+            <ForeverYouLogo variant="horizontal" theme="navy" size="md" />
           </a>
 
           {/* Zone 2: 4 concise single-line navigation links */}

@@ -1,6 +1,6 @@
 {
-  "summary": "Plan de rediseño del Portal del Participante centrado en accesibilidad para adultos mayores, presencia protagonista de pregunta y micrófono, barra inferior fija y menú de opciones compacto.",
-  "updatedAt": "2026-11-05T13:38:08.603986586Z",
-  "requestFeedback": true,
-  "userFacing": true
+  "summary":  "Plan de implementación actualizado con la integración del sistema de logotipo oficial de ForeverYou (4 variantes: Principal Vertical, Horizontal Lockup, App Icon y Print/Monochrome) en toda la plataforma web, favicon y en todos los nuevos libros PDF (Portada, Portadilla y Página final de cierre), además de la depuración ortográfica y de congruencia lógica.",
+  "updatedAt":  "2026-11-07T20:59:43.193219519Z",
+  "requestFeedback":  true,
+  "userFacing":  true
 }

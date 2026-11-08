@@ -9,11 +9,17 @@ import {
   formatPhotoMarkdownBlock,
 } from '../logic/interviewRules.ts';
 import {
+  ComposedChapterSectionBlock,
   DEMO_NARRATIVE_STYLES,
   DemoInMemoryPhoto,
   DemoManuscript,
   DemoNarrativeStyleId,
+  StructuredChapterTestimonyUnit,
   buildParticipantInitialManuscriptFromAnswers,
+  cleanSpanishOralText,
+  ensureParagraphConformsToStyle,
+  extractCleanParticipantAnswerText,
+  sanitizeAndRepairBookManuscript,
 } from '../logic/demoStoryRules.ts';
 
 export interface SufficiencyEvaluationResult {
@@ -53,11 +59,11 @@ const ai = new GoogleGenAI({
     },
   },
 });
-export const TEXT_MODEL = 'gemini-3-flash-preview';
+export const TEXT_MODEL = 'gemini-3.8-flash';
 const TEXT_FALLBACK_MODELS = [
-  'gemini-3-flash-preview',
+  'gemini-3.8-flash',
   'gemini-flash-latest',
-  'gemini-3.1-flash-lite-preview',
+  'gemini-3.1-flash-lite',
 ];
 
 /**
@@ -965,25 +971,38 @@ export async function transcribeAudioWithGemini(params: {
 /**
  * Generates an editorial book manuscript (`DemoManuscript`) and chapter photo map from a participant's
  * completed interview answers in the selected narrative style (A, B, or C).
+ *
+ * Supports two scopes:
+ * - `'preview'`: Fast redaction of only the leading paragraphs needed for the 5-page sample preview in Layout Studio.
+ * - `'full'`: Complete redaction of the entire life story when saving the PDF version, preserving verbatim the paragraphs
+ *   already displayed on Pages 3..5 of the 5-page preview (`lockedPreviewGroups` / `lockedPreviewManuscript`) and ensuring
+ *   100% of main answers, deepening follow-ups, and additional memories are included without summarizing or omitting any.
  */
 export async function generateParticipantBookManuscriptWithAI(params: {
   interview: InterviewRecord;
   participants: ParticipantRecord[];
   answers: AnswerRecord[];
   questions: QuestionRecord[];
-  narrativeStyle: DemoNarrativeStyleId;
+  narrativeStyle?: DemoNarrativeStyleId;
   closingDedicationText?: string;
+  scope?: 'preview' | 'full';
+  lockedPreviewManuscript?: DemoManuscript | null;
+  lockedPreviewGroups?: ComposedChapterSectionBlock[][] | null;
 }): Promise<{
   manuscript: DemoManuscript;
   chapterPhotos: Record<string, DemoInMemoryPhoto | null>;
+  scope: 'preview' | 'full';
 }> {
   const {
     interview,
     participants,
     answers,
     questions,
-    narrativeStyle,
+    narrativeStyle = 'first_person_literary',
     closingDedicationText = '',
+    scope = 'full',
+    lockedPreviewManuscript = null,
+    lockedPreviewGroups = null,
   } = params;
 
   const participantNames = participants.map((p) => p.name);
@@ -998,29 +1017,133 @@ export async function generateParticipantBookManuscriptWithAI(params: {
   });
 
   const validAnswers = answers.filter(
-    (a) => !a.notRecalled && a.answerText && a.answerText.trim().length > 0
+    (a) => !a.notRecalled && extractCleanParticipantAnswerText(a).length > 0
   );
   if (validAnswers.length === 0) {
-    return fallbackResult;
+    return { ...fallbackResult, scope };
   }
 
   const styleSpec =
     DEMO_NARRATIVE_STYLES.find((s) => s.id === narrativeStyle) || DEMO_NARRATIVE_STYLES[1];
   const isCouple = interview.storyMode === 'compartida' && participantNames.length >= 2;
-
-  const chapterInputSummary = fallbackResult.manuscript.chapters.map((ch) => ({
-    id: ch.id,
-    partNumber: ch.partNumber,
-    dimensionKey: ch.dimensionKey,
-    title: ch.title,
-    rawTestimonies: ch.paragraphs,
-  }));
-
   const styleTitle = isCouple ? styleSpec.coupleTitle : styleSpec.individualTitle;
   const styleDesc = isCouple ? styleSpec.coupleDescription : styleSpec.individualDescription;
 
-  const prompt = `Eres un escritor y editor biográfico de ForeverYou.
-Debes redactar los capítulos del libro autobiográfico a partir EXCLUSIVAMENTE de las respuestas reales del entrevistado.
+  // Determine how many leading paragraphs per chapter are locked from the 5-page preview when generating the full book
+  const effectiveLockedGroups =
+    scope === 'full'
+      ? lockedPreviewGroups || lockedPreviewManuscript?.lockedPreviewGroups || null
+      : null;
+
+  const lockedParasByChapter = new Map<string, string[]>();
+  if (effectiveLockedGroups && effectiveLockedGroups.length > 0) {
+    for (const group of effectiveLockedGroups) {
+      for (const sec of group) {
+        const prev = lockedParasByChapter.get(sec.chapterId) || [];
+        lockedParasByChapter.set(sec.chapterId, [...prev, ...(sec.paragraphs || [])]);
+      }
+    }
+  }
+
+  // Build the chapters and paragraphs to send to AI according to `scope`
+  const MAX_PREVIEW_PARAGRAPHS = 6;
+  let previewBudgetRemaining = MAX_PREVIEW_PARAGRAPHS;
+
+  const chaptersToRedact: Array<{
+    id: string;
+    partNumber: number;
+    dimensionKey: string;
+    title: string;
+    rawTestimonies: string[];
+    unidadesConContextoDePregunta?: StructuredChapterTestimonyUnit[];
+  }> = [];
+
+  for (const ch of fallbackResult.manuscript.chapters) {
+    const chUnits = fallbackResult.chapterStructuredUnits?.[ch.id] || [];
+    if (scope === 'preview') {
+      if (previewBudgetRemaining <= 0) break;
+      const sliceParas = ch.paragraphs.slice(0, previewBudgetRemaining);
+      const sliceUnits = chUnits.slice(0, sliceParas.length);
+      previewBudgetRemaining -= sliceParas.length;
+      if (sliceParas.length > 0) {
+        chaptersToRedact.push({
+          id: ch.id,
+          partNumber: ch.partNumber,
+          dimensionKey: ch.dimensionKey,
+          title: ch.title,
+          rawTestimonies: sliceParas,
+          unidadesConContextoDePregunta: sliceUnits,
+        });
+      }
+    } else {
+      const lockedCount = (lockedParasByChapter.get(ch.id) || []).length;
+      const remainingParas = ch.paragraphs.slice(lockedCount);
+      const remainingUnits = chUnits.slice(lockedCount);
+      if (remainingParas.length > 0) {
+        chaptersToRedact.push({
+          id: ch.id,
+          partNumber: ch.partNumber,
+          dimensionKey: ch.dimensionKey,
+          title: ch.title,
+          rawTestimonies: remainingParas,
+          unidadesConContextoDePregunta: remainingUnits,
+        });
+      }
+    }
+  }
+
+  // If in 'full' mode all paragraphs were already redacted in the 5-page preview, return immediately preserving locked preview
+  if (chaptersToRedact.length === 0 && lockedPreviewManuscript) {
+    return {
+      manuscript: sanitizeAndRepairBookManuscript({
+        ...fallbackResult.manuscript,
+        title: lockedPreviewManuscript.title || fallbackResult.manuscript.title,
+        subtitle: lockedPreviewManuscript.subtitle || fallbackResult.manuscript.subtitle,
+        introduction: lockedPreviewManuscript.introduction || fallbackResult.manuscript.introduction,
+        chapters: fallbackResult.manuscript.chapters.map((origCh) => {
+          const lockedParas = lockedParasByChapter.get(origCh.id);
+          const previewCh = lockedPreviewManuscript.chapters.find((c) => c.id === origCh.id);
+          if (lockedParas && lockedParas.length > 0) {
+            return {
+              ...origCh,
+              title: previewCh?.title || origCh.title,
+              pullQuote: previewCh?.pullQuote || origCh.pullQuote,
+              paragraphs: [
+                ...lockedParas,
+                ...origCh.paragraphs.slice(lockedParas.length),
+              ],
+            };
+          }
+          return previewCh || origCh;
+        }),
+        lockedPreviewGroups: effectiveLockedGroups || undefined,
+        generatedAt: new Date().toISOString(),
+      }),
+      chapterPhotos: fallbackResult.chapterPhotos,
+      scope,
+    };
+  }
+
+  const specificStyleRules =
+    narrativeStyle === 'first_person_simple'
+      ? `REGLA ESPECÍFICA DEL ESTILO A (Primera persona — Relato personal formal y estructurado):
+- Redacta en primera persona (${isCouple ? '"nosotros" o identificando la voz de cada integrante' : '"yo"'}), pero REESCRIBE las frases con un lenguaje más formal, claro, ordenado y bien estructurado.
+- Usa el contexto de "preguntaPrincipal" y "profundizaciones" en "unidadesConContextoDePregunta" para dar coherencia y sentido completo a cada oración sin jamás usar frases robóticas o muletillas introductorias fijas ("En lo que respecta a esta etapa de mi vida...", "Asimismo, cabe señalar en torno a esta vivencia que...").
+- Corrige TODAS las faltas de ortografía, tildes omitidas, errores gramaticales, discordancias y puntuación defectuosa.
+- Elimina por completo muletillas orales ("este...", "eh", "pues", "o sea", "bueno", "digamos", "como te decía") y suprime repeticiones innecesarias de palabras o ideas.`
+      : narrativeStyle === 'third_person_biography'
+      ? `REGLA ESPECÍFICA DEL ESTILO C (Tercera persona — Biografía narrativa completa):
+- CONVIERTE EL 100% DEL RELATO A TERCERA PERSONA en todas las oraciones (incluyendo respuestas principales y respuestas de profundización).
+- PROHIBIDO dejar verbos, pronombres o posesivos en primera persona ("yo", "me", "mi", "mis", "nosotros", "nos", "nuestro", "nací", "recuerdo", "viví", "fui", "estudié", "trabajé", "siento"). Todo debe narrarse desde un biógrafo cálido hablando sobre ${fallbackResult.manuscript.authors} ("nació", "recuerda", "vivió", "su infancia", "sus padres", etc.).
+- Usa sujeto tácito en oraciones consecutivas para no repetir el nombre de ${fallbackResult.manuscript.authors} de forma artificial en cada frase, y jamás uses frases robóticas fijas como "En consonancia con este recuerdo, X refiere que...".
+- Corrige TODAS las faltas de ortografía, tildes, gramática, muletillas orales y repeticiones innecesarias.`
+      : `REGLA ESPECÍFICA DEL ESTILO B (Primera persona — Narrativa literaria y emotiva):
+- Redacta en primera persona (${isCouple ? '"nosotros"' : '"yo"'}) con una prosa literaria, cálida, emotiva y envolvente, como un libro de memorias cuidadosamente editado.
+- Usa el contexto de cada pregunta ("unidadesConContextoDePregunta") para que las respuestas breves o directas fluyan como prosa autobiográfica natural, sin anteponer frases fijas repetitivas.
+- Corrige TODAS las faltas de ortografía, tildes, gramática, muletillas orales y repeticiones innecesarias, elevando la fluidez literaria de cada párrafo.`;
+
+  const prompt = `Eres un escritor biográfico, corrector de estilo y editor literario senior de ForeverYou.
+Debes redactar y revisar integralmente los capítulos del libro autobiográfico a partir EXCLUSIVAMENTE de las respuestas reales del entrevistado y del contexto de las preguntas realizadas.
 
 DATOS DE LA OBRA:
 - Título base: "${interview.title}"
@@ -1030,19 +1153,26 @@ DATOS DE LA OBRA:
   * Descripción del estilo: ${styleDesc}
   * Ejemplo del tono esperado: "${isCouple ? styleSpec.coupleExample : styleSpec.individualExample}"
 
-TESTIMONIOS AGRUPADOS POR CAPÍTULO:
-${JSON.stringify(chapterInputSummary, null, 2)}
+${specificStyleRules}
 
-REGLAS ESTRICTAS DE FIDELIDAD Y ESTILO:
-1. NUNCA inventes hechos, fechas, lugares ni nombres que no estén en los testimonios.
-2. Transforma las respuestas en párrafos fluidos, dignos y bien redactados aplicando rigurosamente el estilo narrativo elegido (${styleTitle}).
-3. Conserva exactamente el mismo "id", "partNumber" y "dimensionKey" de cada capítulo de entrada para mantener vinculadas las fotografías del entrevistado.
-4. En cada capítulo, devuelve entre 1 y 4 párrafos en "paragraphs" y una frase literal o destacada breve en "pullQuote" (máximo 150 caracteres).`;
+TESTIMONIOS Y CONTEXTO DE PREGUNTAS POR CAPÍTULO:
+${JSON.stringify(chaptersToRedact, null, 2)}
+
+AUDITORÍA OBLIGATORIA DE ORTOGRAFÍA, GRAMÁTICA, CONGRUENCIA LÓGICA Y FIDELIDAD (100% DE LOS HECHOS):
+1. FIDELIDAD 100% A LOS HECHOS REALES: Respeta el 100% de los hechos, nombres, apodos, lugares, fechas y vivencias reales del entrevistado. NUNCA inventes datos ni episodios no mencionados.
+2. INTEGRACIÓN CON EL CONTEXTO DE LA PREGUNTA SIN FRASES ROBÓTICAS: Analiza "preguntaPrincipal", "respuestaPrincipal" y "profundizaciones" en cada unidad. Si el entrevistado respondió de forma breve o elíptica (ej. "En Guadalajara", "Sí, con mis abuelos", "Ingeniería civil"), utiliza el contexto de la pregunta para construir una oración completa, natural y congruente (ej. "Nací en Guadalajara...", "Crecí junto a mis abuelos..."). PROHIBIDO usar plantillas robóticas repetitivas.
+3. REVISIÓN INTEGRAL DE ORTOGRAFÍA, GRAMÁTICA Y CONGRUENCIA LÓGICA:
+   - Verifica que cada oración tenga sentido lógico completo, sintaxis impecable y concordancia de género, número y tiempo verbal.
+   - Corrige todas las faltas ortográficas (uso de b/v, c/s/z, g/j, h, ll/y), tildes (agudas, graves, esdrújulas, hiatos como "tenía/vivía/había", pretéritos como "nací/nació/viví/vivió/estudié/estudió" y tildes diacríticas como "más/tú/él/mí/sí/sé/qué/cómo/dónde/cuándo") y signos de puntuación.
+   - Verifica que no falten preposiciones necesarias ("a", "de", "en", "con", "por", "para") ni queden palabras truncas o incongruentes.
+4. PROHIBIDO RESUMIR U OMITIR RESPUESTAS: Debes devolver EXACTAMENTE la misma cantidad de párrafos en "paragraphs" que elementos hay en "rawTestimonies" (relación 1 a 1), integrando cada respuesta principal con sus profundizaciones sin omitir ningún recuerdo.
+5. Conserva exactamente el mismo "id", "partNumber" y "dimensionKey" de cada capítulo de entrada.
+6. Incluye una frase destacada breve, emotiva y gramaticalmente impecable en "pullQuote" (máximo 150 caracteres, acorde al estilo elegido) para cada capítulo.`;
 
   try {
     const rawJson = await generateJsonWithFallback({
       prompt,
-      timeoutMsPerModel: 15000,
+      timeoutMsPerModel: scope === 'preview' ? 12000 : 18000,
       responseSchema: {
         type: Type.OBJECT,
         properties: {
@@ -1072,55 +1202,169 @@ REGLAS ESTRICTAS DE FIDELIDAD Y ESTILO:
       },
     });
 
-    if (!rawJson) {
-      return fallbackResult;
-    }
+    const parsed = rawJson
+      ? safeJsonExtract<{
+          title?: string;
+          subtitle?: string;
+          introduction?: string;
+          chapters?: Array<{
+            id: string;
+            partNumber: number;
+            dimensionKey: any;
+            title: string;
+            paragraphs: string[];
+            pullQuote?: string;
+          }>;
+        } | null>(rawJson, null)
+      : null;
 
-    const parsed = safeJsonExtract<{
-      title?: string;
-      subtitle?: string;
-      introduction?: string;
-      chapters?: Array<{
-        id: string;
-        partNumber: number;
-        dimensionKey: any;
-        title: string;
-        paragraphs: string[];
-        pullQuote?: string;
-      }>;
-    } | null>(rawJson, null);
+    const mergedChapters = fallbackResult.manuscript.chapters.map((origCh) => {
+      const targetReq = chaptersToRedact.find((c) => c.id === origCh.id);
+      const aiCh = parsed?.chapters?.find((c) => c.id === origCh.id);
+      const cleanAiParas = Array.isArray(aiCh?.paragraphs)
+        ? aiCh!.paragraphs
+            .map((p) =>
+              ensureParagraphConformsToStyle(
+                p.trim(),
+                narrativeStyle,
+                fallbackResult.manuscript.authors,
+                isCouple
+              )
+            )
+            .filter((p) => p.length > 0)
+        : [];
 
-    if (!parsed || !Array.isArray(parsed.chapters) || parsed.chapters.length === 0) {
-      return fallbackResult;
-    }
-
-    const mergedChapters = fallbackResult.manuscript.chapters.map((origCh, idx) => {
-      const aiCh =
-        parsed.chapters?.find((c) => c.id === origCh.id) || parsed.chapters?.[idx];
-      if (!aiCh || !Array.isArray(aiCh.paragraphs) || aiCh.paragraphs.length === 0) {
-        return origCh;
+      if (scope === 'preview') {
+        if (!targetReq) {
+          return origCh;
+        }
+        const previewCount = targetReq.rawTestimonies.length;
+        // Ensure every single testimony in the preview slice is preserved (if AI returned fewer, fill remaining from origCh)
+        const ensuredPreviewParas =
+          cleanAiParas.length >= previewCount
+            ? cleanAiParas
+            : [
+                ...cleanAiParas,
+                ...origCh.paragraphs.slice(cleanAiParas.length, previewCount),
+              ];
+        const rawPullQuote = (aiCh?.pullQuote || origCh.pullQuote || '').trim();
+        const styledPullQuote = rawPullQuote
+          ? ensureParagraphConformsToStyle(
+              rawPullQuote,
+              narrativeStyle,
+              fallbackResult.manuscript.authors,
+              isCouple
+            )
+          : undefined;
+        return {
+          ...origCh,
+          title: cleanSpanishOralText(aiCh?.title || origCh.title) || origCh.title,
+          paragraphs: [
+            ...ensuredPreviewParas,
+            ...origCh.paragraphs.slice(previewCount),
+          ],
+          pullQuote: styledPullQuote,
+        };
       }
+
+      // scope === 'full': preserve locked preview paragraphs verbatim at the start of the chapter,
+      // and append AI-redacted remaining paragraphs (with 100% fallback guarantee for any missing items)
+      const lockedParas = lockedParasByChapter.get(origCh.id) || [];
+      const previewCh = lockedPreviewManuscript?.chapters.find((c) => c.id === origCh.id);
+      const expectedRemaining = origCh.paragraphs.slice(lockedParas.length);
+
+      const ensuredRemainingParas =
+        cleanAiParas.length >= expectedRemaining.length
+          ? cleanAiParas
+          : [
+              ...cleanAiParas,
+              ...expectedRemaining.slice(cleanAiParas.length),
+            ];
+
+      const rawFullPullQuote = (
+        previewCh?.pullQuote ||
+        aiCh?.pullQuote ||
+        origCh.pullQuote ||
+        ''
+      ).trim();
+
       return {
         ...origCh,
-        title: (aiCh.title || origCh.title).trim(),
-        paragraphs: aiCh.paragraphs.map((p) => p.trim()).filter((p) => p.length > 0),
-        pullQuote: (aiCh.pullQuote || origCh.pullQuote || '').trim() || undefined,
+        title: (previewCh?.title || cleanSpanishOralText(aiCh?.title || '') || origCh.title).trim(),
+        paragraphs: [...lockedParas, ...ensuredRemainingParas],
+        pullQuote: rawFullPullQuote
+          ? ensureParagraphConformsToStyle(
+              rawFullPullQuote,
+              narrativeStyle,
+              fallbackResult.manuscript.authors,
+              isCouple
+            )
+          : undefined,
       };
     });
 
     return {
       manuscript: {
         ...fallbackResult.manuscript,
-        title: (parsed.title || fallbackResult.manuscript.title).trim(),
-        subtitle: (parsed.subtitle || fallbackResult.manuscript.subtitle).trim(),
-        introduction: (parsed.introduction || fallbackResult.manuscript.introduction).trim(),
+        title: (
+          lockedPreviewManuscript?.title ||
+          cleanSpanishOralText(parsed?.title || '') ||
+          fallbackResult.manuscript.title
+        ).trim(),
+        subtitle: (
+          lockedPreviewManuscript?.subtitle ||
+          cleanSpanishOralText(parsed?.subtitle || '') ||
+          fallbackResult.manuscript.subtitle
+        ).trim(),
+        introduction: (
+          lockedPreviewManuscript?.introduction ||
+          (parsed?.introduction
+            ? ensureParagraphConformsToStyle(
+                parsed.introduction,
+                narrativeStyle,
+                fallbackResult.manuscript.authors,
+                isCouple
+              )
+            : '') ||
+          fallbackResult.manuscript.introduction
+        ).trim(),
         chapters: mergedChapters,
+        lockedPreviewGroups: effectiveLockedGroups || undefined,
         generatedAt: new Date().toISOString(),
       },
       chapterPhotos: fallbackResult.chapterPhotos,
+      scope,
     };
   } catch (_err) {
-    return fallbackResult;
+    if (scope === 'full' && lockedPreviewManuscript) {
+      const mergedFallbackChapters = fallbackResult.manuscript.chapters.map((origCh) => {
+        const lockedParas = lockedParasByChapter.get(origCh.id) || [];
+        const previewCh = lockedPreviewManuscript.chapters.find((c) => c.id === origCh.id);
+        return {
+          ...origCh,
+          title: previewCh?.title || origCh.title,
+          pullQuote: previewCh?.pullQuote || origCh.pullQuote,
+          paragraphs: [
+            ...lockedParas,
+            ...origCh.paragraphs.slice(lockedParas.length),
+          ],
+        };
+      });
+      return {
+        manuscript: {
+          ...fallbackResult.manuscript,
+          title: lockedPreviewManuscript.title || fallbackResult.manuscript.title,
+          subtitle: lockedPreviewManuscript.subtitle || fallbackResult.manuscript.subtitle,
+          introduction: lockedPreviewManuscript.introduction || fallbackResult.manuscript.introduction,
+          chapters: mergedFallbackChapters,
+          lockedPreviewGroups: effectiveLockedGroups || undefined,
+          generatedAt: new Date().toISOString(),
+        },
+        chapterPhotos: fallbackResult.chapterPhotos,
+        scope,
+      };
+    }
+    return { ...fallbackResult, scope };
   }
 }
 
