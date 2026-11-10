@@ -203,7 +203,7 @@ export function generateQACompilationMarkdown(params: {
   }
 
   lines.push(`\n## Fin del Compilado Testimonial de Respaldo`);
-  lines.push(`*Documento generado automáticamente por ForeverYou.*`);
+  lines.push(`*Documento generado automáticamente por YouForever.*`);
 
   return lines.join('\n');
 }
@@ -747,7 +747,7 @@ export function generateQACompilationHtml(params: {
 <body>
   <div class="container">
     <div class="top-bar">
-      <span style="font-size: 12px; font-weight: 600; color: #64748b;">Dossier Testimonial de Respaldo - ForeverYou</span>
+      <span style="font-size: 12px; font-weight: 600; color: #64748b;">Dossier Testimonial de Respaldo - YouForever</span>
       <button class="btn btn-print" onclick="window.print()">Imprimir / Guardar como PDF</button>
     </div>
 
@@ -785,7 +785,7 @@ export function generateQACompilationHtml(params: {
     </main>
 
     <footer style="margin-top: 48px; padding-top: 24px; border-top: 1px solid #e2e8f0; text-align: center; font-size: 12px; color: #94a3b8;">
-      Compilado generado por ForeverYou. Todos los derechos reservados a la familia y participantes.
+      Compilado generado por YouForever. Todos los derechos reservados a la familia y participantes.
     </footer>
   </div>
 
@@ -934,7 +934,7 @@ export async function buildInterviewBackupZip(
   // 5. Raw JSON Database Backup
   const fullJsonBackup = {
     exportedAt: new Date().toISOString(),
-    system: 'ForeverYou',
+    system: 'YouForever',
     interview,
     participants,
     questions,

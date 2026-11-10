@@ -16,7 +16,7 @@ export interface ForeverYouInfinitySymbolProps {
 }
 
 /**
- * Pure SVG vector implementation of the official ForeverYou `F + ∞ + Y` intertwined infinity monogram.
+ * Pure SVG vector implementation of the official YouForever `Y + ∞ + F` intertwined infinity monogram.
  * Scales cleanly at any size or DPI and adapts its stroke color to any palette.
  */
 export const ForeverYouInfinitySymbol: React.FC<ForeverYouInfinitySymbolProps> = ({
@@ -24,7 +24,7 @@ export const ForeverYouInfinitySymbol: React.FC<ForeverYouInfinitySymbolProps> =
   className = '',
   width = 44,
   height = 24,
-  title = 'ForeverYou',
+  title = 'YouForever',
 }) => {
   return (
     <svg
@@ -39,7 +39,7 @@ export const ForeverYouInfinitySymbol: React.FC<ForeverYouInfinitySymbolProps> =
     >
       {/* Left loop outer arc + upper-left diagonal stopping before central crossing */}
       <path
-        d="M 48 93 C 23 89, 12 72, 12 54 C 12 31, 30 14, 54 14 C 68 14, 79 21, 90 33"
+        d="M 52 94 C 25 92, 12 74, 12 54 C 12 31, 30 14, 54 14 C 69 14, 81 21, 92 34"
         stroke={color}
         strokeWidth="15"
         strokeLinecap="butt"
@@ -47,41 +47,41 @@ export const ForeverYouInfinitySymbol: React.FC<ForeverYouInfinitySymbolProps> =
       />
       {/* Lower-right diagonal resuming after central crossing + right loop outer arc + continuous crossing ribbon */}
       <path
-        d="M 110 68 C 121 82, 133 94, 148 94 C 172 94, 188 77, 188 54 C 188 31, 172 14, 148 14 C 131 14, 118 25, 100 47 C 83 68, 72 91, 58 94"
+        d="M 108 69 C 119 82, 132 94, 148 94 C 172 94, 188 77, 188 54 C 188 31, 172 14, 148 14 C 131 14, 118 25, 100 47 C 83 68, 70 92, 52 94"
         stroke={color}
         strokeWidth="15"
         strokeLinecap="round"
         strokeLinejoin="round"
       />
-      {/* Letter F integrated inside left loop */}
+      {/* Letter Y integrated inside left loop */}
       <path
-        d="M 48 93 L 48 54 C 48 41, 56 35, 76 35"
+        d="M 52 91 L 52 58"
+        stroke={color}
+        strokeWidth="13.5"
+        strokeLinecap="round"
+      />
+      <path
+        d="M 52 59 L 35 37"
+        stroke={color}
+        strokeWidth="13"
+        strokeLinecap="round"
+      />
+      <path
+        d="M 52 59 L 69 37"
+        stroke={color}
+        strokeWidth="13"
+        strokeLinecap="round"
+      />
+      {/* Letter F integrated inside right loop */}
+      <path
+        d="M 130 86 L 130 53 C 130 41, 138 35, 161 35"
         stroke={color}
         strokeWidth="13.5"
         strokeLinecap="round"
         strokeLinejoin="round"
       />
       <path
-        d="M 48 61 L 69 61"
-        stroke={color}
-        strokeWidth="12.5"
-        strokeLinecap="round"
-      />
-      {/* Letter Y integrated inside right loop */}
-      <path
-        d="M 140 91 L 140 59"
-        stroke={color}
-        strokeWidth="13.5"
-        strokeLinecap="round"
-      />
-      <path
-        d="M 140 60 C 136 50, 128 42, 120 38"
-        stroke={color}
-        strokeWidth="12.5"
-        strokeLinecap="round"
-      />
-      <path
-        d="M 140 60 C 144 50, 152 42, 160 38"
+        d="M 130 61 L 154 61"
         stroke={color}
         strokeWidth="12.5"
         strokeLinecap="round"
@@ -92,15 +92,15 @@ export const ForeverYouInfinitySymbol: React.FC<ForeverYouInfinitySymbolProps> =
 
 export interface ForeverYouLogoProps {
   /**
-   * - `horizontal`: Horizontal Lockup (Isotipo F∞Y + "ForeverYou" side by side) — ideal for navigation bars & headers
-   * - `stacked`: Principal Vertical Lockup (Large Isotipo F∞Y above "ForeverYou") — ideal for login, consent & hero cards
-   * - `app_icon`: Rounded deep-navy square with white F∞Y symbol — ideal for compact badges & app icons
-   * - `print_monochrome`: Standalone F∞Y symbol adaptable to any template or book accent color
+   * - `horizontal`: Horizontal Lockup (Isotipo Y∞F + "YouForever" side by side) — ideal for navigation bars & headers
+   * - `stacked`: Principal Vertical Lockup (Large Isotipo Y∞F above "YouForever") — ideal for login, consent & hero cards
+   * - `app_icon`: Rounded deep-navy square with white Y∞F symbol — ideal for compact badges & app icons
+   * - `print_monochrome`: Standalone Y∞F symbol adaptable to any template or book accent color
    */
   variant?: ForeverYouLogoVariant;
   /**
    * Theme preset when `color` is not explicitly provided:
-   * - `navy`: Official ForeverYou deep navy (#0A182E) for light backgrounds
+   * - `navy`: Official YouForever deep navy (#071A3E) for light backgrounds
    * - `light`: Warm ivory/white for dark headers (e.g. Navbar)
    */
   theme?: 'navy' | 'light';
@@ -209,7 +209,7 @@ export const ForeverYouLogo: React.FC<ForeverYouLogoProps> = ({
         data-testid="foreveryou-logo-app-icon"
         className={`inline-flex items-center justify-center shrink-0 shadow-sm ${dims.iconBox} ${className}`}
         style={{ backgroundColor: FOREVERYOU_NAVY_HEX }}
-        title="ForeverYou"
+        title="YouForever"
       >
         <ForeverYouInfinitySymbol
           color="#FFFFFF"
@@ -238,7 +238,7 @@ export const ForeverYouLogo: React.FC<ForeverYouLogoProps> = ({
             fontFamily: "'Plus Jakarta Sans', 'Manrope', sans-serif",
           }}
         >
-          ForeverYou
+          YouForever
         </span>
         {subtitle && (
           <span
@@ -271,7 +271,7 @@ export const ForeverYouLogo: React.FC<ForeverYouLogoProps> = ({
             fontFamily: "'Plus Jakarta Sans', 'Manrope', sans-serif",
           }}
         >
-          ForeverYou
+          YouForever
         </span>
         {subtitle && (
           <span className="block text-[11px] font-sans tracking-wide opacity-75 mt-0.5">

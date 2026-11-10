@@ -2,6 +2,8 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   generatePersonalAccessCode,
+  deriveShortMiEsenciaAccessCode,
+  extractCleanMiEsenciaCode,
   computeMiEsenciaCodeHash,
   filterMemoriesForAuthenticatedInterlocutor,
   calculateRenewalExpirationDate,
@@ -71,12 +73,35 @@ Que siempre cuiden a mi hija Ana y a mi nieto Mateo, porque la unión familiar e
     assert.equal(result.sha256Hash.length, 64);
   });
 
-  it('3. Enforces strict cryptographic Level C privacy isolation per interlocutor', () => {
+  it('3. Enforces strict cryptographic Level C privacy isolation per interlocutor and mixed alphanumeric YF-XXXXX access codes', () => {
     const codeAna = generatePersonalAccessCode('Ana');
     const codeCarlos = generatePersonalAccessCode('Carlos');
 
+    assert.match(codeAna.personalCodePlain, /^YF-[A-Z0-9]{5}$/);
+    assert.equal(codeAna.personalCodePlain.length, 8);
+    assert.ok(/[A-Z]/.test(codeAna.personalCodePlain.slice(3)) && /[0-9]/.test(codeAna.personalCodePlain.slice(3)));
     assert.notEqual(codeAna.personalCodePlain, codeCarlos.personalCodePlain);
     assert.equal(computeMiEsenciaCodeHash(codeAna.personalCodePlain), codeAna.codeHash);
+
+    const derived = deriveShortMiEsenciaAccessCode('seed_cred_ana_1');
+    assert.match(derived, /^YF-[A-Z0-9]{5}$/);
+    assert.equal(derived.length, 8);
+    assert.ok(/[A-Z]/.test(derived.slice(3)) && /[0-9]/.test(derived.slice(3)));
+
+    assert.equal(
+      extractCleanMiEsenciaCode('https://youforever.app/miesencia?code=YF-8K4M2'),
+      'YF-8K4M2'
+    );
+    assert.equal(extractCleanMiEsenciaCode('yf8k4m2'), 'YF-8K4M2');
+    assert.equal(
+      extractCleanMiEsenciaCode('https://youforever.app/miesencia?code=YF-8492'),
+      'YF-8492'
+    );
+    assert.equal(extractCleanMiEsenciaCode('yf8492'), 'YF-8492');
+    assert.equal(
+      extractCleanMiEsenciaCode('https://youforever.app/miesencia?code=FY-ANA-8F3K-29A1'),
+      'FY-ANA-8F3K-29A1'
+    );
 
     const memories: MiEsenciaMemoryRecord[] = [
       {

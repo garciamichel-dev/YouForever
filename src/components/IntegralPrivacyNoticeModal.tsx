@@ -41,7 +41,7 @@ export const IntegralPrivacyNoticeModal: React.FC<IntegralPrivacyNoticeModalProp
             </div>
             <div>
               <h3 className="font-serif text-lg sm:text-xl font-bold text-stone-900">
-                Aviso de Privacidad de ForeverYou
+                Aviso de Privacidad de YouForever
               </h3>
               <p className="text-xs text-stone-500">
                 Versión {CURRENT_PRIVACY_POLICY_VERSION} • Vigente desde {CURRENT_PRIVACY_POLICY_DATE}
@@ -123,7 +123,7 @@ export const IntegralPrivacyNoticeModal: React.FC<IntegralPrivacyNoticeModalProp
               <Mail className="w-3.5 h-3.5 text-amber-700" />
               <span>Contacto ARCO: {RESPONSIBLE_CONTACT_EMAIL}</span>
             </span>
-            <span>ForeverYou • Plataforma de Preservación de Historias de Vida</span>
+            <span>YouForever • Plataforma de Preservación de Historias de Vida</span>
           </div>
         </div>
 

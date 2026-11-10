@@ -168,7 +168,7 @@ export const ManuscriptsView: React.FC<ManuscriptsViewProps> = ({
 
       const link = document.createElement('a');
       link.href = blobUrl;
-      link.download = ver.fileName || `ForeverYou_${ver.interviewId}_v${ver.versionNumber}.pdf`;
+      link.download = ver.fileName || `YouForever_${ver.interviewId}_v${ver.versionNumber}.pdf`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
@@ -850,7 +850,7 @@ export const ManuscriptsView: React.FC<ManuscriptsViewProps> = ({
                 {versionToDelete.interviewTitle || versionToDelete.title || versionToDelete.manuscript.title}
               </div>
               <div className="text-[11px] text-stone-600">
-                <strong>Archivo:</strong> {versionToDelete.fileName || `ForeverYou_${versionToDelete.interviewId}_v${versionToDelete.versionNumber}.pdf`}
+                <strong>Archivo:</strong> {versionToDelete.fileName || `YouForever_${versionToDelete.interviewId}_v${versionToDelete.versionNumber}.pdf`}
               </div>
               <div className="text-[11px] text-stone-600">
                 <strong>Participante:</strong> {versionToDelete.participantName || versionToDelete.authors || 'Participante'}

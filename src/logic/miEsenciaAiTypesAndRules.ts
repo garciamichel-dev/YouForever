@@ -1198,7 +1198,7 @@ export function exportLibraryPromptsPayload(params: {
   // Formato JSON con metadatos limpios (sin claves ni datos privados de entrevistados)
   const cleanPayload = {
     exportedAt: new Date().toISOString(),
-    module: 'ForeverYou - Mi Esencia - Biblioteca de Prompts',
+    module: 'YouForever - Mi Esencia - Biblioteca de Prompts',
     totalPrompts: prompts.length,
     prompts: prompts.map((pr) => ({
       promptId: pr.promptId,

@@ -501,7 +501,7 @@ export const MiEsenciaAvatarAiConfigPanel: React.FC<MiEsenciaAvatarAiConfigPanel
                 className="w-full px-3 py-2 rounded-lg border border-stone-300 bg-white text-xs font-medium"
               >
                 <option value="modo_existente">
-                  modo_existente — Conservar comportamiento actual de ForeverYou (Por defecto en avatares existentes)
+                  modo_existente — Conservar comportamiento actual de YouForever (Por defecto en avatares existentes)
                 </option>
                 <option value="modo_personalizado">
                   modo_personalizado — Usar proveedor y prompt administrativo personalizado (Gemini / OpenAI GPT)

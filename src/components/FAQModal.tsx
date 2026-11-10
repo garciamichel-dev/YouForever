@@ -373,7 +373,7 @@ export const FAQModal: React.FC<FAQModalProps> = ({ isOpen, onClose }) => {
                 Garantía de Confidencialidad y Propiedad Absoluta
               </span>
               <p className="text-stone-300 text-[11px] leading-relaxed">
-                Tus vivencias pertenecen exclusivamente a tu familia. ForeverYou no comercializa, no publica ni comparte ningún dato con redes sociales, motores de búsqueda ni plataformas de terceros. Tu historia está a salvo.
+                Tus vivencias pertenecen exclusivamente a tu familia. YouForever no comercializa, no publica ni comparte ningún dato con redes sociales, motores de búsqueda ni plataformas de terceros. Tu historia está a salvo.
               </p>
             </div>
           </div>

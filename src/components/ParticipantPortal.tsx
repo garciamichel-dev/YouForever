@@ -1372,7 +1372,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
             <input
               type="text"
               required
-              placeholder="Ej: LEG-8492 o pega tu enlace completo..."
+              placeholder="Ej: YF-8K4M2 o pega tu enlace completo..."
               value={tokenInput}
               onChange={(e) => {
                 const rawVal = e.target.value;
@@ -1385,9 +1385,9 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
               className="w-full px-3.5 py-2.5 border border-stone-300 rounded-lg text-xs font-mono text-stone-900 focus:outline-none focus:ring-2 focus:ring-amber-200 focus:border-amber-600 uppercase"
             />
             <p className="text-[11px] text-stone-400 mt-1.5">
-              Puedes escribir el código de 6 u 8 caracteres (ej.{' '}
+              Puedes escribir tu código alfanumérico (ej.{' '}
               <code className="bg-stone-100 text-stone-700 px-1 py-0.5 rounded font-bold">
-                LEG-8492
+                YF-8K4M2
               </code>
               ) o pegar el enlace completo que recibiste.
             </p>
@@ -2707,7 +2707,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                 className="w-full p-2.5 border border-stone-300 rounded-lg text-xs text-stone-900"
               />
               <p className="text-[10px] text-stone-400 mt-1">
-                Si escribes una dedicatoria aquí, se mostrará de forma especial en la página final de cierre de tu libro junto al sello ForeverYou.
+                Si escribes una dedicatoria aquí, se mostrará de forma especial en la página final de cierre de tu libro junto al sello YouForever.
               </p>
             </div>
 

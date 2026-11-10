@@ -797,7 +797,7 @@ function renderPageToViewerIdenticalDataUrl(
       ctx.restore();
     }
 
-    // Footer: ForeverYou • Edición Conmemorativa strictly inside border
+    // Footer: YouForever • Edición Conmemorativa strictly inside border
     const footerY = vh - bottomPad - 10;
     if (composed.useOfficialForeverYouLogo) {
       drawForeverYouHorizontalLockupOnCanvas({
@@ -807,7 +807,7 @@ function renderPageToViewerIdenticalDataUrl(
         align: 'center',
         symbolWidthPx: 18,
         gapPx: 6,
-        labelText: 'FOREVERYOU • EDICIÓN CONMEMORATIVA',
+        labelText: 'YOUFOREVER • EDICIÓN CONMEMORATIVA',
         fontCss: buildCanvasFontString('normal', 9.2, coverDesign.bodyFontFamily),
         colorHex: coverPalette.subtextHex,
         symbolColorHex: coverPalette.accentHex,
@@ -819,7 +819,7 @@ function renderPageToViewerIdenticalDataUrl(
       ctx.fillStyle = coverPalette.subtextHex;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'top';
-      const imprintText = 'FOREVERYOU • EDICIÓN CONMEMORATIVA'.split('').join('\u200A');
+      const imprintText = 'YOUFOREVER • EDICIÓN CONMEMORATIVA'.split('').join('\u200A');
       ctx.fillText(imprintText, cx, footerY, usableW);
       ctx.restore();
     }
@@ -955,7 +955,7 @@ function renderPageToViewerIdenticalDataUrl(
       ctx.restore();
     }
 
-    // Bottom ForeverYou mark
+    // Bottom YouForever mark
     const footerY = vh - padPx - 10;
     if (composed.useOfficialForeverYouLogo) {
       drawForeverYouHorizontalLockupOnCanvas({
@@ -965,7 +965,7 @@ function renderPageToViewerIdenticalDataUrl(
         align: 'center',
         symbolWidthPx: 20,
         gapPx: 6,
-        labelText: 'ForeverYou',
+        labelText: 'YouForever',
         fontCss: buildCanvasFontString('bold', 10.5, "'Plus Jakarta Sans', 'Manrope', sans-serif"),
         colorHex: interiorStyle.mutedHex,
         symbolColorHex: interiorStyle.accentHex,
@@ -978,7 +978,7 @@ function renderPageToViewerIdenticalDataUrl(
       ctx.globalAlpha = 0.7;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'top';
-      ctx.fillText('ForeverYou', cx, footerY);
+      ctx.fillText('YouForever', cx, footerY);
       ctx.restore();
     }
 
@@ -1070,7 +1070,7 @@ function renderPageToViewerIdenticalDataUrl(
     }
     ctx.restore();
 
-    // 3. Bottom-right brand (`[Isotipo F∞Y] ForeverYou` for new books, or `<< ForeverYou >>` for legacy versions)
+    // 3. Bottom-right brand (`[Isotipo Y∞F] YouForever` for new books, or `<< YouForever >>` for legacy versions)
     if (composed.useOfficialForeverYouLogo) {
       drawForeverYouHorizontalLockupOnCanvas({
         ctx,
@@ -1079,7 +1079,7 @@ function renderPageToViewerIdenticalDataUrl(
         align: 'right',
         symbolWidthPx: 26,
         gapPx: 6,
-        labelText: 'ForeverYou',
+        labelText: 'YouForever',
         fontCss: buildCanvasFontString('bold', 12, "'Plus Jakarta Sans', 'Manrope', sans-serif"),
         colorHex: interiorStyle.accentHex,
         symbolColorHex: interiorStyle.accentHex,
@@ -1091,7 +1091,7 @@ function renderPageToViewerIdenticalDataUrl(
       ctx.textAlign = 'right';
       ctx.textBaseline = 'bottom';
       ctx.fillText(
-        page.bottomRightBrand || '<< ForeverYou >>',
+        page.bottomRightBrand || '<< YouForever >>',
         vw - padPx,
         vh - padPx
       );
@@ -1113,7 +1113,7 @@ function renderPageToViewerIdenticalDataUrl(
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
   const runningHeader = stripInlineFormatting(
-    composed.editorialConfig.customTitle || 'ForeverYou • Memoria Autobiográfica'
+    composed.editorialConfig.customTitle || 'YouForever • Memoria Autobiográfica'
   );
   ctx.fillText(runningHeader, cx, cursorY, contentW);
   ctx.restore();
@@ -1758,7 +1758,7 @@ function renderCoverPagePdf(
   doc.setFont(fontName, 'normal');
   doc.setFontSize(7.5);
   doc.setTextColor(subRgb[0], subRgb[1], subRgb[2]);
-  doc.text('ForeverYou • Edición Conmemorativa', cx, footerY, {
+  doc.text('YouForever • Edición Conmemorativa', cx, footerY, {
     align: 'center',
     maxWidth: maxTextW,
   });
@@ -1881,7 +1881,7 @@ function renderTitleDedicationPagePdf(
   doc.setFont(font, 'normal');
   doc.setFontSize(8.5);
   doc.setTextColor(mutedRgb[0], mutedRgb[1], mutedRgb[2]);
-  doc.text('ForeverYou', cx, H - format.marginBottomMm + 4, { align: 'center' });
+  doc.text('YouForever', cx, H - format.marginBottomMm + 4, { align: 'center' });
 }
 
 function renderChapterContentPagePdf(
@@ -1911,7 +1911,7 @@ function renderChapterContentPagePdf(
   doc.setTextColor(mutedRgb[0], mutedRgb[1], mutedRgb[2]);
   doc.text(
     stripInlineFormatting(
-      composed.editorialConfig.customTitle || 'ForeverYou • Memoria Autobiográfica'
+      composed.editorialConfig.customTitle || 'YouForever • Memoria Autobiográfica'
     ),
     cx,
     format.marginTopMm - 5,
@@ -2086,7 +2086,7 @@ function renderClosingMandatoryPagePdf(
   doc.setFontSize(9.5);
   doc.setTextColor(accentRgb[0], accentRgb[1], accentRgb[2]);
   doc.text(
-    page.bottomRightBrand || '<< ForeverYou >>',
+    page.bottomRightBrand || '<< YouForever >>',
     W - horizMargin,
     H - format.marginBottomMm,
     { align: 'right' }
@@ -2118,11 +2118,11 @@ export function generateRealDemoBookPdf(params: {
   });
 
   doc.setProperties({
-    title: composed.editorialConfig.customTitle || 'Mi Historia — ForeverYou',
-    author: composed.editorialConfig.customAuthors || profile.displayName || 'ForeverYou',
-    subject: 'Libro autobiográfico — ForeverYou',
-    creator: 'ForeverYou',
-    keywords: 'autobiografía, memoria familiar, legado, ForeverYou',
+    title: composed.editorialConfig.customTitle || 'Mi Historia — YouForever',
+    author: composed.editorialConfig.customAuthors || profile.displayName || 'YouForever',
+    subject: 'Libro autobiográfico — YouForever',
+    creator: 'YouForever',
+    keywords: 'autobiografía, memoria familiar, legado, YouForever',
   });
 
   pages.forEach((page, idx) => {

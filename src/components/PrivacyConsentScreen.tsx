@@ -70,7 +70,7 @@ export const PrivacyConsentScreen: React.FC<PrivacyConsentScreenProps> = ({
             <ForeverYouLogo variant="horizontal" theme="navy" size="md" />
             <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-100 text-amber-900 text-xs font-semibold">
               <Shield className="w-3.5 h-3.5 text-amber-800" />
-              <span>ForeverYou • Protección de Patrimonio Testimonial</span>
+              <span>YouForever • Protección de Patrimonio Testimonial</span>
             </div>
           </div>
 
@@ -83,7 +83,7 @@ export const PrivacyConsentScreen: React.FC<PrivacyConsentScreenProps> = ({
               Tu historia es única y merece ser protegida.
             </p>
             <p>
-              En ForeverYou queremos ayudarte a conservar tus recuerdos, experiencias, fotografías y testimonios para crear tu libro autobiográfico.
+              En YouForever queremos ayudarte a conservar tus recuerdos, experiencias, fotografías y testimonios para crear tu libro autobiográfico.
             </p>
             <p>
               Antes de comenzar, queremos explicarte cómo utilizaremos tu información, quién podrá acceder a ella y qué derechos tienes.
@@ -255,7 +255,7 @@ export const PrivacyConsentScreen: React.FC<PrivacyConsentScreenProps> = ({
                     : 'Aviso de Privacidad Integral'}
                 </h3>
                 <span className="text-[11px] text-stone-500">
-                  ForeverYou • Versión {PRIVACY_NOTICE_VERSION} ({PRIVACY_NOTICE_EFFECTIVE_DATE})
+                  YouForever • Versión {PRIVACY_NOTICE_VERSION} ({PRIVACY_NOTICE_EFFECTIVE_DATE})
                 </span>
               </div>
               <button

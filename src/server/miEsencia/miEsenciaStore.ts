@@ -38,6 +38,8 @@ import {
   DEFAULT_MI_ESENCIA_CONFIG,
   DEFAULT_MI_ESENCIA_PLANS,
   computeMiEsenciaCodeHash,
+  deriveShortMiEsenciaAccessCode,
+  extractCleanMiEsenciaCode,
   generatePersonalAccessCode,
   filterMemoriesForAuthenticatedInterlocutor,
   calculateRenewalExpirationDate,
@@ -662,15 +664,65 @@ class MiEsenciaStore {
       }
     }
 
-    // Normalizar enlaces privados a /miesencia?code=...
+    // Normalizar aviso de transparencia a YouForever y actualizar códigos familiares al formato mixto YF-XXXXX (8 caracteres)
     let credsChanged = false;
+    if (this.config.transparencyNoticeText && this.config.transparencyNoticeText.includes('ForeverYou')) {
+      this.config.transparencyNoticeText = this.config.transparencyNoticeText.replace(/ForeverYou/g, 'YouForever');
+      credsChanged = true;
+    }
+
+    const isValidMixedYf5 = (code: string): boolean => {
+      const m = /^YF-([A-Z0-9]{5})$/.exec((code || '').trim().toUpperCase());
+      if (!m) return false;
+      const suffix = m[1];
+      return /[A-Z]/.test(suffix) && /[0-9]/.test(suffix);
+    };
+
+    const usedCodes = new Set<string>();
+    for (const c of this.credentials.values()) {
+      if (c.personalCodePlain && isValidMixedYf5(c.personalCodePlain)) {
+        usedCodes.add(c.personalCodePlain.toUpperCase());
+      }
+    }
+
     for (const [credId, cred] of this.credentials.entries()) {
+      // Si el código no tiene aún el formato mixto alfanumérico YF-XXXXX (5 caracteres con letras y números),
+      // actualizarlo a YF-XXXXX conservando los códigos previos en legacyCodesPlain para compatibilidad total
+      if (cred.personalCodePlain && !isValidMixedYf5(cred.personalCodePlain)) {
+        const prevCodes: string[] = Array.isArray((cred as any).legacyCodesPlain)
+          ? [...(cred as any).legacyCodesPlain]
+          : [];
+        if ((cred as any).legacyCodePlain && !prevCodes.includes((cred as any).legacyCodePlain)) {
+          prevCodes.push((cred as any).legacyCodePlain);
+        }
+        if (!prevCodes.includes(cred.personalCodePlain)) {
+          prevCodes.push(cred.personalCodePlain);
+        }
+        (cred as any).legacyCodesPlain = prevCodes;
+        if (!(cred as any).legacyCodePlain) {
+          (cred as any).legacyCodePlain = cred.personalCodePlain;
+        }
+
+        const seedBase = prevCodes[0] || cred.personalCodePlain;
+        let candidate = deriveShortMiEsenciaAccessCode(`${credId}:${seedBase}`);
+        let attempt = 1;
+        while (usedCodes.has(candidate.toUpperCase())) {
+          candidate = deriveShortMiEsenciaAccessCode(`${credId}:${seedBase}:${attempt}`);
+          attempt++;
+        }
+        usedCodes.add(candidate.toUpperCase());
+        cred.personalCodePlain = candidate;
+        cred.codePrefix = candidate;
+        cred.codeHash = computeMiEsenciaCodeHash(candidate);
+        credsChanged = true;
+      }
+
       const expectedPath = `/miesencia?code=${encodeURIComponent(cred.personalCodePlain)}`;
       if (cred.privateLinkPath !== expectedPath) {
         cred.privateLinkPath = expectedPath;
-        this.credentials.set(credId, cred);
         credsChanged = true;
       }
+      this.credentials.set(credId, cred);
     }
 
     if (credsChanged) {
@@ -2283,17 +2335,28 @@ class MiEsenciaStore {
       };
     }
 
-    const cleanCode = String(rawCode || '').trim().toUpperCase();
+    const cleanCode = extractCleanMiEsenciaCode(rawCode);
     if (!cleanCode) {
       return { valid: false, error: 'Por favor ingresa tu código personal de acceso.' };
     }
 
+    const alphaNumInput = cleanCode.replace(/[^A-Z0-9]/g, '');
     const inputHash = computeMiEsenciaCodeHash(cleanCode);
-    const cred = Array.from(this.credentials.values()).find(
-      (c) =>
+    const cred = Array.from(this.credentials.values()).find((c) => {
+      const cUpper = c.personalCodePlain.toUpperCase();
+      const cAlphaNum = cUpper.replace(/[^A-Z0-9]/g, '');
+      const legacyUpper = String((c as any).legacyCodePlain || '').toUpperCase();
+      const legacyList: string[] = Array.isArray((c as any).legacyCodesPlain)
+        ? (c as any).legacyCodesPlain.map((v: string) => String(v || '').toUpperCase())
+        : [];
+      return (
         c.codeHash === inputHash ||
-        c.personalCodePlain.toUpperCase() === cleanCode
-    );
+        cUpper === cleanCode ||
+        (alphaNumInput.length >= 4 && cAlphaNum === alphaNumInput) ||
+        (Boolean(legacyUpper) && (legacyUpper === cleanCode || legacyUpper.replace(/[^A-Z0-9]/g, '') === alphaNumInput)) ||
+        legacyList.some((lc) => lc === cleanCode || lc.replace(/[^A-Z0-9]/g, '') === alphaNumInput)
+      );
+    });
 
     if (!cred) {
       return {
@@ -2701,7 +2764,7 @@ class MiEsenciaStore {
     );
     if (interlocutor.messagesSentToday >= dailyLimit) {
       throw new Error(
-        `Has alcanzado tu límite diario de ${dailyLimit} mensajes por hoy (${interlocutor.messagesSentToday} usados). Si necesitas más mensajes hoy, ponte en contacto con ForeverYou.`
+        `Has alcanzado tu límite diario de ${dailyLimit} mensajes por hoy (${interlocutor.messagesSentToday} usados). Si necesitas más mensajes hoy, ponte en contacto con YouForever.`
       );
     }
 
@@ -3370,7 +3433,7 @@ class MiEsenciaStore {
           ? 'LONGITUD: Es una pregunta autobiográfica; puedes responder en 1 a 2 párrafos narrando con fidelidad los recuerdos recuperados.'
           : 'LONGITUD: Responde de forma directa, natural y concisa en 1 a 3 oraciones. NO agregues discursos filosóficos, religiosos ni sermones sentimentales.';
 
-        const prompt = `Eres la recreación conversacional del legado de ${person.fullName} ("${person.preferredName}") en "Mi Esencia" de ForeverYou.
+        const prompt = `Eres la recreación conversacional del legado de ${person.fullName} ("${person.preferredName}") en "Mi Esencia" de YouForever.
 ${pdfSourceHeader}
 Regla fundamental: Preservar la memoria y la personalidad original basándote ÚNICAMENTE en el archivo PDF compilado asignado a ${person.fullName}, sin mezclar información de otros perfiles ni transformar los recuerdos en ficción involuntaria.
 

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Users, HelpCircle, Settings, BookOpen, Shield, ShieldCheck, Sparkles, Lock } from 'lucide-react';
+import { Users, HelpCircle, Settings, BookOpen, Shield, Sparkles, Lock, BarChart3 } from 'lucide-react';
 import { ConfigPanel } from './ConfigPanel.tsx';
 import { QuestionBankPanel } from './QuestionBankPanel.tsx';
 import { InterviewsPanel } from './InterviewsPanel.tsx';
@@ -7,6 +7,7 @@ import { ManuscriptsView } from './ManuscriptsView.tsx';
 import { AuditLogsPanel } from './AuditLogsPanel.tsx';
 import { PrivacyAdminPanel } from './PrivacyAdminPanel.tsx';
 import { MiEsenciaAdminSection } from '../modules/mi-esencia/MiEsenciaAdminSection.tsx';
+import { SystemStatisticsPanel } from './SystemStatisticsPanel.tsx';
 
 interface AdminDashboardProps {
   adminEmail: string | null;
@@ -21,7 +22,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onEnterParticipantPortal,
   onOpenConoceme,
 }) => {
-  const [activeTab, setActiveTab] = useState<'interviews' | 'questions' | 'config' | 'manuscripts' | 'audit' | 'privacy' | 'mi_esencia'>('interviews');
+  const [activeTab, setActiveTab] = useState<
+    'interviews' | 'questions' | 'config' | 'manuscripts' | 'audit' | 'privacy' | 'mi_esencia' | 'statistics'
+  >('interviews');
   const [selectedInterviewIdForManuscript, setSelectedInterviewIdForManuscript] = useState<string | null>(null);
 
   const handleOpenManuscript = (interviewId: string) => {
@@ -56,6 +59,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           >
             <Sparkles className="w-4 h-4 text-amber-700" />
             <span>Mi Esencia</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('statistics')}
+            className={`flex items-center space-x-2 py-3 px-3 sm:px-4 border-b-2 transition whitespace-nowrap cursor-pointer ${
+              activeTab === 'statistics'
+                ? 'border-amber-700 text-amber-900 font-bold'
+                : 'border-transparent text-stone-500 hover:text-stone-800'
+            }`}
+          >
+            <BarChart3 className="w-4 h-4 text-amber-700" />
+            <span>Estadísticas</span>
           </button>
 
           <button
@@ -147,6 +162,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
         {activeTab === 'mi_esencia' && (
           <MiEsenciaAdminSection adminEmail={adminEmail || ''} />
+        )}
+
+        {activeTab === 'statistics' && (
+          <SystemStatisticsPanel adminEmail={adminEmail} defaultScope="all" />
         )}
 
         {activeTab === 'questions' && (

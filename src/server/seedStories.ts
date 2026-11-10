@@ -451,7 +451,7 @@ function buildStage5Answer(num: number, p: PersonaContext): string {
     case 17:
       return `Visualizo a mis descendientes alcanzando metas que yo solo pude soñar, viviendo con libertad y dignidad, pero manteniendo siempre encendida la llama de los valores familiares.`;
     case 18:
-      return `Poder plasmar hoy mis recuerdos en este libro ForeverYou es un milagro de memoria: es tender un puente de amor directo desde mi corazón hacia los corazones de quienes aún no han nacido.`;
+      return `Poder plasmar hoy mis recuerdos en este libro YouForever es un milagro de memoria: es tender un puente de amor directo desde mi corazón hacia los corazones de quienes aún no han nacido.`;
     case 19:
       return `Quisiera que al recordarme brote en ustedes una sonrisa cálida y digan con orgullo: 'Nos enseñó a vivir con nobleza, nos amó con locura y nos dejó un hogar lleno de luz'.`;
     case 20:

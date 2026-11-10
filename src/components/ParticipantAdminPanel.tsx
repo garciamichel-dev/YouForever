@@ -171,8 +171,8 @@ El titular conserva sus derechos de Acceso, Rectificación, Cancelación y
 Oposición conforme a la Ley Federal de Protección de Datos Personales en
 Posesión de los Particulares (LFPDPPP).
 
-Oficial de Privacidad: privacidad@foreveryou.lat
-Generado de forma segura desde la infraestructura Cloud Firestore de ForeverYou.
+Contacto Oficial y Privacidad: youforever.team@gmail.com • WhatsApp: +52 9681040015
+Generado de forma segura desde la infraestructura Cloud Firestore de YouForever.
 ================================================================================
     `.trim();
 
@@ -643,7 +643,7 @@ Generado de forma segura desde la infraestructura Cloud Firestore de ForeverYou.
                   <div className="p-5 bg-white border border-stone-200 rounded-2xl space-y-3">
                     <h4 className="font-serif font-bold text-stone-900 text-sm flex items-center gap-1.5">
                       <FileText className="w-4 h-4 text-amber-800" />
-                      <span>Documentos de Privacidad Oficiales de ForeverYou</span>
+                      <span>Documentos de Privacidad Oficiales de YouForever</span>
                     </h4>
                     <p className="text-xs text-stone-600">
                       Puedes consultar en cualquier momento los textos vigentes de privacidad:
@@ -683,7 +683,7 @@ Generado de forma segura desde la infraestructura Cloud Firestore de ForeverYou.
                             Publicidad o Prospección Comercial
                           </span>
                           <span className="text-stone-500 text-[11px]">
-                            ForeverYou no utiliza tus recuerdos ni testimonios para publicidad.
+                            YouForever no utiliza tus recuerdos ni testimonios para publicidad.
                           </span>
                         </div>
                         <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-stone-200 text-stone-700">
@@ -1267,7 +1267,7 @@ Generado de forma segura desde la infraestructura Cloud Firestore de ForeverYou.
                       Avisos de Privacidad Publicados y Registro Histórico
                     </h4>
                     <p className="text-xs text-stone-600">
-                      ForeverYou conserva un historial inalterable de cada versión legal publicada.
+                      YouForever conserva un historial inalterable de cada versión legal publicada.
                       Las versiones institucionales son administradas por el Administrador General Autorizado.
                     </p>
 

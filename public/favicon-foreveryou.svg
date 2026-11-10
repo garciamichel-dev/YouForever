@@ -1,45 +1,45 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
-  <!-- App Icon Rounded Square Background (#0A182E Deep Navy from ForeverYou Logo Board) -->
-  <rect width="128" height="128" rx="28" fill="#0A182E" />
+  <!-- App Icon Rounded Square Background (#071A3E Deep Navy from YouForever Logo Board) -->
+  <rect width="128" height="128" rx="28" fill="#071A3E" />
 
-  <!-- ForeverYou F + ∞ + Y Intertwined Monogram in White -->
+  <!-- YouForever Y + ∞ + F Intertwined Monogram in White -->
   <g transform="translate(10, 32) scale(0.54)" stroke="#FFFFFF" fill="none" stroke-linecap="round" stroke-linejoin="round">
     <!-- Left loop outer arc + upper-left diagonal stopping before central crossing -->
     <path
-      d="M 48 93 C 23 89, 12 72, 12 54 C 12 31, 30 14, 54 14 C 68 14, 79 21, 90 33"
+      d="M 52 94 C 25 92, 12 74, 12 54 C 12 31, 30 14, 54 14 C 69 14, 81 21, 92 34"
       stroke-width="15"
       stroke-linecap="butt"
     />
     <!-- Lower-right diagonal resuming after central crossing + right loop outer arc -->
     <path
-      d="M 110 68 C 121 82, 133 94, 148 94 C 172 94, 188 77, 188 54 C 188 31, 172 14, 148 14 C 131 14, 118 25, 100 47 C 83 68, 72 91, 58 94"
+      d="M 108 69 C 119 82, 132 94, 148 94 C 172 94, 188 77, 188 54 C 188 31, 172 14, 148 14 C 131 14, 118 25, 100 47 C 83 68, 70 92, 52 94"
       stroke-width="15"
       stroke-linecap="round"
     />
-    <!-- Letter F integrated inside left loop -->
+    <!-- Letter Y integrated inside left loop -->
     <path
-      d="M 48 93 L 48 54 C 48 41, 56 35, 76 35"
+      d="M 52 91 L 52 58"
       stroke-width="13.5"
       stroke-linecap="round"
     />
     <path
-      d="M 48 61 L 69 61"
-      stroke-width="12.5"
+      d="M 52 59 L 35 37"
+      stroke-width="13"
       stroke-linecap="round"
     />
-    <!-- Letter Y integrated inside right loop -->
     <path
-      d="M 140 91 L 140 59"
+      d="M 52 59 L 69 37"
+      stroke-width="13"
+      stroke-linecap="round"
+    />
+    <!-- Letter F integrated inside right loop -->
+    <path
+      d="M 130 86 L 130 53 C 130 41, 138 35, 161 35"
       stroke-width="13.5"
       stroke-linecap="round"
     />
     <path
-      d="M 140 60 C 136 50, 128 42, 120 38"
-      stroke-width="12.5"
-      stroke-linecap="round"
-    />
-    <path
-      d="M 140 60 C 144 50, 152 42, 160 38"
+      d="M 130 61 L 154 61"
       stroke-width="12.5"
       stroke-linecap="round"
     />

@@ -215,15 +215,7 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
   }, [refreshTrigger]);
 
   const getPublicShareUrl = (token: string) => {
-    const origin = window.location.origin;
-    // If on Google Cloud Run dev container URL (ais-dev-), use the public shared URL (ais-pre-)
-    let targetOrigin = origin;
-    if (origin.includes('ais-dev-')) {
-      targetOrigin = origin.replace('ais-dev-', 'ais-pre-');
-    } else if (appInfo?.sharedUrl) {
-      targetOrigin = appInfo.sharedUrl;
-    }
-    return `${targetOrigin}/interview?token=${token}`;
+    return `https://youforever.app/interview?token=${token}`;
   };
 
   const copyToClipboard = (text: string) => {
@@ -477,7 +469,7 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
 
       const link = document.createElement('a');
       link.href = blobUrl;
-      link.download = ver.fileName || `ForeverYou_${inv.id}_v${ver.versionNumber}.pdf`;
+      link.download = ver.fileName || `YouForever_${inv.id}_v${ver.versionNumber}.pdf`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
@@ -1269,7 +1261,7 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-white rounded-xl max-w-xl w-full p-6 shadow-2xl border border-stone-200 max-h-[90vh] overflow-y-auto">
             <h3 className="font-serif text-lg font-bold text-stone-900 pb-3 border-b border-stone-200 mb-4">
-              Crear Nueva Entrevista en ForeverYou
+              Crear Nueva Entrevista en YouForever
             </h3>
 
             <form onSubmit={handleCreateInterview} className="space-y-4 text-xs">
@@ -1969,7 +1961,7 @@ Tus recuerdos y testimonios serán preservados con total fidelidad para nuestra 
                 {versionToDelete.version.title || versionToDelete.interview.title}
               </div>
               <div className="text-[11px] text-stone-600">
-                <strong>Archivo:</strong> {versionToDelete.version.fileName || `ForeverYou_${versionToDelete.interview.id}_v${versionToDelete.version.versionNumber}.pdf`}
+                <strong>Archivo:</strong> {versionToDelete.version.fileName || `YouForever_${versionToDelete.interview.id}_v${versionToDelete.version.versionNumber}.pdf`}
               </div>
               <div className="text-[11px] text-stone-600">
                 <strong>Participante:</strong> {versionToDelete.version.participantName || versionToDelete.interview.title}

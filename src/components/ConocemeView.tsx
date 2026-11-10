@@ -1,7 +1,6 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   BookOpen,
-  Mic,
   Camera,
   Sparkles,
   Check,
@@ -18,6 +17,11 @@ import {
   Send,
   RotateCcw,
   SlidersHorizontal,
+  ShieldCheck,
+  KeyRound,
+  Users,
+  Lock,
+  MessageSquare,
 } from 'lucide-react';
 import {
   DEMO_STAGE_PRESETS,
@@ -33,7 +37,16 @@ import {
   buildWhatsAppInquiryUrl,
   buildMailtoInquiryUrl,
   InquiryFormInput,
+  OFFICIAL_CONTACT_EMAIL,
+  OFFICIAL_WHATSAPP_DISPLAY,
 } from '../utils/conocemeLogic.ts';
+import {
+  composeBookPages,
+  DemoEditorialConfig,
+  DemoInMemoryPhoto,
+  DemoManuscript,
+} from '../logic/demoStoryRules.ts';
+import { DemoComposedPageView } from './DemoBookPageRenderer.tsx';
 import { ForeverYouLogo } from './ForeverYouLogo';
 
 interface ConocemeViewProps {
@@ -43,6 +56,174 @@ interface ConocemeViewProps {
   onOpenPrivacyNotice?: () => void;
   onOpenFaq?: () => void;
 }
+
+/**
+ * Generates an archival sepia-toned SVG data URI photograph for the registered-user book preview
+ * so the real `DemoComposedPageView` renders authentic illustrated chapter pages.
+ */
+function buildArchivalSamplePhotoDataUrl(params: {
+  title: string;
+  subtitle: string;
+  year: string;
+  bgFrom: string;
+  bgTo: string;
+  accent: string;
+}): string {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="800" height="520" viewBox="0 0 800 520">
+    <defs>
+      <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+        <stop offset="0%" stop-color="${params.bgFrom}" />
+        <stop offset="100%" stop-color="${params.bgTo}" />
+      </linearGradient>
+    </defs>
+    <rect width="800" height="520" fill="url(#bg)" rx="12" />
+    <rect x="24" y="24" width="752" height="472" fill="none" stroke="${params.accent}" stroke-opacity="0.45" stroke-width="2" rx="8" />
+    <circle cx="400" cy="210" r="68" fill="none" stroke="${params.accent}" stroke-opacity="0.55" stroke-width="2" />
+    <path d="M350 280 C365 245, 435 245, 450 280" fill="none" stroke="${params.accent}" stroke-opacity="0.65" stroke-width="3" stroke-linecap="round" />
+    <text x="400" y="105" text-anchor="middle" fill="${params.accent}" font-family="Georgia, serif" font-size="18" letter-spacing="3">${params.year.toUpperCase()}</text>
+    <text x="400" y="365" text-anchor="middle" fill="#FAF8F5" font-family="Georgia, serif" font-size="25" font-weight="bold">${params.title}</text>
+    <text x="400" y="405" text-anchor="middle" fill="#E7E0D6" font-family="Georgia, serif" font-size="17" font-style="italic">${params.subtitle}</text>
+  </svg>`;
+  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+}
+
+const FIXED_REGISTERED_SAMPLE_EDITORIAL_CONFIG: DemoEditorialConfig = {
+  narrativeStyle: 'first_person_literary',
+  coverDesignId: 'clasica_eterna',
+  coverColorVariantIdx: 0,
+  coverVisualType: 'illustration',
+  coverIllustrationId: 'arbol_raices',
+  interiorStyleId: 'clasico_editorial',
+  bookFormatId: '6x9',
+  customTitle: 'El Patio de los Geranios y Nuestra Historia',
+  customSubtitle: 'Libro Autobiográfico y Patrimonio Familiar',
+  customAuthors: 'Elena Martínez de Gómez',
+  dedication:
+    'Para mis hijos y nietos: que cada vez que abran estas páginas recuerden que nuestra mayor fortuna siempre ha sido querernos y caminar juntos con honestidad.',
+};
+
+const FIXED_REGISTERED_SAMPLE_MANUSCRIPT: DemoManuscript = {
+  title: 'El Patio de los Geranios y Nuestra Historia',
+  subtitle: 'Libro Autobiográfico y Patrimonio Familiar',
+  authors: 'Elena Martínez de Gómez',
+  mode: 'individual',
+  narrativeStyle: 'first_person_literary',
+  dedication:
+    'Para mis hijos y nietos: que cada vez que abran estas páginas recuerden que nuestra mayor fortuna siempre ha sido querernos y caminar juntos con honestidad.',
+  introduction:
+    'Este libro reúne los recuerdos, fotografías y grabaciones de voz originales compartidos en YouForever, redactados con fidelidad absoluta a cada palabra narrada.',
+  closingMessage: 'Esta historia continuará...',
+  insufficientInfoNotices: [],
+  generatedAt: '2026-03-20T12:00:00.000Z',
+  useOfficialForeverYouLogo: true,
+  chapters: [
+    {
+      id: 'cap-1',
+      partNumber: 1,
+      dimensionKey: 'raices',
+      title: 'El Patio de los Geranios y la Voz de la Abuela',
+      paragraphs: [
+        'Crecimos en una casa de techos altos con un patio central lleno de macetas con geranios rojos en el Barrio de Analco, en Guadalajara. Por las tardes jugábamos bajo la sombra del limonero mientras mi abuela Elena horneaba pan y escuchábamos la radio.',
+        'Ella no necesitaba alzar la voz para enseñarnos; bastaba con ver el cariño con el que repartía cada pieza de pan tibio entre nosotros y los vecinos del barrio.',
+      ],
+      pullQuote:
+        '«Mi abuela Elena sacaba las charolas de pan tibio a las seis de la tarde; ese olor a canela y leña sigue siendo para mí el verdadero significado de hogar.»',
+    },
+    {
+      id: 'cap-2',
+      partNumber: 2,
+      dimensionKey: 'transformacion',
+      title: 'Una Maleta de Cuero y una Carta Doblada',
+      paragraphs: [
+        'Cuando cumplí diecinueve años conseguí mi primera beca para estudiar en la capital. Viajé en el autobús nocturno con una sola maleta de cuero café que me prestó mi padre.',
+        'Dentro llevaba una carta escrita a mano por mi madre recordándome que ningún título valía más que la palabra empeñada y que en casa siempre habría un lugar esperándome.',
+      ],
+      pullQuote:
+        '«Cuando abrí la maleta en aquella habitación estudiantil, encontré la carta de mi madre entre mis camisas. La leí tres veces antes de dormir.»',
+    },
+    {
+      id: 'cap-3',
+      partNumber: 3,
+      dimensionKey: 'personas_amadas',
+      title: 'El Amor que Construyó Nuestro Hogar',
+      paragraphs: [
+        'Nuestra historia compartida nació en una tarde lluviosa de octubre de 1972, afuera del café de la universidad. Aquel paraguas prestado fue el inicio de una caminata sin prisa por diez cuadras.',
+        'En nuestro primer departamento mantuvimos intacta la misma costumbre: escucharnos al final del día y nunca irnos a dormir sin darnos la mano con gratitud.',
+      ],
+      pullQuote:
+        '«Caminamos diez cuadras bajo un mismo paraguas en octubre de 1972 y sentimos que la conversación había empezado muchos años atrás.»',
+    },
+    {
+      id: 'cap-4',
+      partNumber: 4,
+      dimensionKey: 'legado',
+      title: 'Lecciones de Vida para Nuestros Nietos',
+      paragraphs: [
+        'En 1985 aprendimos que los bienes materiales pueden levantarse de nuevo con esfuerzo, pero la unión entre hermanos y el buen nombre permanecen para siempre.',
+        'A quienes lean estas páginas dentro de cincuenta años les dejamos esta certeza: nunca cambien la honestidad ni el tiempo con quienes aman por la prisa del mundo.',
+      ],
+      pullQuote:
+        '«La verdadera riqueza está en tener paz en la conciencia y una mesa familiar donde todos sepan que siempre pueden regresar.»',
+    },
+  ],
+};
+
+const FIXED_REGISTERED_SAMPLE_PHOTOS: Record<string, DemoInMemoryPhoto | null> = {
+  'cap-1': {
+    id: 'sample-photo-cap-1',
+    fileName: 'patio_geranios_1954.jpg',
+    mimeType: 'image/svg+xml',
+    width: 800,
+    height: 520,
+    focusY: 'center',
+    zoom: 1,
+    caption:
+      'Fotografía tomada con la cámara de rollo de mi tío Roberto (Octubre 1954, Barrio de Analco, Guadalajara).',
+    objectUrl: buildArchivalSamplePhotoDataUrl({
+      title: 'Tarde de domingo en el patio de la abuela Elena',
+      subtitle: 'Barrio de Analco, Guadalajara',
+      year: 'Octubre 1954',
+      bgFrom: '#451a03',
+      bgTo: '#78350f',
+      accent: '#f59e0b',
+    }),
+    dataUrl: buildArchivalSamplePhotoDataUrl({
+      title: 'Tarde de domingo en el patio de la abuela Elena',
+      subtitle: 'Barrio de Analco, Guadalajara',
+      year: 'Octubre 1954',
+      bgFrom: '#451a03',
+      bgTo: '#78350f',
+      accent: '#f59e0b',
+    }),
+  },
+  'cap-3': {
+    id: 'sample-photo-cap-3',
+    fileName: 'cafe_universidad_1972.jpg',
+    mimeType: 'image/svg+xml',
+    width: 800,
+    height: 520,
+    focusY: 'center',
+    zoom: 1,
+    caption:
+      'Un mes después de aquella caminata bajo la lluvia afuera del Café de la Universidad (Noviembre 1972).',
+    objectUrl: buildArchivalSamplePhotoDataUrl({
+      title: 'Nuestro primer otoño juntos',
+      subtitle: 'Café de la Universidad',
+      year: 'Noviembre 1972',
+      bgFrom: '#31102F',
+      bgTo: '#581C4F',
+      accent: '#FBBF24',
+    }),
+    dataUrl: buildArchivalSamplePhotoDataUrl({
+      title: 'Nuestro primer otoño juntos',
+      subtitle: 'Café de la Universidad',
+      year: 'Noviembre 1972',
+      bgFrom: '#31102F',
+      bgTo: '#581C4F',
+      accent: '#FBBF24',
+    }),
+  },
+};
 
 export const ConocemeView: React.FC<ConocemeViewProps> = ({
   onNavigateToPortal,
@@ -87,7 +268,20 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
   const [showSavedAudioDemo, setShowSavedAudioDemo] = useState<boolean>(false);
   const [selectedPhotoId, setSelectedPhotoId] = useState<string>(DEMO_PHOTO_MEMORIES[0].id);
 
-  // 2. VISTA PREVIA INTERACTIVA DEL LEGADO (Book Page Alternation + Disposition Slider State)
+  // 2. VISTA PREVIA INTERACTIVA DEL LEGADO (Real Composed Book Pages + Disposition Slider State)
+  const composedSampleBook = useMemo(() => {
+    const doc = composeBookPages({
+      manuscript: FIXED_REGISTERED_SAMPLE_MANUSCRIPT,
+      editorialConfig: FIXED_REGISTERED_SAMPLE_EDITORIAL_CONFIG,
+      chapterPhotos: FIXED_REGISTERED_SAMPLE_PHOTOS,
+      customClosingPageText: 'Esta historia continuará...',
+    });
+    return {
+      ...doc,
+      useOfficialForeverYouLogo: true,
+    };
+  }, []);
+
   const [pageIndex, setPageIndex] = useState<number>(0);
   const [layoutSliderValue, setLayoutSliderValue] = useState<number>(50);
   const [isPlayingVoiceSample, setIsPlayingVoiceSample] = useState<boolean>(false);
@@ -187,10 +381,21 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
   };
 
   // Active Book Page & Layout Disposition Calculation
-  const activeBookPage = SAMPLE_BOOK_CHAPTERS[pageIndex] || SAMPLE_BOOK_CHAPTERS[0];
+  const totalComposedPages = composedSampleBook.pages.length;
+  const safePageIndex = Math.max(0, Math.min(pageIndex, totalComposedPages - 1));
+  const activeComposedPage = composedSampleBook.pages[safePageIndex] || composedSampleBook.pages[0];
+  const activeBookPage =
+    SAMPLE_BOOK_CHAPTERS[safePageIndex % SAMPLE_BOOK_CHAPTERS.length] || SAMPLE_BOOK_CHAPTERS[0];
   const layoutDisposition = computeLegacyLayoutDisposition(layoutSliderValue);
   const selectedPhoto =
     DEMO_PHOTO_MEMORIES.find((p) => p.id === selectedPhotoId) || DEMO_PHOTO_MEMORIES[0];
+
+  const getComposedPageShortLabel = (idx: number, kind: string) => {
+    if (kind === 'cover') return `Pág. ${idx + 1} · Portada`;
+    if (kind === 'title_dedication') return `Pág. ${idx + 1} · Portadilla`;
+    if (kind === 'closing_mandatory') return `Pág. ${idx + 1} · Cierre`;
+    return `Pág. ${idx + 1} · Capítulo`;
+  };
 
   const handleInquirySubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -215,8 +420,8 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
     <div className="min-h-screen bg-[#FAF8F5] text-stone-900 font-sans selection:bg-amber-200">
       {/* Strict 3-Zone Top Bar Contract */}
       <header className="sticky top-0 z-40 bg-[#FAF8F5]/95 backdrop-blur-sm border-b border-stone-200/80">
-        <div className="max-w-7xl mx-auto flex items-center justify-between gap-8 px-6 py-4">
-          {/* Zone 1: Official ForeverYou Horizontal Lockup */}
+        <div className="max-w-7xl mx-auto flex items-center justify-between gap-6 px-6 py-4">
+          {/* Zone 1: Official YouForever Horizontal Lockup */}
           <a
             href="/conoceme"
             className="inline-flex items-center whitespace-nowrap shrink-0"
@@ -224,10 +429,10 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
             <ForeverYouLogo variant="horizontal" theme="navy" size="md" />
           </a>
 
-          {/* Zone 2: 4 concise single-line navigation links */}
+          {/* Zone 2: Concise navigation links */}
           <nav
             aria-label="Navegación comercial"
-            className="hidden md:flex items-center gap-7 text-sm font-medium text-stone-600"
+            className="hidden lg:flex items-center gap-6 text-sm font-medium text-stone-600"
           >
             <button
               type="button"
@@ -241,7 +446,14 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
               onClick={() => scrollToSection('vista-previa-legado')}
               className="hover:text-stone-900 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
-              Vista Previa del Legado
+              Vista Previa del Libro
+            </button>
+            <button
+              type="button"
+              onClick={() => scrollToSection('mi-esencia-ecosistema')}
+              className="hover:text-stone-900 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              Mi Esencia IA
             </button>
             <button
               type="button"
@@ -288,7 +500,7 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
               onClick={() => scrollToSection('contacto-regalo')}
               className="px-5 py-2.5 text-xs font-semibold text-white bg-amber-800 rounded-lg hover:bg-amber-900 transition-colors whitespace-nowrap shrink-0 cursor-pointer shadow-xs"
             >
-              Regalar ForeverYou
+              Regalar YouForever
             </button>
           </div>
         </div>
@@ -301,22 +513,25 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
             {/* Left Column: Clear Value Proposition */}
             <div className="lg:col-span-7 flex flex-col justify-between space-y-6">
               <div className="space-y-5">
-                <div className="flex items-center gap-2 text-xs font-medium text-amber-900">
+                <div className="flex flex-wrap items-center gap-2 text-xs font-medium text-amber-900">
                   <span>Biografías Familiares Guiadas</span>
                   <span aria-hidden="true">·</span>
-                  <span>Voz, Fotos y Libro Imprimible</span>
+                  <span>Libro Editorial Imprimible</span>
+                  <span aria-hidden="true">·</span>
+                  <span>Mi Esencia (IA Conversacional)</span>
                 </div>
 
                 <h1
                   className="font-serif font-bold text-stone-900 tracking-tight leading-[1.12]"
                   style={{ fontSize: 'clamp(2.25rem, 4vw, 3.5rem)', textWrap: 'balance' }}
                 >
-                  Transforma la voz y los recuerdos de tu familia en un libro para toda la vida.
+                  Transforma la voz y los recuerdos de tu familia en un libro y un legado vivo para siempre.
                 </h1>
 
                 <p className="text-base text-stone-700 leading-relaxed max-w-xl">
-                  <strong>ForeverYou</strong> guía una conversación cálida por voz o teclado y convierte cada anécdota en un{' '}
-                  <span className="text-stone-900 font-medium">libro biográfico ilustrado</span> con sus grabaciones originales preservadas.
+                  <strong>YouForever</strong> guía una conversación cálida por voz o teclado, maqueta cada anécdota en un{' '}
+                  <span className="text-stone-900 font-medium">libro biográfico ilustrado</span> con sus grabaciones originales y permite a tu familia seguir conversando con sus recuerdos reales en{' '}
+                  <span className="text-stone-900 font-medium">Mi Esencia</span>.
                 </p>
               </div>
 
@@ -327,28 +542,28 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
                     onClick={() => scrollToSection('contacto-regalo')}
                     className="px-6 py-3.5 bg-amber-800 hover:bg-amber-900 text-white font-semibold text-sm rounded-lg transition-colors inline-flex items-center gap-2 whitespace-nowrap shrink-0 cursor-pointer shadow-xs"
                   >
-                    <span>Solicitar ForeverYou</span>
+                    <span>Solicitar YouForever</span>
                     <ArrowRight className="w-4 h-4" />
                   </button>
 
                   <button
                     type="button"
-                    onClick={() => scrollToSection('simulador-entrevista')}
+                    onClick={() => scrollToSection('vista-previa-legado')}
                     className="px-5 py-3.5 bg-white hover:bg-stone-100 text-stone-800 font-medium text-sm rounded-lg border border-stone-300 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                   >
-                    Probar Simulador de Entrevista
+                    Ver Libro Real de Muestra
                   </button>
                 </div>
 
-                {/* Prueba gratuita — Mi historia en 10 preguntas Card */}
+                {/* Prueba gratuita Card */}
                 <div className="rounded-xl bg-[#F3EFEA] border border-amber-800/20 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                   <div className="space-y-1">
                     <div className="inline-flex items-center gap-1.5 text-xs font-semibold text-amber-900">
                       <Sparkles className="w-3.5 h-3.5 text-amber-700" />
-                      <span>Prueba gratuita</span>
+                      <span>Prueba gratuita interactiva</span>
                     </div>
                     <p className="text-xs sm:text-sm text-stone-700">
-                      Descubre cómo tus recuerdos pueden convertirse en un libro inolvidable
+                      Responde 5 preguntas guiadas y diseña al instante la vista previa de tu propio libro en PDF.
                     </p>
                   </div>
                   <a
@@ -367,27 +582,27 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
                 </div>
 
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-stone-600">
-                  <span>Acceso con un clic sin contraseñas</span>
+                  <span>Códigos seguros YF-XXXXX</span>
                   <span aria-hidden="true">·</span>
                   <span>100% fiel a sus palabras</span>
                   <span aria-hidden="true">·</span>
-                  <span>Paquete descargable (.ZIP)</span>
+                  <span>Paquete descargable (.ZIP) + Mi Esencia</span>
                 </div>
               </div>
             </div>
 
-            {/* Right Column: Compact Visual Showcase */}
+            {/* Right Column: Ecosystem Visual Showcase */}
             <div className="lg:col-span-5 flex flex-col">
               <div className="h-full rounded-2xl bg-[#F3EFEA] border border-stone-200/90 p-6 flex flex-col justify-between space-y-4">
                 <div className="flex items-center justify-between text-xs text-stone-600 border-b border-stone-200 pb-3">
-                  <span className="font-serif italic text-stone-800">Edición Biográfica Familiar</span>
-                  <span>Voz + Fotos + Libro</span>
+                  <span className="font-serif italic text-stone-800">Ecosistema Completo YouForever</span>
+                  <span>Entrevista + Libro + Mi Esencia</span>
                 </div>
 
                 <div className="bg-[#FAF8F5] border border-stone-200/90 rounded-xl p-5 space-y-4">
                   <div className="flex items-center justify-between text-[11px] text-stone-500">
                     <span>CAPÍTULO I · INFANCIA</span>
-                    <span className="tabular-nums">Pág. 14</span>
+                    <span className="tabular-nums">Código: YF-8K4M2</span>
                   </div>
 
                   <h2 className="font-serif text-lg font-bold text-stone-900 leading-snug">
@@ -397,7 +612,7 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
                   <div className="rounded-lg bg-gradient-to-br from-stone-800 via-stone-900 to-amber-950 p-4 text-amber-50/95 space-y-2">
                     <div className="flex items-center justify-between text-[11px] text-amber-200/80">
                       <span>Guadalajara, 1954</span>
-                      <span className="tabular-nums">Audio: 02:45</span>
+                      <span className="tabular-nums">Audio Original + Mi Esencia</span>
                     </div>
                     <p className="font-serif italic text-xs sm:text-sm leading-relaxed text-amber-50">
                       “Cada tarde a las seis salían las charolas del horno de leña. Sentarnos a escuchar a mi abuela fue nuestra primera escuela.”
@@ -407,7 +622,7 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
 
                 <div className="flex items-center justify-between text-xs text-stone-600">
                   <span>Individual o en Pareja</span>
-                  <span>Edición digital e imprenta</span>
+                  <span>WhatsApp: {OFFICIAL_WHATSAPP_DISPLAY}</span>
                 </div>
               </div>
             </div>
@@ -419,28 +634,28 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
               <div className="text-xs text-amber-900 font-medium">01 · Recorrido Vital</div>
               <div className="font-serif text-lg font-bold text-stone-900 tabular-nums">5 Etapas de Vida</div>
               <p className="text-xs text-stone-600 mt-0.5">
-                Infancia, Juventud, Adultez, Madurez y Legado.
+                Infancia, Juventud, Adultez, Madurez y Legado con preguntas empáticas.
               </p>
             </div>
             <div>
-              <div className="text-xs text-amber-900 font-medium">02 · Accesibilidad</div>
-              <div className="font-serif text-lg font-bold text-stone-900">Voz o Teclado</div>
+              <div className="text-xs text-amber-900 font-medium">02 · Acceso Seguro</div>
+              <div className="font-serif text-lg font-bold text-stone-900">Código YF-XXXXX</div>
               <p className="text-xs text-stone-600 mt-0.5">
-                Sin contraseñas y con autoguardado automático.
+                Alfanumérico sin contraseñas complejas y con protección anti-fuerza bruta.
               </p>
             </div>
             <div>
-              <div className="text-xs text-amber-900 font-medium">03 · Fidelidad Real</div>
-              <div className="font-serif text-lg font-bold text-stone-900 tabular-nums">Cero Invenciones</div>
+              <div className="text-xs text-amber-900 font-medium">03 · Estudio Editorial</div>
+              <div className="font-serif text-lg font-bold text-stone-900 tabular-nums">Libro de Autor</div>
               <p className="text-xs text-stone-600 mt-0.5">
-                Redacción fiel a sus palabras y tono original.
+                Maquetación profesional en PDF, fotos comentadas y paquete completo en .ZIP.
               </p>
             </div>
             <div>
-              <div className="text-xs text-amber-900 font-medium">04 · Entrega Total</div>
-              <div className="font-serif text-lg font-bold text-stone-900">Libro + Archivos</div>
+              <div className="text-xs text-amber-900 font-medium">04 · Legado Conversacional</div>
+              <div className="font-serif text-lg font-bold text-stone-900">Mi Esencia IA</div>
               <p className="text-xs text-stone-600 mt-0.5">
-                Libro, Dossier, fotos comentadas y audios en .ZIP.
+                Tus hijos y nietos conversan con tu Compilado Testimonial Fidedigno (Niveles A, B y C).
               </p>
             </div>
           </div>
@@ -794,7 +1009,7 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
           </div>
         </section>
 
-        {/* 3. VISTA PREVIA INTERACTIVA DEL LEGADO (Biographical Book Card with Page Alternation & Layout Slider) */}
+        {/* 3. VISTA PREVIA INTERACTIVA DEL LEGADO (Real Multi-Page Book Renderer Matching Registered Users) */}
         <section
           id="vista-previa-legado"
           className="scroll-mt-20 max-w-7xl mx-auto px-6 py-14 lg:py-16 space-y-8"
@@ -802,33 +1017,33 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
           <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-6">
             <div className="space-y-1.5 max-w-2xl">
               <div className="text-xs font-medium text-amber-900">
-                Edición Editorial Ilustrada · Alterna Páginas y Ajusta la Disposición Visual
+                Visor Real de Páginas · Diseño Editorial Fijo de Muestra (Clásica Eterna · 6×9&quot;)
               </div>
               <h2 className="font-serif text-2xl sm:text-3xl font-bold text-stone-900 tracking-tight">
                 Vista Previa Interactiva del Legado
               </h2>
               <p className="text-sm text-stone-600">
-                Explora páginas de muestra del libro biográfico y utiliza el control deslizante para visualizar cómo conviven las fotografías comentadas con las transcripciones literarias.
+                Recorre las páginas reales del libro tal como las genera el Estudio Editorial para usuarios registrados de YouForever: portada con sello oficial, portadilla con dedicatoria, capítulos ilustrados con fotografías comentadas y página final de cierre.
               </p>
             </div>
 
-            {/* Sample Page Selector Tabs */}
-            <div className="flex flex-wrap sm:flex-nowrap items-center gap-1.5 shrink-0">
-              {SAMPLE_BOOK_CHAPTERS.map((page, idx) => (
+            {/* Real Composed Book Page Selector Tabs */}
+            <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+              {composedSampleBook.pages.map((p, idx) => (
                 <button
-                  key={page.id}
+                  key={`real-page-${p.pageNumber}`}
                   type="button"
                   onClick={() => {
                     setPageIndex(idx);
                     setIsPlayingVoiceSample(false);
                   }}
                   className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                    pageIndex === idx
+                    safePageIndex === idx
                       ? 'bg-stone-900 border-stone-900 text-white'
                       : 'bg-white border-stone-300 text-stone-700 hover:bg-stone-100'
                   }`}
                 >
-                  Pág. {page.pageNumber} · {page.chapterNumber}
+                  {getComposedPageShortLabel(idx, p.kind)}
                 </button>
               ))}
             </div>
@@ -836,20 +1051,84 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
 
           {/* Biographical Book Visualization Card + Deliverable Column */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-            {/* Left 8 cols: Interactive Biographical Book Visualization Card */}
+            {/* Left 8 cols: Real Registered-User Book Page Renderer + Interactive Audio/Disposition Inspector */}
             <div
               data-testid="legacy-book-card"
-              className="lg:col-span-8 bg-white border border-stone-200 rounded-2xl p-6 sm:p-8 flex flex-col justify-between space-y-6 shadow-xs"
+              className="lg:col-span-8 bg-white border border-stone-200 rounded-2xl p-5 sm:p-7 flex flex-col justify-between space-y-6 shadow-xs"
             >
-              {/* Slider Control Bar for Photo vs. Transcription Disposition */}
-              <div className="bg-[#FAF8F5] border border-stone-200/90 rounded-xl p-4 space-y-3">
+              {/* Top Metadata Bar */}
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-stone-600 border-b border-stone-200 pb-3">
+                <div className="flex items-center gap-2">
+                  <BookOpen className="w-4 h-4 text-amber-800" />
+                  <span className="font-semibold text-stone-900">
+                    Diseño Editorial: Clásica Eterna · Clásico Editorial (EB Garamond · 6×9&quot;)
+                  </span>
+                </div>
+                <span className="font-semibold text-amber-900 tabular-nums">
+                  Página {activeComposedPage.pageNumber} de {totalComposedPages}
+                </span>
+              </div>
+
+              {/* Authentic Registered-User Page Viewer */}
+              <div className="bg-stone-100/90 border border-stone-200/90 rounded-2xl p-4 sm:p-6 flex flex-col items-center justify-center">
+                <div className="w-full max-w-[460px] shadow-xl rounded-sm overflow-hidden">
+                  <DemoComposedPageView
+                    composed={composedSampleBook}
+                    page={activeComposedPage}
+                  />
+                </div>
+              </div>
+
+              {/* Page Alternation Footer Controls */}
+              <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-stone-200">
+                <span className="text-xs text-stone-500">
+                  {activeComposedPage.kind === 'cover'
+                    ? 'Portada Oficial con Símbolo Y∞F YouForever'
+                    : activeComposedPage.kind === 'title_dedication'
+                    ? 'Portadilla, Dedicatoria Familiar e Introducción'
+                    : activeComposedPage.kind === 'closing_mandatory'
+                    ? 'Página Final Oficial · «Esta historia continuará...»'
+                    : `${activeBookPage.stageReference} · Maquetación Real`}
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    data-testid="prev-book-page"
+                    onClick={() =>
+                      setPageIndex((prev) =>
+                        prev > 0 ? prev - 1 : totalComposedPages - 1
+                      )
+                    }
+                    className="px-3.5 py-2 text-xs font-medium bg-stone-100 hover:bg-stone-200 text-stone-800 rounded-lg inline-flex items-center gap-1 cursor-pointer"
+                  >
+                    <ChevronLeft className="w-3.5 h-3.5" />
+                    <span>Página anterior</span>
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="next-book-page"
+                    onClick={() =>
+                      setPageIndex((prev) =>
+                        prev < totalComposedPages - 1 ? prev + 1 : 0
+                      )
+                    }
+                    className="px-3.5 py-2 text-xs font-medium bg-stone-900 hover:bg-stone-800 text-white rounded-lg inline-flex items-center gap-1 cursor-pointer"
+                  >
+                    <span>Siguiente página</span>
+                    <ChevronRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Complementary Interactive Inspector: Photo vs. Transcription Balance & Linked Voice Quote */}
+              <div className="bg-[#FAF8F5] border border-stone-200/90 rounded-xl p-4 space-y-4">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                   <label
                     htmlFor="legacy-layout-slider"
                     className="text-xs font-semibold text-stone-900 inline-flex items-center gap-2"
                   >
                     <SlidersHorizontal className="w-3.5 h-3.5 text-amber-800" />
-                    <span>Disposición de Fotos y Transcripciones:</span>
+                    <span>Balance de Fotografías, Transcripción y Voz vinculada al capítulo:</span>
                   </label>
                   <span
                     data-testid="legacy-layout-mode-label"
@@ -879,148 +1158,55 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
                     Más Fotografía
                   </span>
                 </div>
-              </div>
 
-              {/* Book Spread Header */}
-              <div className="flex items-center justify-between text-xs text-stone-500 border-b border-stone-200 pb-3">
-                <span>
-                  {activeBookPage.chapterNumber} · {activeBookPage.subtitle}
-                </span>
-                <span className="font-semibold text-stone-800 tabular-nums">
-                  Página {activeBookPage.pageNumber} de Muestra
-                </span>
-              </div>
-
-              {/* Dynamic Book Page Content Responds to Slider Disposition */}
-              <div className="space-y-5">
-                <h3 className="font-serif text-2xl font-bold text-stone-900">
-                  {activeBookPage.title}
-                </h3>
-
-                <div
-                  className={
-                    layoutDisposition.mode === 'balanced'
-                      ? 'grid grid-cols-1 md:grid-cols-12 gap-6 items-stretch'
-                      : 'space-y-5'
-                  }
-                >
-                  {/* Archival Photograph Block */}
+                <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-stretch pt-1">
                   <div
                     data-testid="book-page-photo-panel"
-                    className={
-                      layoutDisposition.mode === 'balanced'
-                        ? 'md:col-span-5 flex flex-col justify-between rounded-xl overflow-hidden border border-stone-200 bg-[#FAF8F5]'
-                        : 'rounded-xl overflow-hidden border border-stone-200 bg-[#FAF8F5]'
-                    }
+                    className="md:col-span-5 rounded-xl overflow-hidden border border-stone-200 bg-white flex flex-col justify-between"
                   >
                     <div
-                      className={`p-5 text-white flex flex-col justify-between transition-all ${
-                        layoutDisposition.mode === 'photo-focus'
-                          ? 'min-h-[210px]'
-                          : layoutDisposition.mode === 'balanced'
-                          ? 'min-h-[165px]'
-                          : 'min-h-[110px]'
-                      }`}
+                      className="p-3.5 text-white flex flex-col justify-between"
                       style={{
                         background: `linear-gradient(135deg, ${activeBookPage.photoPalette.bgFrom}, ${activeBookPage.photoPalette.bgTo})`,
                       }}
                     >
-                      <div className="flex items-center justify-between text-[11px] text-amber-200/90">
+                      <div className="flex items-center justify-between text-[10px] text-amber-200/90">
                         <span>Fotografía · {activeBookPage.photoYear}</span>
                         <span>{activeBookPage.photoLocation}</span>
                       </div>
-                      <div className="my-2">
-                        <div className="font-serif text-base sm:text-lg font-bold text-white leading-snug">
-                          {activeBookPage.photoTitle}
-                        </div>
+                      <div className="font-serif text-xs font-bold text-white mt-1.5">
+                        {activeBookPage.photoTitle}
                       </div>
-                      <div className="text-[11px] text-amber-100/80">
+                      <div className="text-[10px] text-amber-100/80 mt-1">
                         Proporción visual de foto: {layoutDisposition.photoWeight}%
                       </div>
                     </div>
-
-                    {layoutDisposition.mode !== 'transcription-focus' && (
-                      <div className="p-3.5 text-xs text-stone-700 font-serif italic leading-relaxed">
-                        {activeBookPage.photoCaption}
-                      </div>
-                    )}
+                    <div className="p-2.5 text-[11px] text-stone-600 font-serif italic">
+                      {activeBookPage.photoCaption}
+                    </div>
                   </div>
 
-                  {/* Literary Transcription & Voice Quote Block */}
                   <div
                     data-testid="book-page-transcription-panel"
-                    className={
-                      layoutDisposition.mode === 'balanced'
-                        ? 'md:col-span-7 flex flex-col justify-between space-y-4'
-                        : 'space-y-4'
-                    }
+                    className="md:col-span-7 flex flex-col justify-between space-y-2.5 bg-white p-3.5 rounded-xl border border-stone-200"
                   >
-                    <div className="space-y-3">
-                      {activeBookPage.excerptParagraphs
-                        .slice(0, layoutDisposition.mode === 'photo-focus' ? 1 : 2)
-                        .map((para, i) => (
-                          <p
-                            key={i}
-                            className="font-serif text-sm sm:text-base text-stone-800 leading-relaxed"
-                          >
-                            {para}
-                          </p>
-                        ))}
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-semibold text-amber-900">
+                        Audio original preservado ({activeBookPage.audioDuration})
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setIsPlayingVoiceSample(!isPlayingVoiceSample)}
+                        className="text-xs font-semibold text-amber-900 hover:underline inline-flex items-center gap-1 cursor-pointer"
+                      >
+                        <Volume2 className="w-3.5 h-3.5" />
+                        <span>{isPlayingVoiceSample ? 'Detener' : 'Escuchar voz'}</span>
+                      </button>
                     </div>
-
-                    {/* Linked Voice Quote */}
-                    <div className="p-3.5 rounded-xl bg-[#FAF8F5] border border-stone-200/90 space-y-1.5">
-                      <div className="flex items-center justify-between">
-                        <span className="text-[11px] font-medium text-amber-900">
-                          Cita de voz original ({activeBookPage.audioDuration})
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => setIsPlayingVoiceSample(!isPlayingVoiceSample)}
-                          className="text-xs font-semibold text-amber-900 hover:underline inline-flex items-center gap-1 cursor-pointer"
-                        >
-                          <Volume2 className="w-3.5 h-3.5" />
-                          <span>{isPlayingVoiceSample ? 'Detener' : 'Escuchar voz'}</span>
-                        </button>
-                      </div>
-                      <p className="font-serif text-xs italic text-stone-700">
-                        {activeBookPage.originalVoiceQuote}
-                      </p>
-                    </div>
+                    <p className="font-serif text-xs italic text-stone-700 leading-relaxed">
+                      {activeBookPage.originalVoiceQuote}
+                    </p>
                   </div>
-                </div>
-              </div>
-
-              {/* Page Alternation Footer Controls */}
-              <div className="flex items-center justify-between pt-4 border-t border-stone-200">
-                <span className="text-xs text-stone-500">{activeBookPage.stageReference}</span>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    data-testid="prev-book-page"
-                    onClick={() =>
-                      setPageIndex((prev) =>
-                        prev > 0 ? prev - 1 : SAMPLE_BOOK_CHAPTERS.length - 1
-                      )
-                    }
-                    className="px-3.5 py-2 text-xs font-medium bg-stone-100 hover:bg-stone-200 text-stone-800 rounded-lg inline-flex items-center gap-1 cursor-pointer"
-                  >
-                    <ChevronLeft className="w-3.5 h-3.5" />
-                    <span>Página anterior</span>
-                  </button>
-                  <button
-                    type="button"
-                    data-testid="next-book-page"
-                    onClick={() =>
-                      setPageIndex((prev) =>
-                        prev < SAMPLE_BOOK_CHAPTERS.length - 1 ? prev + 1 : 0
-                      )
-                    }
-                    className="px-3.5 py-2 text-xs font-medium bg-stone-900 hover:bg-stone-800 text-white rounded-lg inline-flex items-center gap-1 cursor-pointer"
-                  >
-                    <span>Siguiente página</span>
-                    <ChevronRight className="w-3.5 h-3.5" />
-                  </button>
                 </div>
               </div>
             </div>
@@ -1034,37 +1220,47 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
                 </div>
 
                 <h3 className="font-serif text-xl font-bold text-stone-900">
-                  Paquete Descargable (.ZIP)
+                  Estudio Editorial + Paquete (.ZIP) + Mi Esencia
                 </h3>
 
                 <div className="space-y-2.5 text-xs">
                   <div className="p-3.5 bg-white rounded-xl border border-stone-200/80">
                     <div className="font-semibold text-stone-900 flex items-center gap-2">
                       <BookOpen className="w-3.5 h-3.5 text-amber-800 shrink-0" />
-                      <span>1. Libro Biográfico (Digital e Imprenta)</span>
+                      <span>1. Libro Biográfico Maquetado (PDF e Imprenta)</span>
                     </div>
                     <p className="text-stone-600 mt-1 text-[11px]">
-                      Edición Cronológica y Temática lista para leer o imprimir en pasta dura.
+                      5 diseños de portada, 5 estilos interiores, 3 formatos (6×9&quot;, A5, Carta) y sello oficial YouForever.
                     </p>
                   </div>
 
                   <div className="p-3.5 bg-white rounded-xl border border-stone-200/80">
                     <div className="font-semibold text-stone-900 flex items-center gap-2">
                       <FileText className="w-3.5 h-3.5 text-amber-800 shrink-0" />
-                      <span>2. Dossier Testimonial Íntegro</span>
+                      <span>2. Compilado Testimonial Fidedigno</span>
                     </div>
                     <p className="text-stone-600 mt-1 text-[11px]">
-                      Todas las preguntas y respuestas completas por etapa de vida.
+                      Todas las preguntas y respuestas literales por etapa de vida que alimentan la memoria inmutable.
                     </p>
                   </div>
 
                   <div className="p-3.5 bg-white rounded-xl border border-stone-200/80">
                     <div className="font-semibold text-stone-900 flex items-center gap-2">
                       <Volume2 className="w-3.5 h-3.5 text-amber-800 shrink-0" />
-                      <span>3. Carpetas /audios y /fotografias</span>
+                      <span>3. Carpetas /audios y /fotografias en .ZIP</span>
                     </div>
                     <p className="text-stone-600 mt-1 text-[11px]">
                       Grabaciones de voz originales y fotografías familiares en alta resolución.
+                    </p>
+                  </div>
+
+                  <div className="p-3.5 bg-amber-50/80 rounded-xl border border-amber-300/80">
+                    <div className="font-semibold text-amber-950 flex items-center gap-2">
+                      <Sparkles className="w-3.5 h-3.5 text-amber-800 shrink-0" />
+                      <span>4. Avatar Familiar en Mi Esencia (/miesencia)</span>
+                    </div>
+                    <p className="text-stone-700 mt-1 text-[11px]">
+                      Conversación viva para hijos y nietos mediante códigos personales seguros <code>YF-XXXXX</code>.
                     </p>
                   </div>
                 </div>
@@ -1081,10 +1277,74 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
           </div>
         </section>
 
-        {/* 4. HOW IT WORKS: 4-STEP EDITORIAL PROCESS WITH EXACT UPDATED HEADING */}
+        {/* 4. MI ESENCIA ECOSYSTEM SECTION (Conversational Biographical Legacy with A/B/C Privacy Levels) */}
+        <section
+          id="mi-esencia-ecosistema"
+          className="scroll-mt-20 bg-stone-900 text-stone-100 py-14 lg:py-16 border-y border-stone-800"
+        >
+          <div className="max-w-7xl mx-auto px-6 space-y-10">
+            <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-6">
+              <div className="space-y-2 max-w-3xl">
+                <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-300 text-xs font-semibold">
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>Nuevo en YouForever • Mi Esencia (/miesencia)</span>
+                </div>
+                <h2 className="font-serif text-2xl sm:text-3xl font-bold text-white tracking-tight">
+                  Más que un libro: conversa para siempre con la esencia de quienes amas.
+                </h2>
+                <p className="text-sm text-stone-300 leading-relaxed">
+                  A partir de la entrevista biográfica, <strong>Mi Esencia</strong> crea una recreación testimonial fiel con la que hijos, nietos y familiares autorizados pueden conversar en cualquier momento mediante su propio código alfanumérico <code>YF-XXXXX</code>.
+                </p>
+              </div>
+
+              <a
+                href="/miesencia"
+                className="px-5 py-3 rounded-xl bg-amber-500 hover:bg-amber-400 text-stone-950 text-xs font-bold inline-flex items-center gap-2 whitespace-nowrap self-start shrink-0 transition"
+              >
+                <KeyRound className="w-4 h-4" />
+                <span>Conocer Portal Familiar (/miesencia)</span>
+              </a>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              <div className="p-6 rounded-2xl bg-stone-950/80 border border-amber-500/30 space-y-3">
+                <div className="flex items-center gap-2 text-amber-300 font-semibold text-sm">
+                  <ShieldCheck className="w-4 h-4 shrink-0" />
+                  <span>Nivel A • Inmutable</span>
+                </div>
+                <p className="text-xs text-stone-300 leading-relaxed">
+                  Es la verdad biográfica original de la persona entrevistada, tomada directamente del{' '}
+                  <strong className="text-white">Compilado Testimonial Fidedigno</strong> con todas sus preguntas y respuestas reales. Ningún familiar ni conversación posterior puede alterar lo que dejó contado de viva voz.
+                </p>
+              </div>
+
+              <div className="p-6 rounded-2xl bg-stone-950/80 border border-emerald-500/30 space-y-3">
+                <div className="flex items-center gap-2 text-emerald-300 font-semibold text-sm">
+                  <Users className="w-4 h-4 shrink-0" />
+                  <span>Nivel B • Familiar</span>
+                </div>
+                <p className="text-xs text-stone-300 leading-relaxed">
+                  Los familiares autorizados pueden aportar anécdotas, viajes o recuerdos compartidos durante sus conversaciones. Siempre se guardan con atribución explícita de quién los contó para enriquecer la memoria colectiva.
+                </p>
+              </div>
+
+              <div className="p-6 rounded-2xl bg-stone-950/80 border border-sky-500/30 space-y-3">
+                <div className="flex items-center gap-2 text-sky-300 font-semibold text-sm">
+                  <Lock className="w-4 h-4 shrink-0" />
+                  <span>Nivel C • Privado por Código YF-XXXXX</span>
+                </div>
+                <p className="text-xs text-stone-300 leading-relaxed">
+                  Cada familiar recibe un código alfanumérico único (<code>YF-XXXXX</code>) que aísla criptográficamente sus confidencias personales con el avatar, sin revelarlas jamás a otros integrantes de la familia.
+                </p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* 5. HOW IT WORKS: 4-STEP EDITORIAL PROCESS */}
         <section
           id="como-funciona"
-          className="scroll-mt-20 bg-[#F3EFEA] border-y border-stone-200/90 py-14 lg:py-16"
+          className="scroll-mt-20 bg-[#F3EFEA] border-b border-stone-200/90 py-14 lg:py-16"
         >
           <div className="max-w-7xl mx-auto px-6 space-y-10">
             <div className="max-w-3xl space-y-2">
@@ -1103,10 +1363,10 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
               <div className="bg-white border border-stone-200/90 rounded-2xl p-5 space-y-2">
                 <div className="text-xs font-semibold text-amber-900">01. Invitación Directa</div>
                 <h3 className="font-serif text-lg font-bold text-stone-900">
-                  Acceso con un clic
+                  Enlace o código YF-XXXXX
                 </h3>
                 <p className="text-xs text-stone-600 leading-relaxed">
-                  Entran desde su celular, tableta o computadora mediante un enlace personal sin contraseñas.
+                  Entran desde su celular, tableta o computadora con su enlace directo o código alfanumérico corto protegido.
                 </p>
               </div>
 
@@ -1121,29 +1381,29 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
               </div>
 
               <div className="bg-white border border-stone-200/90 rounded-2xl p-5 space-y-2">
-                <div className="text-xs font-semibold text-amber-900">03. Curaduría Fiel</div>
+                <div className="text-xs font-semibold text-amber-900">03. Estudio Editorial</div>
                 <h3 className="font-serif text-lg font-bold text-stone-900">
-                  Redacción biográfica
+                  Diseño y redacción fiel
                 </h3>
                 <p className="text-xs text-stone-600 leading-relaxed">
-                  Organizamos sus relatos y fotografías en capítulos literarios respetando cada palabra original.
+                  Eligen el estilo literario, portada, tipografía interior y formato para generar su libro ilustrado en PDF.
                 </p>
               </div>
 
               <div className="bg-white border border-stone-200/90 rounded-2xl p-5 space-y-2">
                 <div className="text-xs font-semibold text-amber-900">04. Legado Eterno</div>
                 <h3 className="font-serif text-lg font-bold text-stone-900">
-                  Libro y Archivo Maestro
+                  Libro, .ZIP y Mi Esencia
                 </h3>
                 <p className="text-xs text-stone-600 leading-relaxed">
-                  Recibes el Libro Biográfico, el Dossier completo y todas las grabaciones de voz para tu familia.
+                  Recibes el Libro Biográfico, el archivo maestro .ZIP con audios/fotos y el acceso familiar a Mi Esencia.
                 </p>
               </div>
             </div>
           </div>
         </section>
 
-        {/* 5. VALUE MODALITIES & DIRECT CONTACT / GIFT INQUIRY SECTION */}
+        {/* 6. VALUE MODALITIES & DIRECT CONTACT / GIFT INQUIRY SECTION */}
         <section id="contacto-regalo" className="scroll-mt-20 max-w-7xl mx-auto px-6 py-14 lg:py-20 space-y-12">
           {/* Concise Gift Modalities */}
           <div className="space-y-6">
@@ -1162,11 +1422,11 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
                   <div className="text-xs font-medium text-amber-900">Modalidad 01</div>
                   <h3 className="font-serif text-xl font-bold text-stone-900">Legado Individual</h3>
                   <p className="text-xs text-stone-600 leading-relaxed">
-                    Para mamá, papá o abuelos. Recorre sus 5 etapas de vida, anécdotas y consejos familiares.
+                    Para mamá, papá o abuelos. Recorre sus 5 etapas de vida, anécdotas, fotografías y consejos familiares.
                   </p>
                 </div>
                 <div className="pt-3 border-t border-stone-200/80 text-[11px] text-stone-600">
-                  Portal Personalizado · Libro Biográfico · Voz y Fotos
+                  Código YF-XXXXX · Estudio de Libro · Voz y Fotos
                 </div>
               </div>
 
@@ -1179,7 +1439,7 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
                     Historia Compartida en Pareja
                   </h3>
                   <p className="text-xs text-stone-600 leading-relaxed">
-                    Para parejas que desean narrar juntos cómo se conocieron y construyeron su familia.
+                    Para parejas que desean narrar juntos cómo se conocieron, formaron su hogar y construyeron su familia.
                   </p>
                 </div>
                 <div className="pt-3 border-t border-stone-300/80 text-[11px] text-stone-700 font-medium">
@@ -1191,14 +1451,14 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
                 <div className="space-y-1.5">
                   <div className="text-xs font-medium text-amber-900">Modalidad 03</div>
                   <h3 className="font-serif text-xl font-bold text-stone-900">
-                    Edición Familiar Especial
+                    Edición Familiar + Mi Esencia
                   </h3>
                   <p className="text-xs text-stone-600 leading-relaxed">
-                    Para entrevistar a varios integrantes de la familia y crear una colección biográfica.
+                    Incluye el libro biográfico completo y la activación del avatar conversacional en Mi Esencia para tus familiares.
                   </p>
                 </div>
                 <div className="pt-3 border-t border-stone-200/80 text-[11px] text-stone-600">
-                  Múltiples entrevistas · Atención dedicada · Archivos independientes
+                  Libro Imprimible · Códigos Familiares YF-XXXXX · Niveles A, B y C
                 </div>
               </div>
             </div>
@@ -1210,14 +1470,25 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
             <div className="lg:col-span-5 space-y-5">
               <div className="space-y-2">
                 <div className="text-xs font-semibold text-amber-900">
-                  Atención Personalizada
+                  Atención Personalizada Directa
                 </div>
                 <h3 className="font-serif text-2xl font-bold text-stone-900">
                   Comienza hoy a preservar su historia.
                 </h3>
                 <p className="text-xs text-stone-600 leading-relaxed">
-                  Contáctanos por WhatsApp o correo, o llena el formulario para preparar el acceso de tu familiar.
+                  Contáctanos directamente por WhatsApp al <strong>{OFFICIAL_WHATSAPP_DISPLAY}</strong> o escribe a <strong>{OFFICIAL_CONTACT_EMAIL}</strong> para preparar el acceso de tu familiar.
                 </p>
+              </div>
+
+              <div className="p-4 rounded-xl bg-[#FAF8F5] border border-stone-200/90 space-y-2 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="text-stone-500">WhatsApp Oficial:</span>
+                  <strong className="text-stone-900 font-mono">{OFFICIAL_WHATSAPP_DISPLAY}</strong>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-stone-500">Correo Oficial:</span>
+                  <strong className="text-stone-900 font-mono">{OFFICIAL_CONTACT_EMAIL}</strong>
+                </div>
               </div>
 
               <div className="space-y-2.5">
@@ -1228,7 +1499,7 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
                   className="w-full py-3 px-5 bg-emerald-800 hover:bg-emerald-900 text-white text-xs font-semibold rounded-xl transition-colors flex items-center justify-center gap-2 whitespace-nowrap"
                 >
                   <MessageCircle className="w-4 h-4 shrink-0" />
-                  <span>Contactar por WhatsApp</span>
+                  <span>Contactar por WhatsApp ({OFFICIAL_WHATSAPP_DISPLAY})</span>
                 </a>
 
                 <a
@@ -1236,13 +1507,13 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
                   className="w-full py-3 px-5 bg-stone-100 hover:bg-stone-200 text-stone-900 text-xs font-semibold rounded-xl border border-stone-300 transition-colors flex items-center justify-center gap-2 whitespace-nowrap"
                 >
                   <Mail className="w-4 h-4 text-amber-800 shrink-0" />
-                  <span>Enviar Correo Directo</span>
+                  <span>Enviar Correo ({OFFICIAL_CONTACT_EMAIL})</span>
                 </a>
               </div>
 
               {onNavigateToPortal && (
                 <div className="pt-3 border-t border-stone-200 text-xs text-stone-600 flex items-center justify-between">
-                  <span>¿Ya tienes código de invitación?</span>
+                  <span>¿Ya tienes código YF-XXXXX?</span>
                   <button
                     type="button"
                     onClick={onNavigateToPortal}
@@ -1323,7 +1594,7 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
                       htmlFor="inquiry-relation"
                       className="block text-xs font-medium text-stone-800 mb-1"
                     >
-                      ¿Para quién es ForeverYou? *
+                      ¿Para quién es YouForever? *
                     </label>
                     <input
                       id="inquiry-relation"
@@ -1364,7 +1635,7 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
                     >
                       <option value="individual">Legado Individual</option>
                       <option value="compartida">Historia Compartida (Pareja)</option>
-                      <option value="familiar">Edición Familiar Especial</option>
+                      <option value="familiar">Edición Familiar + Mi Esencia</option>
                     </select>
                   </div>
                 </div>
@@ -1395,7 +1666,7 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
                     <span>Enviar Solicitud de Información</span>
                   </button>
                   <span className="text-[11px] text-stone-500">
-                    Atención directa · Sin cargos automáticos
+                    Atención directa · {OFFICIAL_WHATSAPP_DISPLAY} · {OFFICIAL_CONTACT_EMAIL}
                   </span>
                 </div>
 
@@ -1417,14 +1688,14 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
                         className="px-3.5 py-2 bg-emerald-800 hover:bg-emerald-900 text-white text-xs font-semibold rounded-lg inline-flex items-center gap-1.5"
                       >
                         <MessageCircle className="w-3.5 h-3.5" />
-                        <span>Abrir WhatsApp</span>
+                        <span>Abrir WhatsApp ({OFFICIAL_WHATSAPP_DISPLAY})</span>
                       </a>
                       <a
                         href={buildMailtoInquiryUrl(formInput)}
                         className="px-3.5 py-2 bg-white hover:bg-stone-100 text-stone-900 border border-emerald-400 text-xs font-semibold rounded-lg inline-flex items-center gap-1.5"
                       >
                         <Mail className="w-3.5 h-3.5 text-amber-800" />
-                        <span>Enviar por Correo</span>
+                        <span>Enviar a {OFFICIAL_CONTACT_EMAIL}</span>
                       </a>
                     </div>
                   </div>

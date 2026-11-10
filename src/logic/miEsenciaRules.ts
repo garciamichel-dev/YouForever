@@ -491,7 +491,7 @@ export const DEFAULT_MI_ESENCIA_CONFIG: MiEsenciaGlobalConfig = {
     'Entrevistas en pareja',
   ].map((s) => s.trim()),
   transparencyNoticeText:
-    'Estás conversando con una recreación digital biográfica en «Mi Esencia» de ForeverYou, construida estrictamente a partir del Compilado Testimonial Fidedigno de preguntas y respuestas reales otorgadas en entrevista.',
+    'Estás conversando con una recreación digital biográfica en «Mi Esencia» de YouForever, construida estrictamente a partir del Compilado Testimonial Fidedigno de preguntas y respuestas reales otorgadas en entrevista.',
   consentCheckboxLabel:
     'Comprendo que converso con una recreación testimonial biográfica basada en los recuerdos reales compartidos en entrevista y acepto las reglas de privacidad familiar.',
   externalPaymentGatewayStatus: 'pendiente_configuracion_externa',
@@ -582,7 +582,7 @@ export const DEFAULT_MI_ESENCIA_PLANS: MiEsenciaPlanRecord[] = [
   {
     planId: 'plan_cortesia',
     code: 'cortesia',
-    name: 'Cortesía Especial ForeverYou',
+    name: 'Cortesía Especial YouForever',
     description: 'Otorgado sin costo por el administrador con duración personalizable.',
     priceMxn: 0,
     currency: 'MXN',
@@ -612,23 +612,94 @@ export function computeMiEsenciaCodeHash(rawCode: string): string {
   return crypto.createHash('sha256').update(`foreveryou_mi_esencia:${normalized}`).digest('hex');
 }
 
-export function generatePersonalAccessCode(interlocutorName: string): {
+const SAFE_MI_ESENCIA_LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+const SAFE_MI_ESENCIA_DIGITS = '23456789';
+const SAFE_MI_ESENCIA_ALPHABET = SAFE_MI_ESENCIA_LETTERS + SAFE_MI_ESENCIA_DIGITS;
+
+function buildMixedMiEsenciaCode5(bytes: Buffer | Uint8Array): string {
+  const chars: string[] = [];
+  for (let i = 0; i < 5; i++) {
+    chars.push(SAFE_MI_ESENCIA_ALPHABET[bytes[i] % SAFE_MI_ESENCIA_ALPHABET.length]);
+  }
+  const hasLetter = chars.some((c) => /[A-Z]/.test(c));
+  const hasDigit = chars.some((c) => /[0-9]/.test(c));
+  if (!hasLetter) {
+    const pos = bytes[5] % 5;
+    chars[pos] = SAFE_MI_ESENCIA_LETTERS[bytes[6] % SAFE_MI_ESENCIA_LETTERS.length];
+  }
+  if (!hasDigit) {
+    const pos = (bytes[5] + 2) % 5;
+    chars[pos] = SAFE_MI_ESENCIA_DIGITS[bytes[7] % SAFE_MI_ESENCIA_DIGITS.length];
+  }
+  return chars.join('');
+}
+
+/**
+ * Derives a deterministic 8-character mixed alphanumeric family access code (`YF-XXXXX`, e.g. `YF-8K4M2`)
+ * guaranteed to contain both letters and numbers without any sequential counter.
+ */
+export function deriveShortMiEsenciaAccessCode(seed: string): string {
+  const digest = crypto
+    .createHash('sha256')
+    .update(`youforever_short_code_yf5:${seed || 'default'}`)
+    .digest();
+  return `YF-${buildMixedMiEsenciaCode5(digest)}`;
+}
+
+/**
+ * Extracts a clean Mi Esencia access code from user input (supports full URLs like
+ * https://youforever.app/miesencia?code=YF-8K4M2, unhyphenated YF8K4M2, YF-XXXX, and legacy FY-... codes).
+ */
+export function extractCleanMiEsenciaCode(rawInput: string): string {
+  if (!rawInput) return '';
+  let cleaned = String(rawInput).trim();
+  try {
+    if (cleaned.includes('%')) {
+      cleaned = decodeURIComponent(cleaned).trim();
+    }
+  } catch {
+    // Keep original if malformed URI encoding
+  }
+
+  if (cleaned.includes('code=')) {
+    cleaned = cleaned.split('code=')[1].split('&')[0].split('#')[0].split(/\s/)[0];
+  } else if (cleaned.includes('#code=')) {
+    cleaned = cleaned.split('#code=')[1].split('&')[0].split(/\s/)[0];
+  }
+
+  cleaned = cleaned
+    .replace(/^(c[oó]digo\s*(personal|familiar|de\s*acceso)?|access\s*code|code|enlace)\s*[:\-]?\s*/i, '')
+    .replace(/^[👉▶️•\-\s]+/, '')
+    .replace(/["'«»]/g, '')
+    .trim()
+    .toUpperCase();
+
+  const embeddedYfMatch = cleaned.match(/\bYF[\s\-_]*([A-Z0-9]{4,8})\b/i);
+  if (embeddedYfMatch) {
+    return `YF-${embeddedYfMatch[1].toUpperCase()}`;
+  }
+
+  const compactYfMatch = cleaned.match(/^YF[\s\-_]*([A-Z0-9]{4,8})$/i);
+  if (compactYfMatch) {
+    return `YF-${compactYfMatch[1].toUpperCase()}`;
+  }
+
+  return cleaned;
+}
+
+/**
+ * Generates an 8-character mixed alphanumeric family access code (`YF-XXXXX`, e.g. `YF-8K4M2`),
+ * combining letters and numbers cryptographically with zero sequential hints.
+ */
+export function generatePersonalAccessCode(_interlocutorName?: string): {
   personalCodePlain: string;
   codePrefix: string;
   codeHash: string;
 } {
-  const cleanName = String(interlocutorName || 'FAM')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^A-Za-z]/g, '')
-    .toUpperCase()
-    .slice(0, 4)
-    .padEnd(3, 'X');
-
-  const randPart1 = crypto.randomBytes(2).toString('hex').toUpperCase();
-  const randPart2 = crypto.randomBytes(2).toString('hex').toUpperCase();
-  const personalCodePlain = `FY-${cleanName}-${randPart1}-${randPart2}`;
-  const codePrefix = `FY-${cleanName}-${randPart1}`;
+  const randBytes = crypto.randomBytes(8);
+  const randSuffix = buildMixedMiEsenciaCode5(randBytes);
+  const personalCodePlain = `YF-${randSuffix}`;
+  const codePrefix = personalCodePlain;
   const codeHash = computeMiEsenciaCodeHash(personalCodePlain);
 
   return {

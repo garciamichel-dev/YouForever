@@ -1,6 +1,11 @@
 import express, { Request, Response, Router } from 'express';
 import { miEsenciaStore } from './miEsenciaStore.ts';
-import { getAdminUser } from '../api.ts';
+import {
+  getAdminUser,
+  checkAccessCodeBruteForce,
+  recordAccessCodeFailure,
+  resetAccessCodeFailures,
+} from '../api.ts';
 
 export const miEsenciaRouter: Router = express.Router();
 
@@ -713,16 +718,27 @@ miEsenciaRouter.post(
 
 miEsenciaRouter.post('/family/verify-code', async (req: Request, res: Response) => {
   try {
+    const bruteCheck = checkAccessCodeBruteForce(req);
+    if (bruteCheck.blocked) {
+      res.status(429).json({
+        success: false,
+        error: `Demasiados intentos fallidos de código personal. Por seguridad anti-fuerza bruta, espera ${bruteCheck.retryAfterMinutes} minuto(s) antes de volver a intentar.`,
+      });
+      return;
+    }
+
     await miEsenciaStore.ensureInitialized();
     const { personalCode } = req.body || {};
     const check = miEsenciaStore.verifyPersonalAccessCode(personalCode);
     if (!check.valid || !check.interlocutor || !check.subscription || !check.persons) {
+      recordAccessCodeFailure(req);
       res.status(401).json({
         success: false,
         error: check.error || 'Código personal inválido.',
       });
       return;
     }
+    resetAccessCodeFailures(req);
 
     // Asegurar que cada perfil de persona tenga al menos una sesión activa con su saludo reflexivo inicial
     for (const person of check.persons) {

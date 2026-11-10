@@ -7,9 +7,9 @@
  */
 
 
-export const SIMPLIFIED_PRIVACY_NOTICE_TEXT = `AVISO DE PRIVACIDAD SIMPLIFICADO — ForeverYou
+export const SIMPLIFIED_PRIVACY_NOTICE_TEXT = `AVISO DE PRIVACIDAD SIMPLIFICADO — YouForever
 
-ForeverYou es una plataforma destinada a recopilar y preservar historias de vida mediante testimonios escritos, grabaciones de voz, fotografías y recuerdos personales.
+YouForever es una plataforma destinada a recopilar y preservar historias de vida mediante testimonios escritos, grabaciones de voz, fotografías y recuerdos personales.
 
 Los datos proporcionados se utilizarán principalmente para administrar la entrevista, conservar los recuerdos y elaborar el libro autobiográfico solicitado por el participante o por quien esté legítimamente autorizado para contratar el servicio.
 
@@ -23,16 +23,16 @@ La participación requiere autorizar los tratamientos necesarios para prestar el
 
 La persona titular podrá ejercer sus derechos de Acceso, Rectificación, Cancelación y Oposición (ARCO), solicitar información sobre el tratamiento y revocar su consentimiento en los términos legales aplicables.
 
-Para conocer los datos tratados, finalidades detalladas, destinatarios, plazos de conservación, medidas de seguridad, mecanismos de ejercicio de derechos y modificaciones al aviso, consulte el Aviso de Privacidad Integral en la plataforma o escriba a: atención@foreveryou.com.
+Para conocer los datos tratados, finalidades detalladas, destinatarios, plazos de conservación, medidas de seguridad, mecanismos de ejercicio de derechos y modificaciones al aviso, consulte el Aviso de Privacidad Integral en la plataforma o escriba a: youforever.team@gmail.com (WhatsApp: +52 9681040015).
 
 Última actualización: 29/10/26.
 Versión: 1.0.`;
 
-export const INTEGRAL_PRIVACY_NOTICE_TEXT = `AVISO DE PRIVACIDAD INTEGRAL — ForeverYou
+export const INTEGRAL_PRIVACY_NOTICE_TEXT = `AVISO DE PRIVACIDAD INTEGRAL — YouForever
 
 1. Identidad y domicilio del responsable
-En cumplimiento de la legislación mexicana aplicable en materia de protección de datos personales, se informa que ForeverYou, es responsable del tratamiento de los datos personales recabados mediante la plataforma ForeverYou.
-Para asuntos relacionados con privacidad y datos personales, la persona titular podrá comunicarse mediante el correo electrónico atención@foreveryou.com.
+En cumplimiento de la legislación mexicana aplicable en materia de protección de datos personales, se informa que YouForever, es responsable del tratamiento de los datos personales recabados mediante la plataforma YouForever.
+Para asuntos relacionados con privacidad y datos personales, la persona titular podrá comunicarse mediante el correo electrónico youforever.team@gmail.com o al WhatsApp +52 9681040015.
 
 2. Datos personales tratados
 Para prestar el servicio podrán recabarse las siguientes categorías de información:
@@ -72,7 +72,7 @@ e) Otros usos adicionales que sean informados y autorizados de forma previa.
 La negativa a las finalidades secundarias no impedirá la prestación del servicio autobiográfico básico cuando dichas finalidades no sean necesarias para proporcionarlo.
 
 5. Uso de inteligencia artificial
-ForeverYou podrá utilizar servicios de inteligencia artificial para transcribir audios, organizar recuerdos, generar preguntas de profundización y elaborar borradores narrativos.
+YouForever podrá utilizar servicios de inteligencia artificial para transcribir audios, organizar recuerdos, generar preguntas de profundización y elaborar borradores narrativos.
 Estos procesos pueden implicar que fragmentos de los testimonios sean enviados a proveedores tecnológicos contratados para prestar tales funciones.
 Antes de activar dichos servicios deberán identificarse los proveedores efectivos, las condiciones de procesamiento, el país o región de tratamiento cuando corresponda y las obligaciones de confidencialidad aplicables.
 El responsable deberá verificar si los proveedores pueden conservar solicitudes, respuestas o archivos, y si utilizan los datos para entrenamiento de modelos.
@@ -105,7 +105,7 @@ No se transferirán datos para publicidad, venta de bases de datos o finalidades
 10. Derechos de las personas titulares
 La persona titular podrá ejercer sus derechos de Acceso, Rectificación, Cancelación y Oposición, conocidos como derechos ARCO.
 También podrá solicitar la revocación de su consentimiento o limitar el uso y divulgación de sus datos, conforme a las condiciones legalmente aplicables.
-Las solicitudes deberán enviarse a: atención@foreveryou.com.
+Las solicitudes deberán enviarse a: youforever.team@gmail.com.
 La solicitud deberá contener el nombre de la persona titular, un medio para recibir notificaciones, la descripción de lo solicitado y la información necesaria para localizar los datos.
 El responsable podrá requerir medios razonables para acreditar la identidad o representación legal, evitando solicitar documentación excesiva.
 Conforme a la legislación mexicana aplicable, se comunicará la determinación dentro del plazo legal correspondiente y, cuando proceda, se hará efectiva dentro del plazo previsto.

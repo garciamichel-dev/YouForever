@@ -682,7 +682,7 @@ DIRECTRICES PARA LA CREACIÓN DEL LIBRO COMPLETO DE HISTORIA Y LEGADO:
 
     const markdownLines: string[] = [
       `# ${interview.title}`,
-      `*Manuscrito de ForeverYou - Compilación Fidedigna*`,
+      `*Manuscrito de YouForever - Compilación Fidedigna*`,
       `\n## Introducción y Participantes\n`,
       ...participants.map((p) => `- **${p.name}** (${p.relationship})`),
     ];
@@ -1142,7 +1142,7 @@ export async function generateParticipantBookManuscriptWithAI(params: {
 - Usa el contexto de cada pregunta ("unidadesConContextoDePregunta") para que las respuestas breves o directas fluyan como prosa autobiográfica natural, sin anteponer frases fijas repetitivas.
 - Corrige TODAS las faltas de ortografía, tildes, gramática, muletillas orales y repeticiones innecesarias, elevando la fluidez literaria de cada párrafo.`;
 
-  const prompt = `Eres un escritor biográfico, corrector de estilo y editor literario senior de ForeverYou.
+  const prompt = `Eres un escritor biográfico, corrector de estilo y editor literario senior de YouForever.
 Debes redactar y revisar integralmente los capítulos del libro autobiográfico a partir EXCLUSIVAMENTE de las respuestas reales del entrevistado y del contexto de las preguntas realizadas.
 
 DATOS DE LA OBRA:

@@ -202,7 +202,7 @@ export const DemoCoverThumbnailCard: React.FC<{
           style={{ color: palette.subtextHex }}
         >
           <ForeverYouInfinitySymbol color={palette.accentHex} width={13} height={7} />
-          <span>ForeverYou</span>
+          <span>YouForever</span>
         </div>
       </div>
 
@@ -598,7 +598,7 @@ export const DemoComposedPageView: React.FC<{
               height={10}
             />
           )}
-          <span>ForeverYou • Edición Conmemorativa</span>
+          <span>YouForever • Edición Conmemorativa</span>
         </div>
       </div>
     );
@@ -683,7 +683,7 @@ export const DemoComposedPageView: React.FC<{
               height={11}
             />
           )}
-          <span className="font-semibold tracking-wide">ForeverYou</span>
+          <span className="font-semibold tracking-wide">YouForever</span>
         </div>
       </div>
     );
@@ -737,7 +737,7 @@ export const DemoComposedPageView: React.FC<{
                 className="text-xs font-bold tracking-tight"
                 style={{ fontFamily: "'Plus Jakarta Sans', 'Manrope', sans-serif" }}
               >
-                ForeverYou
+                YouForever
               </span>
             </div>
           ) : (
@@ -745,7 +745,7 @@ export const DemoComposedPageView: React.FC<{
               className="text-xs font-serif tracking-wider"
               style={{ color: interiorStyle.accentHex }}
             >
-              {page.bottomRightBrand || '<< ForeverYou >>'}
+              {page.bottomRightBrand || '<< YouForever >>'}
             </span>
           )}
         </div>
@@ -780,7 +780,7 @@ export const DemoComposedPageView: React.FC<{
           borderColor: `${interiorStyle.accentHex}28`,
         }}
       >
-        {composed.editorialConfig.customTitle || 'ForeverYou • Memoria Autobiográfica'}
+        {composed.editorialConfig.customTitle || 'YouForever • Memoria Autobiográfica'}
       </div>
 
       {/* Chapter Sections */}

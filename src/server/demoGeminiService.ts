@@ -124,7 +124,7 @@ export async function generateTransientDemoFollowUp(payload: {
     };
   }
 
-  const systemInstruction = `Eres un entrevistador biográfico empático, cálido y experto en historia oral de ForeverYou.
+  const systemInstruction = `Eres un entrevistador biográfico empático, cálido y experto en historia oral de YouForever.
 Tu única tarea es analizar la respuesta auténtica del entrevistado a la pregunta principal y formular UNA SOLA pregunta abierta de profundización en español.
 
 REGLAS OBLIGATORIAS E INNEGOCIABLES:
@@ -322,7 +322,7 @@ export async function generateTransientDemoManuscript(payload: {
       ? 'ESTILO NARRATIVO SELECCIONADO (Opción B): Primera persona del plural — Narrativa literaria y emotiva ("nosotros"), respetando con equilibrio las dos voces e identificando las vivencias propias de cada uno cuando corresponda. Prosa literaria, sensibilidad emocional, transiciones elegantes y limpieza total de ortografía, gramática, muletillas y repeticiones.'
       : 'ESTILO NARRATIVO SELECCIONADO (Opción B): Primera persona — Narrativa literaria y emotiva ("yo"). Memorias personales con una escritura cuidada, cálida y emotiva, como si el protagonista hubiera escrito un pequeño libro, con transiciones elegantes y limpieza total de ortografía, gramática, muletillas y repeticiones.';
 
-  const systemInstruction = `Eres un escritor biográfico y editor literario senior de ForeverYou.
+  const systemInstruction = `Eres un escritor biográfico y editor literario senior de YouForever.
 Tu misión es transformar las respuestas auténticas de una entrevista en un pequeño libro autobiográfico cohesivo, emotivo y profundamente fiel.
 
 ${styleInstructions}

@@ -8,11 +8,11 @@ export const PRIVACY_NOTICE_VERSION = 'v1.2.0_2026';
 export const PRIVACY_NOTICE_EFFECTIVE_DATE = '2026-03-20';
 
 export const SIMPLIFIED_PRIVACY_NOTICE = `
-# AVISO DE PRIVACIDAD SIMPLIFICADO DE FOREVERYOU
+# AVISO DE PRIVACIDAD SIMPLIFICADO DE YOUFOREVER
 **Versión ${PRIVACY_NOTICE_VERSION} • En vigor desde el ${PRIVACY_NOTICE_EFFECTIVE_DATE}**
 
 ### 1. Responsable del Tratamiento
-ForeverYou (en lo sucesivo «ForeverYou» o la «Plataforma»), operada para la preservación de memoria familiar y patrimonio testimonial, con domicilio en Paseo de la Reforma 483, Cuauhtémoc, Ciudad de México, C.P. 06500, México, es el responsable del uso, almacenamiento y protección de sus datos personales. Correo de contacto del Oficial de Privacidad: privacidad@foreveryou.lat / garcia.michel@gmail.com.
+YouForever (en lo sucesivo «YouForever» o la «Plataforma»), operada para la preservación de memoria familiar y patrimonio testimonial, con domicilio en Paseo de la Reforma 483, Cuauhtémoc, Ciudad de México, C.P. 06500, México, es el responsable del uso, almacenamiento y protección de sus datos personales. Correo de contacto oficial: youforever.team@gmail.com • WhatsApp: +52 9681040015.
 
 ### 2. Categorías de Datos Recopilados
 - **Datos de Identificación y Contacto:** Nombre completo, parentesco, correo electrónico de invitación y credenciales seguras de acceso por token criptográfico.
@@ -30,14 +30,14 @@ ForeverYou (en lo sucesivo «ForeverYou» o la «Plataforma»), operada para la 
 Para la prestación del servicio autobiográfico y el tratamiento de los testimonios y datos sensibles que decida compartir voluntariamente, el participante otorga una **única aceptación inicial** al identificarse y confirmar la casilla única de consentimiento. Esta aceptación cubre los tratamientos indispensables para elaborar su historia. Las finalidades secundarias (divulgación a terceros, publicidad o servicios post mortem) permanecen inactivas y requerirán una autorización independiente específica al momento de su uso, sin repetir este aviso general.
 
 ### 5. Mecanismos para Limitar Uso o Divulgación y Ejercicio de Derechos ARCO
-Usted puede ejercer en cualquier momento sus derechos de Acceso, Rectificación, Cancelación y Oposición (ARCO), así como revocar sus consentimientos, a través del **Panel Administrativo del Entrevistado (ícono de engrane ⚙️)** dentro de la plataforma o escribiendo a privacidad@foreveryou.lat.
+Usted puede ejercer en cualquier momento sus derechos de Acceso, Rectificación, Cancelación y Oposición (ARCO), así como revocar sus consentimientos, a través del **Panel Administrativo del Entrevistado (ícono de engrane ⚙️)** dentro de la plataforma o escribiendo a youforever.team@gmail.com.
 
 ### 6. Consulta del Documento Integral
 El texto completo y desglosado se encuentra disponible en el **Aviso de Privacidad Integral** accesible en la plataforma.
 `.trim();
 
 export const COMPREHENSIVE_PRIVACY_NOTICE = `
-# AVISO DE PRIVACIDAD INTEGRAL DE FOREVERYOU
+# AVISO DE PRIVACIDAD INTEGRAL DE YOUFOREVER
 **Versión Oficial ${PRIVACY_NOTICE_VERSION} • En vigor desde el ${PRIVACY_NOTICE_EFFECTIVE_DATE}**
 
 En cumplimiento con la Ley Federal de Protección de Datos Personales en Posesión de los Particulares (LFPDPPP) publicada el 20 de marzo de 2025 y sus disposiciones reglamentarias vigentes, así como los principios internacionales de lealtad, proporcionalidad, finalidad y consentimiento informado:
@@ -45,9 +45,9 @@ En cumplimiento con la Ley Federal de Protección de Datos Personales en Posesi�
 ---
 
 ### SECCIÓN 1. IDENTIDAD Y DOMICILIO DEL RESPONSABLE
-ForeverYou («ForeverYou», «Plataforma» o el «Responsable»), proyecto tecnológico y editorial para la salvaguarda de legados autobiográficos familiares, con sede en Paseo de la Reforma 483, Colonia Cuauhtémoc, Alcaldía Cuauhtémoc, Ciudad de México, C.P. 06500, México, asume la responsabilidad del tratamiento legítimo, controlado e informado de sus datos personales.
-- Correo del Departamento de Privacidad: **privacidad@foreveryou.lat**
-- Correo de auditoría del administrador general: **garcia.michel@gmail.com**
+YouForever («YouForever», «Plataforma» o el «Responsable»), proyecto tecnológico y editorial para la salvaguarda de legados autobiográficos familiares, con sede en Paseo de la Reforma 483, Colonia Cuauhtémoc, Alcaldía Cuauhtémoc, Ciudad de México, C.P. 06500, México, asume la responsabilidad del tratamiento legítimo, controlado e informado de sus datos personales.
+- Correo oficial de contacto y privacidad: **youforever.team@gmail.com**
+- WhatsApp oficial de atención: **+52 9681040015**
 
 ---
 
@@ -72,7 +72,7 @@ El tratamiento de sus datos es estrictamente indispensable para:
 ---
 
 ### SECCIÓN 4. FINALIDADES SECUNDARIAS Y OPCIONALES
-ForeverYou **no realiza** tratamientos secundarios por defecto. Cualquier finalidad no indispensable requerirá una autorización independiente:
+YouForever **no realiza** tratamientos secundarios por defecto. Cualquier finalidad no indispensable requerirá una autorización independiente:
 - Ningún testimonio o fotografía se utiliza con propósitos comerciales, publicitarios o de prospección comercial.
 - La divulgación a terceros familiares o externos únicamente se activa si el entrevistado lo autoriza expresamente en el módulo «Compartir mi libro autobiográfico» o «Programar entrega de mi libro».
 - El participante puede negarse o revocar estas autorizaciones en cualquier momento sin afectar la prestación de su entrevista autobiográfica.
@@ -99,12 +99,12 @@ Los datos se conservan durante el periodo de apertura de la entrevista y hasta l
 ---
 
 ### SECCIÓN 8. ACCESO Y CONFIDENCIALIDAD
-El acceso a la entrevista está restringido al participante autenticado y, en historias compartidas de pareja, cada persona responde en su propio espacio sin que sus datos sean alterados ni superpuestos. El personal técnico de ForeverYou se encuentra sujeto a rigurosos convenios de confidencialidad y secreto profesional.
+El acceso a la entrevista está restringido al participante autenticado y, en historias compartidas de pareja, cada persona responde en su propio espacio sin que sus datos sean alterados ni superpuestos. El personal técnico de YouForever se encuentra sujeto a rigurosos convenios de confidencialidad y secreto profesional.
 
 ---
 
 ### SECCIÓN 9. PROVEEDORES, REMISIONES Y TRANSFERENCIAS
-ForeverYou no transfiere datos personales a terceros receptores salvo a los encargados tecnológicos estrictamente necesarios para el cómputo en la nube (Google Cloud Platform / Firebase) bajo contratos de remisión con estándares de seguridad equiparables. No se realizan ventas ni cesiones de bases de datos.
+YouForever no transfiere datos personales a terceros receptores salvo a los encargados tecnológicos estrictamente necesarios para el cómputo en la nube (Google Cloud Platform / Firebase) bajo contratos de remisión con estándares de seguridad equiparables. No se realizan ventas ni cesiones de bases de datos.
 
 ---
 
@@ -115,7 +115,7 @@ Usted o su representante legal debidamente acreditado tienen derecho a:
 - **Cancelación:** Solicitar que eliminemos sus datos de nuestros registros cuando considere que no están siendo utilizados conforme a los principios de ley.
 - **Oposición:** Oponerse al uso de sus datos para fines específicos.
 
-Para ejercer cualquiera de estos derechos, utilice el formulario habilitado en el **Panel Administrativo del Entrevistado (ícono de engrane ⚙️)** o envíe un correo a **privacidad@foreveryou.lat** con acuse de recibo inmediato y respuesta en un plazo no mayor a 20 días hábiles.
+Para ejercer cualquiera de estos derechos, utilice el formulario habilitado en el **Panel Administrativo del Entrevistado (ícono de engrane ⚙️)** o envíe un correo a **youforever.team@gmail.com** con acuse de recibo inmediato y respuesta en un plazo no mayor a 20 días hábiles.
 
 ---
 
@@ -130,7 +130,7 @@ Los testimonios autobiográficos corresponden a las memorias personales del part
 ---
 
 ### SECCIÓN 13. PROTECCIÓN DE MENORES DE EDAD
-ForeverYou está diseñado primordialmente para adultos mayores y personas adultas que relatan su trayectoria de vida. En caso de que se incorporen fotografías familiares de la infancia del titular o de descendientes menores de edad, el titular garantiza contar con la patria potestad o tutela correspondiente para su conservación en el ámbito estrictamente privado familiar.
+YouForever está diseñado primordialmente para adultos mayores y personas adultas que relatan su trayectoria de vida. En caso de que se incorporen fotografías familiares de la infancia del titular o de descendientes menores de edad, el titular garantiza contar con la patria potestad o tutela correspondiente para su conservación en el ámbito estrictamente privado familiar.
 
 ---
 

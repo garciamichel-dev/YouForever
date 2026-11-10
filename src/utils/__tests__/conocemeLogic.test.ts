@@ -115,7 +115,7 @@ test('buildWhatsAppInquiryUrl and buildMailtoInquiryUrl encode user details prop
     recipientRelation: 'Mi papá',
     modality: 'individual',
   });
-  assert.ok(waUrl.startsWith('https://wa.me/?text='));
+  assert.ok(waUrl.startsWith('https://wa.me/529681040015?text='));
   assert.ok(decodeURIComponent(waUrl).includes('Ana Sofía'));
   assert.ok(decodeURIComponent(waUrl).includes('Mi papá'));
 
@@ -125,6 +125,6 @@ test('buildWhatsAppInquiryUrl and buildMailtoInquiryUrl encode user details prop
     recipientRelation: 'Mi papá',
     modality: 'individual',
   });
-  assert.ok(mailUrl.startsWith('mailto:garcia.michel@gmail.com'));
+  assert.ok(mailUrl.startsWith('mailto:youforever.team@gmail.com'));
   assert.ok(decodeURIComponent(mailUrl).includes('ana@correo.com'));
 });

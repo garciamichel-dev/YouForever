@@ -444,10 +444,44 @@ export function hashToken(token: string): string {
   }
 }
 
+const SAFE_YF_LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+const SAFE_YF_DIGITS = '23456789';
+const SAFE_YF_ALPHABET = SAFE_YF_LETTERS + SAFE_YF_DIGITS;
+
+function buildMixedAlphanumeric5(bytes: Buffer | Uint8Array): string {
+  const chars: string[] = [];
+  for (let i = 0; i < 5; i++) {
+    chars.push(SAFE_YF_ALPHABET[bytes[i] % SAFE_YF_ALPHABET.length]);
+  }
+  const hasLetter = chars.some((c) => /[A-Z]/.test(c));
+  const hasDigit = chars.some((c) => /[0-9]/.test(c));
+  if (!hasLetter) {
+    const pos = bytes[5] % 5;
+    chars[pos] = SAFE_YF_LETTERS[bytes[6] % SAFE_YF_LETTERS.length];
+  }
+  if (!hasDigit) {
+    const pos = (bytes[5] + 2) % 5;
+    chars[pos] = SAFE_YF_DIGITS[bytes[7] % SAFE_YF_DIGITS.length];
+  }
+  return chars.join('');
+}
+
 /**
- * Deterministically derive an 8-character friendly access code (e.g. "LEG-8F4A") from a seed string.
+ * Deterministically derive an 8-character mixed alphanumeric access code (`YF-XXXXX`) from a seed string.
+ * Guarantees at least one letter and at least one number with zero sequential counters.
  */
 export function deriveDeterministicAccessCode(seed: string): string {
+  const digest = crypto
+    .createHash('sha256')
+    .update(`youforever_yf5_access:${seed || 'youforever_default_seed'}`)
+    .digest();
+  return `YF-${buildMixedAlphanumeric5(digest)}`;
+}
+
+/**
+ * Legacy deterministic 4-char LEG-XXXX derivation kept for backward compatibility with older tokens.
+ */
+export function deriveLegacyLegAccessCode(seed: string): string {
   const hash = hashToken(seed || 'foreveryou_default_seed').toUpperCase();
   const codePart = hash.replace(/[^A-Z0-9]/g, '').substring(0, 4).padEnd(4, '0');
   return `LEG-${codePart}`;
@@ -462,7 +496,7 @@ export function deriveDeterministicPlainToken(seed: string): string {
 
 /**
  * Extract a clean token or access code from any user input (including full URLs,
- * "Código: LEG-XXXX" badges, WhatsApp invitation messages, or spaced/unhyphenated codes).
+ * "Código: YF-XXXXX" / "Código: LEG-XXXX" badges, WhatsApp invitation messages, or spaced/unhyphenated codes).
  */
 export function extractCleanTokenOrCode(rawInput: string): string {
   if (!rawInput) return '';
@@ -493,7 +527,18 @@ export function extractCleanTokenOrCode(rawInput: string): string {
     .replace(/["'«»]/g, '')
     .trim();
 
-  // If the pasted text contains a LEG-XXXX pattern inside a longer message, extract it
+  // If the pasted text contains a YF-XXXXX pattern inside a longer message, extract it
+  const embeddedYfMatch = cleaned.match(/\bYF[\s\-_]*([A-Z0-9]{4,8})\b/i);
+  if (embeddedYfMatch) {
+    return `YF-${embeddedYfMatch[1].toUpperCase()}`;
+  }
+
+  const compactYfMatch = cleaned.match(/^YF[\s\-_]*([A-Z0-9]{4,8})$/i);
+  if (compactYfMatch) {
+    return `YF-${compactYfMatch[1].toUpperCase()}`;
+  }
+
+  // Legacy support: If the pasted text contains a LEG-XXXX pattern inside a longer message, extract it
   const embeddedLegMatch = cleaned.match(/\bLEG[\s\-_]*([A-Z0-9]{4,8})\b/i);
   if (embeddedLegMatch) {
     return `LEG-${embeddedLegMatch[1].toUpperCase()}`;
@@ -510,12 +555,12 @@ export function extractCleanTokenOrCode(rawInput: string): string {
 
 /**
  * Resolve a token record from a collection of tokens using flexible matching across:
- * - Access code (case-insensitive, with or without hyphen/spaces, or 4-char suffix after LEG-)
+ * - Access code (`YF-XXXXX` or legacy `LEG-XXXX`, case-insensitive, with or without hyphen/spaces, or suffix)
  * - Plain token (case-insensitive to support uppercase inputs)
  * - SHA-256 tokenHash (both exact case and lowercase hex input)
  * - Direct token ID, participantId, or interviewId
  */
-export function matchTokenRecord<T extends InterviewTokenRecord & { plainToken?: string }>(
+export function matchTokenRecord<T extends InterviewTokenRecord & { plainToken?: string; legacyAccessCode?: string }>(
   rawInput: string,
   tokens: Iterable<T>
 ): T | undefined {
@@ -525,8 +570,10 @@ export function matchTokenRecord<T extends InterviewTokenRecord & { plainToken?:
   const upperInput = cleaned.toUpperCase();
   const lowerInput = cleaned.toLowerCase();
   const alphaNumInput = upperInput.replace(/[^A-Z0-9]/g, '');
+  const yfPrefixedInput =
+    alphaNumInput.length === 5 || alphaNumInput.length === 4 ? `YF${alphaNumInput}` : alphaNumInput;
   const legPrefixedInput =
-    alphaNumInput.length === 4 ? `LEG${alphaNumInput}` : alphaNumInput;
+    alphaNumInput.length === 4 || alphaNumInput.length === 5 ? `LEG${alphaNumInput}` : alphaNumInput;
 
   const hashedExact = hashToken(cleaned).toLowerCase();
   const hashedLower = hashToken(lowerInput).toLowerCase();
@@ -539,20 +586,39 @@ export function matchTokenRecord<T extends InterviewTokenRecord & { plainToken?:
     ...tokenList.filter((t) => t.revoked),
   ];
 
-  // Pass 1: Exact / normalized accessCode, plainToken, or tokenHash match
+  // Pass 1: Exact / normalized accessCode, legacyAccessCode, plainToken, or tokenHash match
   for (const tok of orderedTokens) {
     const tokAccessUpper = (tok.accessCode || '').trim().toUpperCase();
     const tokAccessAlphaNum = tokAccessUpper.replace(/[^A-Z0-9]/g, '');
+    const tokLegacyUpper = ((tok as any).legacyAccessCode || '').trim().toUpperCase();
+    const tokLegacyAlphaNum = tokLegacyUpper.replace(/[^A-Z0-9]/g, '');
+
     const derivedByPartUpper = deriveDeterministicAccessCode(tok.participantId || tok.tokenHash).toUpperCase();
     const derivedByPartAlphaNum = derivedByPartUpper.replace(/[^A-Z0-9]/g, '');
     const derivedByHashUpper = deriveDeterministicAccessCode(tok.tokenHash || tok.participantId).toUpperCase();
     const derivedByHashAlphaNum = derivedByHashUpper.replace(/[^A-Z0-9]/g, '');
 
+    const legacyPartUpper = deriveLegacyLegAccessCode(tok.participantId || tok.tokenHash).toUpperCase();
+    const legacyPartAlphaNum = legacyPartUpper.replace(/[^A-Z0-9]/g, '');
+    const legacyHashUpper = deriveLegacyLegAccessCode(tok.tokenHash || tok.participantId).toUpperCase();
+    const legacyHashAlphaNum = legacyHashUpper.replace(/[^A-Z0-9]/g, '');
+
     if (
       tokAccessUpper &&
       (tokAccessUpper === upperInput ||
         tokAccessAlphaNum === alphaNumInput ||
+        tokAccessAlphaNum === yfPrefixedInput ||
         tokAccessAlphaNum === legPrefixedInput)
+    ) {
+      return tok;
+    }
+
+    if (
+      tokLegacyUpper &&
+      (tokLegacyUpper === upperInput ||
+        tokLegacyAlphaNum === alphaNumInput ||
+        tokLegacyAlphaNum === yfPrefixedInput ||
+        tokLegacyAlphaNum === legPrefixedInput)
     ) {
       return tok;
     }
@@ -560,10 +626,16 @@ export function matchTokenRecord<T extends InterviewTokenRecord & { plainToken?:
     if (
       derivedByPartUpper === upperInput ||
       derivedByPartAlphaNum === alphaNumInput ||
-      derivedByPartAlphaNum === legPrefixedInput ||
+      derivedByPartAlphaNum === yfPrefixedInput ||
       derivedByHashUpper === upperInput ||
       derivedByHashAlphaNum === alphaNumInput ||
-      derivedByHashAlphaNum === legPrefixedInput
+      derivedByHashAlphaNum === yfPrefixedInput ||
+      legacyPartUpper === upperInput ||
+      legacyPartAlphaNum === alphaNumInput ||
+      legacyPartAlphaNum === legPrefixedInput ||
+      legacyHashUpper === upperInput ||
+      legacyHashAlphaNum === alphaNumInput ||
+      legacyHashAlphaNum === legPrefixedInput
     ) {
       return tok;
     }
@@ -602,13 +674,14 @@ export function matchTokenRecord<T extends InterviewTokenRecord & { plainToken?:
 }
 
 /**
- * Generate a cryptographically secure random invitation token, its SHA-256 hash, and a deterministic 8-char access code.
+ * Generate a cryptographically secure random invitation token, its SHA-256 hash, and an 8-char mixed alphanumeric access code (`YF-XXXXX`).
  */
 export function generateInvitationToken(): { plainToken: string; tokenHash: string; accessCode: string } {
   try {
     const plainToken = crypto.randomBytes(32).toString('hex');
     const tokenHash = hashToken(plainToken);
-    const accessCode = deriveDeterministicAccessCode(tokenHash);
+    const randBytes = crypto.randomBytes(8);
+    const accessCode = `YF-${buildMixedAlphanumeric5(randBytes)}`;
     return { plainToken, tokenHash, accessCode };
   } catch {
     const plainToken = Math.random().toString(36).substring(2) + Math.random().toString(36).substring(2);
@@ -1103,7 +1176,7 @@ export function ensurePhotosPlacedInManuscript(params: {
 
 export const CURRENT_PRIVACY_POLICY_VERSION = '1.0';
 export const CURRENT_PRIVACY_POLICY_DATE = '2026-10-29';
-export const RESPONSIBLE_CONTACT_EMAIL = 'atención@foreveryou.com';
+export const RESPONSIBLE_CONTACT_EMAIL = 'youforever.team@gmail.com';
 export const DEFAULT_SERVER_TIMEZONE = 'America/Merida';
 
 export interface PrivacyDeclarations {

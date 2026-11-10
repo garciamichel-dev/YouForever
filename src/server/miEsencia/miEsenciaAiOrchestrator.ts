@@ -435,7 +435,7 @@ export async function testLiveProviderConnection(params: {
       const res = await callOpenAiProvider({
         model: requestedModel,
         systemInstructions:
-          'Eres un verificador técnico de conectividad de ForeverYou Mi Esencia. Responde en una sola oración confirmando que la conexión con OpenAI API está activa.',
+          'Eres un verificador técnico de conectividad de YouForever Mi Esencia. Responde en una sola oración confirmando que la conexión con OpenAI API está activa.',
         userContextAndMessage:
           'Confirma en español que estás conectado correctamente a la API de OpenAI.',
       });
@@ -503,7 +503,7 @@ export async function testLiveProviderConnection(params: {
       const res = await callGeminiProvider({
         model: requestedModel,
         systemInstructions:
-          'Eres un verificador técnico de conectividad de ForeverYou Mi Esencia. Responde en una sola oración confirmando que la conexión con Google Gemini API está activa.',
+          'Eres un verificador técnico de conectividad de YouForever Mi Esencia. Responde en una sola oración confirmando que la conexión con Google Gemini API está activa.',
         userContextAndMessage:
           'Confirma en español que estás conectado correctamente a la API de Google Gemini.',
       });

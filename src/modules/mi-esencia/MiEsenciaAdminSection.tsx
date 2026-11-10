@@ -32,12 +32,15 @@ import {
   ChevronDown,
   ChevronRight,
   RotateCcw,
+  Share2,
+  Mail,
 } from 'lucide-react';
 import { ThemeToggleButton } from '../../context/ThemeContext';
 import { MiEsenciaFamilyPortal } from './MiEsenciaFamilyPortal';
 import { MiEsenciaAvatarAiConfigPanel } from './MiEsenciaAvatarAiConfigPanel';
 import { MiEsenciaPromptLibraryPanel } from './MiEsenciaPromptLibraryPanel';
 import { MiEsenciaSimulatorPanel } from './MiEsenciaSimulatorPanel';
+import { SystemStatisticsPanel } from '../../components/SystemStatisticsPanel';
 import type {
   MiEsenciaGlobalConfig,
   MiEsenciaPlanRecord,
@@ -246,6 +249,15 @@ export const MiEsenciaAdminSection: React.FC<MiEsenciaAdminSectionProps> = ({ ad
   const [expandedCredentialAvatars, setExpandedCredentialAvatars] = useState<Record<string, boolean>>(
     {}
   );
+  const [expandedConversationAvatars, setExpandedConversationAvatars] = useState<
+    Record<string, boolean>
+  >({});
+  const [selectedSummaryCredByAvatar, setSelectedSummaryCredByAvatar] = useState<
+    Record<string, string>
+  >({});
+  const [expandedConversationInterlocutors, setExpandedConversationInterlocutors] = useState<
+    Record<string, boolean>
+  >({});
   const [editingCredentialId, setEditingCredentialId] = useState<string | null>(null);
   const [credentialEditForm, setCredentialEditForm] = useState<{
     fullName: string;
@@ -1356,6 +1368,27 @@ export const MiEsenciaAdminSection: React.FC<MiEsenciaAdminSectionProps> = ({ ad
                   const subCreds = overview.credentials.filter(
                     (c) => c.avatarId === sub.avatarId && c.status === 'activo'
                   );
+                  const selectedCredId =
+                    selectedSummaryCredByAvatar[sub.avatarId] ||
+                    subCreds[0]?.accessCredentialId ||
+                    '';
+                  const activeCred =
+                    subCreds.find((c) => c.accessCredentialId === selectedCredId) ||
+                    subCreds[0] ||
+                    null;
+                  const activeShareCode = activeCred?.personalCodePlain || '';
+                  const activeShareUrl = activeCred
+                    ? `https://youforever.app${activeCred.privateLinkPath}`
+                    : 'https://youforever.app/miesencia';
+                  const shareWhatsAppText = activeCred
+                    ? `Hola ${activeCred.interlocutorName}, te comparto tu acceso familiar privado a *Mi Esencia* de *${sub.avatarDisplayName}* en YouForever.\n\n🔑 Tu código personal: *${activeShareCode}*\n🔗 Enlace directo: ${activeShareUrl}`
+                    : '';
+                  const shareEmailSubject = activeCred
+                    ? `Acceso a Mi Esencia de ${sub.avatarDisplayName} • YouForever`
+                    : '';
+                  const shareEmailBody = activeCred
+                    ? `Hola ${activeCred.interlocutorName},\n\nTe comparto tu acceso personal a Mi Esencia para conversar con los recuerdos de ${sub.avatarDisplayName} en YouForever:\n\n• Código personal único: ${activeShareCode}\n• Enlace privado directo: ${activeShareUrl}\n\nCon cariño,\nYouForever`
+                    : '';
                   const subPersons = overview.persons.filter((p) => p.avatarId === sub.avatarId);
                   const subPdf =
                     (subPersons[0]?.sourcePdfId &&
@@ -1366,6 +1399,7 @@ export const MiEsenciaAdminSection: React.FC<MiEsenciaAdminSectionProps> = ({ ad
                   return (
                     <div
                       key={sub.avatarId}
+                      data-testid={`active-avatar-card-${sub.avatarId}`}
                       className="p-4 rounded-xl border border-stone-200 bg-stone-50/60 space-y-3"
                     >
                       <div className="flex items-start justify-between gap-2">
@@ -1389,10 +1423,126 @@ export const MiEsenciaAdminSection: React.FC<MiEsenciaAdminSectionProps> = ({ ad
                         </span>
                       </div>
 
+                      {/* Bloque directo para copiar código, copiar enlace y compartir acceso al avatar */}
+                      <div className="p-3 rounded-xl bg-white border border-stone-200/90 space-y-2.5">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="text-[11px] font-semibold text-stone-700 flex items-center gap-1.5">
+                            <KeyRound className="w-3.5 h-3.5 text-amber-700" />
+                            <span>Acceso Familiar Directo ({subCreds.length} activo{subCreds.length === 1 ? '' : 's'})</span>
+                          </span>
+                          {subCreds.length > 1 && (
+                            <select
+                              aria-label={`Seleccionar familiar de ${sub.avatarDisplayName}`}
+                              value={activeCred?.accessCredentialId || ''}
+                              onChange={(e) =>
+                                setSelectedSummaryCredByAvatar((prev) => ({
+                                  ...prev,
+                                  [sub.avatarId]: e.target.value,
+                                }))
+                              }
+                              className="px-2.5 py-1 rounded-lg border border-stone-300 text-[11px] bg-stone-50 text-stone-800 font-medium"
+                            >
+                              {subCreds.map((c) => (
+                                <option key={c.accessCredentialId} value={c.accessCredentialId}>
+                                  {c.interlocutorName} ({c.relationshipToPerson}) — {c.personalCodePlain}
+                                </option>
+                              ))}
+                            </select>
+                          )}
+                        </div>
+
+                        {activeCred ? (
+                          <>
+                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 text-xs bg-stone-50 px-3 py-2 rounded-lg border border-stone-200/80">
+                              <div className="truncate">
+                                <span className="text-stone-500">Familiar: </span>
+                                <strong className="text-stone-900">
+                                  {activeCred.interlocutorName}
+                                </strong>{' '}
+                                <span className="text-stone-500">
+                                  ({activeCred.relationshipToPerson})
+                                </span>
+                              </div>
+                              <div className="font-mono text-xs font-bold text-amber-900 bg-amber-100/80 px-2 py-0.5 rounded border border-amber-300/70 shrink-0">
+                                {activeShareCode}
+                              </div>
+                            </div>
+
+                            <div className="text-[11px] text-stone-500 font-mono truncate">
+                              {activeShareUrl}
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  navigator.clipboard?.writeText(activeShareCode);
+                                  showNotice(
+                                    'ok',
+                                    `Código ${activeShareCode} copiado al portapapeles.`
+                                  );
+                                }}
+                                className="px-2.5 py-1.5 rounded-lg bg-amber-100 hover:bg-amber-200 text-amber-950 text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
+                              >
+                                <Copy className="w-3 h-3" />
+                                <span>Copiar Código</span>
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  navigator.clipboard?.writeText(activeShareUrl);
+                                  showNotice(
+                                    'ok',
+                                    `Enlace de acceso copiado: ${activeShareUrl}`
+                                  );
+                                }}
+                                className="px-2.5 py-1.5 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-800 text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
+                              >
+                                <Copy className="w-3 h-3" />
+                                <span>Copiar Enlace</span>
+                              </button>
+
+                              <a
+                                href={`https://wa.me/?text=${encodeURIComponent(shareWhatsAppText)}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="px-2.5 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
+                              >
+                                <Share2 className="w-3 h-3" />
+                                <span>WhatsApp</span>
+                              </a>
+
+                              <a
+                                href={`mailto:?subject=${encodeURIComponent(shareEmailSubject)}&body=${encodeURIComponent(shareEmailBody)}`}
+                                className="px-2.5 py-1.5 rounded-lg bg-white hover:bg-stone-100 border border-stone-300 text-stone-800 text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
+                              >
+                                <Mail className="w-3 h-3 text-amber-800" />
+                                <span>Correo</span>
+                              </a>
+                            </div>
+                          </>
+                        ) : (
+                          <div className="flex items-center justify-between gap-2 text-xs text-stone-500">
+                            <span>Sin códigos familiares activos aún.</span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedAvatarId(sub.avatarId);
+                                setActiveSubTab('familiares');
+                              }}
+                              className="px-2.5 py-1 rounded-lg bg-amber-100 hover:bg-amber-200 text-amber-950 text-[11px] font-semibold cursor-pointer"
+                            >
+                              + Crear Código Familiar
+                            </button>
+                          </div>
+                        )}
+                      </div>
+
                       <div className="flex flex-wrap items-center gap-2 pt-1">
-                        {subCreds[0] && (
+                        {activeCred && (
                           <button
-                            onClick={() => setPreviewPersonalCode(subCreds[0].personalCodePlain)}
+                            onClick={() => setPreviewPersonalCode(activeCred.personalCodePlain)}
                             className="px-3 py-1.5 rounded-lg bg-stone-900 text-amber-200 text-xs font-medium flex items-center gap-1.5 cursor-pointer"
                           >
                             <Eye className="w-3.5 h-3.5" />
@@ -1453,7 +1603,7 @@ export const MiEsenciaAdminSection: React.FC<MiEsenciaAdminSectionProps> = ({ ad
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
                 <label className="block text-xs font-semibold text-stone-700 mb-1">
-                  1. Seleccionar Entrevista Existente en ForeverYou
+                  1. Seleccionar Entrevista Existente en YouForever
                 </label>
                 <select
                   value={selectedInterviewId}
@@ -2648,8 +2798,8 @@ export const MiEsenciaAdminSection: React.FC<MiEsenciaAdminSectionProps> = ({ ad
               Generar Código Criptográfico Individual y Enlace Privado para Familiar
             </h3>
             <p className="text-xs text-stone-500">
-              Cada familiar autorizado recibe un código personal único (`FY-NOMBRE-XXXX-XXXX`) y su
-              propio enlace privado hacia <code>/miesencia</code>. Ese código protege de forma
+              Cada familiar autorizado recibe un código personal alfanumérico único (<code>YF-XXXXX</code>, combinando letras y números con protección anti-fuerza bruta) y su
+              propio enlace privado hacia <code>https://youforever.app/miesencia</code>. Ese código protege de forma
               exclusiva sus memorias privadas de Nivel C.
             </p>
 
@@ -2782,7 +2932,7 @@ export const MiEsenciaAdminSection: React.FC<MiEsenciaAdminSectionProps> = ({ ad
                               </p>
                             ) : (
                               subCredentials.map((cred) => {
-                                const fullPrivateUrl = `${window.location.origin}${cred.privateLinkPath}`;
+                                const fullPrivateUrl = `https://youforever.app${cred.privateLinkPath}`;
                                 const linkedInter = overview.interlocutors.find(
                                   (i) => i.interlocutorId === cred.interlocutorId
                                 );
@@ -3167,11 +3317,10 @@ export const MiEsenciaAdminSection: React.FC<MiEsenciaAdminSectionProps> = ({ ad
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
               <h3 className="font-serif text-lg text-stone-900">
-                Historial de Sesiones Conversacionales por Familiar
+                Historial de Conversaciones Agrupadas por Avatar y por Familiar
               </h3>
               <p className="text-xs text-stone-500">
-                Cada sesión muestra el perfil digital con el que se conversó y permite eliminar
-                conversaciones de prueba.
+                Haz clic en un Avatar para ver a los familiares que han conversado con él y despliega cada familiar para revisar su historial de sesiones y mensajes.
               </p>
             </div>
           </div>
@@ -3181,86 +3330,299 @@ export const MiEsenciaAdminSection: React.FC<MiEsenciaAdminSectionProps> = ({ ad
             </p>
           ) : (
             <div className="space-y-4">
-              {overview.conversations.map((sess) => {
-                const sessionPerson = overview.persons.find((p) => p.personId === sess.personId);
-                const sessionPdf = sessionPerson?.sourcePdfId
-                  ? overview.compilationPdfs.find((pdf) => pdf.pdfId === sessionPerson.sourcePdfId)
-                  : undefined;
-                return (
-                  <div
-                    key={sess.sessionId}
-                    className="p-4 rounded-xl border border-stone-200 space-y-2 text-xs"
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="space-y-0.5">
-                        <span className="font-bold text-stone-900 block">
-                          {sess.title || `${sess.interlocutorRelationship} ${sess.interlocutorName}`}{' '}
-                          ({sess.messages.length} mensajes)
-                        </span>
-                        <span className="text-[11px] text-stone-500 block">
-                          Perfil Digital: <strong>{sessionPerson?.fullName || sess.personId}</strong>
-                          {sessionPdf ? ` • PDF base: ${sessionPdf.fileName}` : ''}
-                          {sess.lastProviderUsed
-                            ? ` • Último motor: ${sess.lastProviderUsed.toUpperCase()} (${sess.lastModelUsed || ''})`
-                            : ''}
-                        </span>
-                      </div>
+              {(() => {
+                // Agrupar conversaciones por avatarId
+                const avatarGroupsMap = new Map<
+                  string,
+                  {
+                    avatarId: string;
+                    avatarDisplayName: string;
+                    sessions: MiEsenciaConversationSession[];
+                  }
+                >();
 
-                      <div className="flex flex-wrap items-center gap-2">
-                        {sess.hasPrivateLevelCMemories && (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-sky-100 text-sky-900 font-medium">
-                            <Lock className="w-3 h-3" />
-                            Incluye confidencias Nivel C aisladas
+                for (const sub of overview.subscriptions) {
+                  const subSessions = overview.conversations.filter(
+                    (c) => c.avatarId === sub.avatarId
+                  );
+                  if (subSessions.length > 0) {
+                    avatarGroupsMap.set(sub.avatarId, {
+                      avatarId: sub.avatarId,
+                      avatarDisplayName: sub.avatarDisplayName,
+                      sessions: subSessions,
+                    });
+                  }
+                }
+
+                // Incluir sesiones cuyo avatarId no esté en subscriptions activas
+                for (const sess of overview.conversations) {
+                  if (!avatarGroupsMap.has(sess.avatarId)) {
+                    const person = overview.persons.find((p) => p.personId === sess.personId);
+                    avatarGroupsMap.set(sess.avatarId, {
+                      avatarId: sess.avatarId,
+                      avatarDisplayName: person?.fullName || `Avatar ${sess.avatarId}`,
+                      sessions: [sess],
+                    });
+                  } else {
+                    const group = avatarGroupsMap.get(sess.avatarId)!;
+                    if (!group.sessions.some((s) => s.sessionId === sess.sessionId)) {
+                      group.sessions.push(sess);
+                    }
+                  }
+                }
+
+                const avatarGroups = Array.from(avatarGroupsMap.values());
+
+                return avatarGroups.map((avatarGroup) => {
+                  const isAvatarExpanded = Boolean(
+                    expandedConversationAvatars[avatarGroup.avatarId]
+                  );
+
+                  // Dentro del Avatar, agrupar por Familiar (interlocutorId)
+                  const famGroupsMap = new Map<
+                    string,
+                    {
+                      interlocutorKey: string;
+                      interlocutorId: string;
+                      interlocutorName: string;
+                      interlocutorRelationship: string;
+                      personalCode?: string;
+                      sessions: MiEsenciaConversationSession[];
+                    }
+                  >();
+
+                  for (const sess of avatarGroup.sessions) {
+                    const key =
+                      sess.interlocutorId ||
+                      `${sess.interlocutorRelationship}_${sess.interlocutorName}`;
+                    const cred = overview.credentials.find(
+                      (c) => c.interlocutorId === sess.interlocutorId
+                    );
+                    const inter = overview.interlocutors.find(
+                      (i) => i.interlocutorId === sess.interlocutorId
+                    );
+                    if (!famGroupsMap.has(key)) {
+                      famGroupsMap.set(key, {
+                        interlocutorKey: `${avatarGroup.avatarId}::${key}`,
+                        interlocutorId: sess.interlocutorId,
+                        interlocutorName: inter?.fullName || sess.interlocutorName || 'Familiar',
+                        interlocutorRelationship:
+                          inter?.relationshipToPerson || sess.interlocutorRelationship || 'Familiar',
+                        personalCode: cred?.personalCodePlain,
+                        sessions: [sess],
+                      });
+                    } else {
+                      famGroupsMap.get(key)!.sessions.push(sess);
+                    }
+                  }
+
+                  const famGroups = Array.from(famGroupsMap.values());
+                  const totalMessagesInAvatar = avatarGroup.sessions.reduce(
+                    (acc, s) => acc + s.messages.length,
+                    0
+                  );
+
+                  return (
+                    <div
+                      key={avatarGroup.avatarId}
+                      className="rounded-2xl border border-stone-200 overflow-hidden bg-white"
+                    >
+                      {/* Cabecera desplegable del Avatar */}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setExpandedConversationAvatars((prev) => ({
+                            ...prev,
+                            [avatarGroup.avatarId]: !isAvatarExpanded,
+                          }))
+                        }
+                        className="w-full px-5 py-3.5 bg-stone-50 hover:bg-stone-100 flex flex-wrap items-center justify-between gap-3 text-left transition cursor-pointer"
+                      >
+                        <div className="flex flex-wrap items-center gap-2.5">
+                          {isAvatarExpanded ? (
+                            <ChevronDown className="w-4 h-4 text-amber-700 shrink-0" />
+                          ) : (
+                            <ChevronRight className="w-4 h-4 text-stone-500 shrink-0" />
+                          )}
+                          <span className="font-serif font-bold text-stone-900 text-base">
+                            {avatarGroup.avatarDisplayName}
                           </span>
-                        )}
-                        <button
-                          onClick={() =>
-                            handleDeleteConversation(
-                              sess.sessionId,
-                              sess.title || `${sess.interlocutorRelationship} ${sess.interlocutorName}`
-                            )
-                          }
-                          className="px-3 py-1.5 rounded-lg bg-red-50 hover:bg-red-100 border border-red-200 text-red-800 font-medium flex items-center gap-1 cursor-pointer"
-                          title="Eliminar esta sesión conversacional"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                          <span>Eliminar Conversación</span>
-                        </button>
-                      </div>
+                          <span className="px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-900 text-[11px] font-semibold">
+                            {famGroups.length} familiar(es)
+                          </span>
+                          <span className="px-2.5 py-0.5 rounded-full bg-stone-200 text-stone-800 text-[11px] font-medium">
+                            {avatarGroup.sessions.length} sesión(es) • {totalMessagesInAvatar}{' '}
+                            mensaje(s)
+                          </span>
+                        </div>
+                        <span className="text-xs text-stone-600 font-medium">
+                          {isAvatarExpanded
+                            ? 'Ocultar familiares'
+                            : 'Ver familiares y conversaciones'}
+                        </span>
+                      </button>
+
+                      {/* Lista desplegable de Familiares dentro del Avatar */}
+                      {isAvatarExpanded && (
+                        <div className="p-4 space-y-3 border-t border-stone-200 bg-white">
+                          {famGroups.map((fam) => {
+                            const isFamExpanded = Boolean(
+                              expandedConversationInterlocutors[fam.interlocutorKey]
+                            );
+                            const totalFamMessages = fam.sessions.reduce(
+                              (acc, s) => acc + s.messages.length,
+                              0
+                            );
+
+                            return (
+                              <div
+                                key={fam.interlocutorKey}
+                                className="rounded-xl border border-stone-200 overflow-hidden"
+                              >
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setExpandedConversationInterlocutors((prev) => ({
+                                      ...prev,
+                                      [fam.interlocutorKey]: !isFamExpanded,
+                                    }))
+                                  }
+                                  className="w-full px-4 py-3 bg-amber-50/40 hover:bg-amber-50/80 flex flex-wrap items-center justify-between gap-2 text-left transition cursor-pointer"
+                                >
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    {isFamExpanded ? (
+                                      <ChevronDown className="w-4 h-4 text-amber-700 shrink-0" />
+                                    ) : (
+                                      <ChevronRight className="w-4 h-4 text-stone-500 shrink-0" />
+                                    )}
+                                    <span className="font-bold text-stone-900 text-xs">
+                                      {fam.interlocutorName}
+                                    </span>
+                                    <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 text-[11px] font-medium">
+                                      {fam.interlocutorRelationship}
+                                    </span>
+                                    {fam.personalCode && (
+                                      <span className="px-2 py-0.5 rounded-md bg-stone-100 border border-stone-200 font-mono text-[11px] text-stone-700">
+                                        Código: {fam.personalCode}
+                                      </span>
+                                    )}
+                                    <span className="text-[11px] text-stone-500">
+                                      ({fam.sessions.length} sesión(es) • {totalFamMessages}{' '}
+                                      mensajes)
+                                    </span>
+                                  </div>
+                                  <span className="text-[11px] text-amber-800 font-semibold">
+                                    {isFamExpanded
+                                      ? 'Ocultar historial'
+                                      : 'Desplegar historial de conversación'}
+                                  </span>
+                                </button>
+
+                                {isFamExpanded && (
+                                  <div className="p-4 space-y-3 bg-white border-t border-stone-200">
+                                    {fam.sessions.map((sess) => {
+                                      const sessionPerson = overview.persons.find(
+                                        (p) => p.personId === sess.personId
+                                      );
+                                      const sessionPdf = sessionPerson?.sourcePdfId
+                                        ? overview.compilationPdfs.find(
+                                            (pdf) => pdf.pdfId === sessionPerson.sourcePdfId
+                                          )
+                                        : undefined;
+                                      return (
+                                        <div
+                                          key={sess.sessionId}
+                                          className="p-4 rounded-xl border border-stone-200 space-y-2 text-xs bg-stone-50/40"
+                                        >
+                                          <div className="flex flex-wrap items-center justify-between gap-2">
+                                            <div className="space-y-0.5">
+                                              <span className="font-bold text-stone-900 block">
+                                                {sess.title ||
+                                                  `${sess.interlocutorRelationship} ${sess.interlocutorName}`}{' '}
+                                                ({sess.messages.length} mensajes)
+                                              </span>
+                                              <span className="text-[11px] text-stone-500 block">
+                                                Perfil Digital:{' '}
+                                                <strong>
+                                                  {sessionPerson?.fullName || sess.personId}
+                                                </strong>
+                                                {sessionPdf
+                                                  ? ` • Compilado base: ${sessionPdf.fileName}`
+                                                  : ''}
+                                                {sess.lastProviderUsed
+                                                  ? ` • Último motor: ${sess.lastProviderUsed.toUpperCase()} (${sess.lastModelUsed || ''})`
+                                                  : ''}
+                                              </span>
+                                            </div>
+
+                                            <div className="flex flex-wrap items-center gap-2">
+                                              {sess.hasPrivateLevelCMemories && (
+                                                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-sky-100 text-sky-900 font-medium">
+                                                  <Lock className="w-3 h-3" />
+                                                  Incluye confidencias Nivel C aisladas
+                                                </span>
+                                              )}
+                                              <button
+                                                onClick={() =>
+                                                  handleDeleteConversation(
+                                                    sess.sessionId,
+                                                    sess.title ||
+                                                      `${sess.interlocutorRelationship} ${sess.interlocutorName}`
+                                                  )
+                                                }
+                                                className="px-3 py-1.5 rounded-lg bg-red-50 hover:bg-red-100 border border-red-200 text-red-800 font-medium flex items-center gap-1 cursor-pointer"
+                                                title="Eliminar esta sesión conversacional"
+                                              >
+                                                <Trash2 className="w-3.5 h-3.5" />
+                                                <span>Eliminar Conversación</span>
+                                              </button>
+                                            </div>
+                                          </div>
+                                          {sess.lastFallbackNotice && (
+                                            <div className="p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-950 text-[11px]">
+                                              <strong>Aviso de Conmutación Automática:</strong>{' '}
+                                              {sess.lastFallbackNotice}
+                                            </div>
+                                          )}
+                                          {sess.sessionContextSummary && (
+                                            <details className="text-[11px] bg-stone-100/80 border border-stone-200 rounded-lg px-3 py-2">
+                                              <summary className="font-semibold text-stone-700 cursor-pointer">
+                                                Ver Resumen Persistente de Continuidad Multi-Día
+                                              </summary>
+                                              <pre className="mt-1.5 whitespace-pre-wrap font-mono text-[10px] text-stone-600">
+                                                {sess.sessionContextSummary}
+                                              </pre>
+                                            </details>
+                                          )}
+                                          <div className="space-y-1.5 max-h-60 overflow-y-auto bg-white border border-stone-200 p-3 rounded-lg">
+                                            {sess.messages.map((m) => (
+                                              <p key={m.messageId} className="text-stone-700">
+                                                <strong>
+                                                  {m.sender === 'interlocutor'
+                                                    ? fam.interlocutorName
+                                                    : sessionPerson?.preferredName || 'Avatar'}
+                                                  :
+                                                </strong>{' '}
+                                                {m.privacyLevelApplied === 'privado_interlocutor'
+                                                  ? '[Contenido privado de Nivel C protegido por código criptográfico del familiar]'
+                                                  : m.content}
+                                              </p>
+                                            ))}
+                                          </div>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
-                    {sess.lastFallbackNotice && (
-                      <div className="p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-950 text-[11px]">
-                        <strong>Aviso de Conmutación Automática:</strong> {sess.lastFallbackNotice}
-                      </div>
-                    )}
-                    {sess.sessionContextSummary && (
-                      <details className="text-[11px] bg-stone-100/80 border border-stone-200 rounded-lg px-3 py-2">
-                        <summary className="font-semibold text-stone-700 cursor-pointer">
-                          Ver Resumen Persistente de Continuidad Multi-Día (enviado al reabrir la conversación)
-                        </summary>
-                        <pre className="mt-1.5 whitespace-pre-wrap font-mono text-[10px] text-stone-600">
-                          {sess.sessionContextSummary}
-                        </pre>
-                      </details>
-                    )}
-                    <div className="space-y-1.5 max-h-48 overflow-y-auto bg-stone-50 p-3 rounded-lg">
-                      {sess.messages.map((m) => (
-                        <p key={m.messageId} className="text-stone-700">
-                          <strong>
-                            {m.sender === 'interlocutor'
-                              ? sess.interlocutorName
-                              : sessionPerson?.preferredName || 'Avatar'}
-                            :
-                          </strong>{' '}
-                          {m.privacyLevelApplied === 'privado_interlocutor'
-                            ? '[Contenido privado de Nivel C protegido por código criptográfico del familiar]'
-                            : m.content}
-                        </p>
-                      ))}
-                    </div>
-                  </div>
-                );
-              })}
+                  );
+                });
+              })()}
             </div>
           )}
         </div>
@@ -3430,45 +3792,115 @@ export const MiEsenciaAdminSection: React.FC<MiEsenciaAdminSectionProps> = ({ ad
       {activeSubTab === 'pagos' && overview && (
         <div className="space-y-6">
           <div className="bg-white rounded-2xl border border-stone-200 p-6 space-y-4">
-            <h3 className="font-serif text-lg text-stone-900">
-              Crear Cupón de Descuento o Días de Regalo
-            </h3>
-            <div className="grid grid-cols-1 sm:grid-cols-5 gap-3">
-              <input
-                type="text"
-                value={couponCode}
-                onChange={(e) => setCouponCode(e.target.value.toUpperCase())}
-                placeholder="Código (ej. FAMILIA2026)"
-                className="px-3 py-2 rounded-xl border border-stone-300 text-xs font-mono"
-              />
-              <input
-                type="text"
-                value={couponDesc}
-                onChange={(e) => setCouponDesc(e.target.value)}
-                placeholder="Descripción"
-                className="px-3 py-2 rounded-xl border border-stone-300 text-xs"
-              />
-              <input
-                type="number"
-                value={couponDiscount}
-                onChange={(e) => setCouponDiscount(Number(e.target.value))}
-                placeholder="% Descuento"
-                className="px-3 py-2 rounded-xl border border-stone-300 text-xs"
-              />
-              <input
-                type="number"
-                value={couponBonusDays}
-                onChange={(e) => setCouponBonusDays(Number(e.target.value))}
-                placeholder="Días extra"
-                className="px-3 py-2 rounded-xl border border-stone-300 text-xs"
-              />
-              <button
-                onClick={handleCreateCoupon}
-                className="px-4 py-2 rounded-xl bg-stone-900 text-amber-300 text-xs font-semibold cursor-pointer"
-              >
-                Crear Cupón
-              </button>
+            <div>
+              <h3 className="font-serif text-lg text-stone-900">
+                Crear Cupón de Descuento o Días de Regalo
+              </h3>
+              <p className="text-xs text-stone-500 mt-0.5">
+                Configura códigos promocionales indicando el porcentaje de descuento sobre el plan y/o los días adicionales sin costo que se sumarán a la suscripción familiar.
+              </p>
             </div>
+            <div className="grid grid-cols-1 sm:grid-cols-5 gap-3 items-end">
+              <div>
+                <label className="block text-[11px] font-semibold text-stone-700 mb-1">
+                  Código del Cupón
+                </label>
+                <input
+                  type="text"
+                  value={couponCode}
+                  onChange={(e) => setCouponCode(e.target.value.toUpperCase())}
+                  placeholder="Ej. FAMILIA2026"
+                  className="w-full px-3 py-2 rounded-xl border border-stone-300 text-xs font-mono"
+                />
+                <span className="block text-[10px] text-stone-500 mt-0.5">
+                  Clave que ingresa la familia
+                </span>
+              </div>
+              <div>
+                <label className="block text-[11px] font-semibold text-stone-700 mb-1">
+                  Descripción de la Promoción
+                </label>
+                <input
+                  type="text"
+                  value={couponDesc}
+                  onChange={(e) => setCouponDesc(e.target.value)}
+                  placeholder="Ej. Promoción familiar"
+                  className="w-full px-3 py-2 rounded-xl border border-stone-300 text-xs"
+                />
+                <span className="block text-[10px] text-stone-500 mt-0.5">
+                  Motivo o campaña del cupón
+                </span>
+              </div>
+              <div>
+                <label className="block text-[11px] font-semibold text-stone-700 mb-1">
+                  Porcentaje de Descuento (%)
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={couponDiscount}
+                  onChange={(e) => setCouponDiscount(Number(e.target.value))}
+                  placeholder="Ej. 20"
+                  className="w-full px-3 py-2 rounded-xl border border-stone-300 text-xs"
+                />
+                <span className="block text-[10px] text-stone-500 mt-0.5">
+                  % de rebaja sobre el precio (0 a 100%)
+                </span>
+              </div>
+              <div>
+                <label className="block text-[11px] font-semibold text-stone-700 mb-1">
+                  Días de Regalo Adicionales
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  value={couponBonusDays}
+                  onChange={(e) => setCouponBonusDays(Number(e.target.value))}
+                  placeholder="Ej. 15"
+                  className="w-full px-3 py-2 rounded-xl border border-stone-300 text-xs"
+                />
+                <span className="block text-[10px] text-stone-500 mt-0.5">
+                  Días extra gratis sumados a la vigencia
+                </span>
+              </div>
+              <div className="pb-4">
+                <button
+                  onClick={handleCreateCoupon}
+                  className="w-full px-4 py-2 rounded-xl bg-stone-900 text-amber-300 text-xs font-semibold cursor-pointer"
+                >
+                  Crear Cupón
+                </button>
+              </div>
+            </div>
+
+            {overview.coupons.length > 0 && (
+              <div className="pt-3 border-t border-stone-200 space-y-2">
+                <h4 className="text-xs font-semibold text-stone-700">
+                  Cupones Promocionales Activos ({overview.coupons.length})
+                </h4>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5 text-xs">
+                  {overview.coupons.map((c) => (
+                    <div
+                      key={c.couponId}
+                      className="p-3 rounded-xl bg-stone-50 border border-stone-200 flex items-center justify-between gap-2"
+                    >
+                      <div>
+                        <span className="font-mono font-bold text-stone-900">{c.code}</span>
+                        <p className="text-[11px] text-stone-600">
+                          {c.description || 'Promoción YouForever'} •{' '}
+                          <strong>{c.discountPercent}% desc.</strong> •{' '}
+                          <strong>+{c.bonusDays} días</strong>
+                        </p>
+                      </div>
+                      <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-900 text-[10px] font-semibold">
+                        {c.isActive ? 'Activo' : 'Inactivo'}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="bg-white rounded-2xl border border-stone-200 p-6 space-y-3">
@@ -3535,28 +3967,7 @@ export const MiEsenciaAdminSection: React.FC<MiEsenciaAdminSectionProps> = ({ ad
 
       {/* 12. PESTAÑA: ESTADÍSTICAS Y COSTOS */}
       {activeSubTab === 'estadisticas' && overview && (
-        <div className="bg-white rounded-2xl border border-stone-200 p-6 space-y-4">
-          <h3 className="font-serif text-lg text-stone-900">
-            Métricas de Uso y Estimación de Consumo de IA por Avatar
-          </h3>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
-            {overview.subscriptions.map((sub) => (
-              <div
-                key={sub.avatarId}
-                className="p-4 rounded-xl border border-stone-200 space-y-1.5"
-              >
-                <p className="font-bold text-stone-900 text-sm">{sub.avatarDisplayName}</p>
-                <p>
-                  Mensajes del mes: <strong>{sub.messagesUsedThisMonth}</strong> /{' '}
-                  {sub.monthlyMessageQuota}
-                </p>
-                <p>
-                  Tokens de IA estimados: <strong>{sub.tokensEstimatedThisMonth}</strong> tokens
-                </p>
-              </div>
-            ))}
-          </div>
-        </div>
+        <SystemStatisticsPanel adminEmail={adminEmail} defaultScope="all" />
       )}
 
       {/* 13. PESTAÑA: CONFIGURACIÓN */}
@@ -3569,7 +3980,7 @@ export const MiEsenciaAdminSection: React.FC<MiEsenciaAdminSectionProps> = ({ ad
               </h3>
               <p className="text-xs text-stone-500">
                 Puedes activar o desactivar Mi Esencia en cualquier momento sin afectar las
-                entrevistas ni los libros PDF de ForeverYou.
+                entrevistas ni los libros PDF de YouForever.
               </p>
             </div>
             <button

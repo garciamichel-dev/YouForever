@@ -137,7 +137,10 @@ class StorageManager {
   private audios: Map<string, InterviewAudioRecord> = new Map();
   private manuscripts: Map<string, ManuscriptRecord> = new Map();
   private auditLogs: AuditLogRecord[] = [];
-  private admins: Set<string> = new Set(['garcia.michel@gmail.com']);
+  private admins: Set<string> = new Set([
+    'garcia.michel@gmail.com',
+    'youforever.team@gmail.com',
+  ]);
 
   // Privacy and Interviewee Admin entities
   private privacyConsents: Map<string, PrivacyConsentRecord> = new Map();
@@ -390,26 +393,48 @@ class StorageManager {
       ? deriveDeterministicAccessCode(tokenDoc.tokenHash).toUpperCase()
       : '';
 
+    const isValidMixedYf5 = (code: string): boolean => {
+      const m = /^YF-([A-Z0-9]{5})$/.exec((code || '').trim().toUpperCase());
+      if (!m) return false;
+      const suffix = m[1];
+      return /[A-Z]/.test(suffix) && /[0-9]/.test(suffix);
+    };
+
+    const aliasCodes = new Set<string>();
+    const aliasPlainTokens = new Set<string>();
+
     if (!tokenDoc.accessCode || tokenDoc.accessCode.trim().length === 0) {
       tokenDoc.accessCode = partDeterministicCode || hashDeterministicCode;
     } else {
-      tokenDoc.accessCode = extractCleanTokenOrCode(tokenDoc.accessCode).toUpperCase();
+      const cleanedExisting = extractCleanTokenOrCode(tokenDoc.accessCode).toUpperCase();
+      if (!isValidMixedYf5(cleanedExisting)) {
+        aliasCodes.add(cleanedExisting);
+        if (!(tokenDoc as any).legacyAccessCode) {
+          (tokenDoc as any).legacyAccessCode = cleanedExisting;
+        }
+        tokenDoc.accessCode = partDeterministicCode || hashDeterministicCode;
+      } else {
+        tokenDoc.accessCode = cleanedExisting;
+      }
     }
+    if ((tokenDoc as any).legacyAccessCode) {
+      aliasCodes.add(String((tokenDoc as any).legacyAccessCode).toUpperCase());
+    }
+
     if (!tokenDoc.plainToken || tokenDoc.plainToken.trim().length === 0) {
       tokenDoc.plainToken = deriveDeterministicPlainToken(tokenDoc.participantId || tokenDoc.tokenHash);
     }
 
     // Deduplicate any existing non-revoked token for the same participantId so a participant never has two conflicting tokens
-    const aliasCodes = new Set<string>();
-    const aliasPlainTokens = new Set<string>();
-
     if (tokenDoc.participantId && !tokenDoc.revoked) {
       for (const [existingHash, existingTok] of Array.from(this.tokens.entries())) {
         if (existingTok.participantId === tokenDoc.participantId && !existingTok.revoked && existingHash !== tokenDoc.tokenHash) {
           if (existingTok.accessCode) aliasCodes.add(existingTok.accessCode.toUpperCase());
+          if ((existingTok as any).legacyAccessCode) {
+            aliasCodes.add(String((existingTok as any).legacyAccessCode).toUpperCase());
+          }
           if (existingTok.plainToken) aliasPlainTokens.add(existingTok.plainToken);
 
-          // Prefer the original non-fallback token record (where id does not start with tok_part_ or accessCode is not the fallback partDeterministicCode)
           const incomingIsFallback =
             tokenDoc.id === `tok_${tokenDoc.participantId}` &&
             tokenDoc.accessCode === partDeterministicCode;
@@ -421,12 +446,18 @@ class StorageManager {
             tokenDoc.id = existingTok.id;
             tokenDoc.tokenHash = existingTok.tokenHash;
             tokenDoc.plainToken = existingTok.plainToken || tokenDoc.plainToken;
-            tokenDoc.accessCode = existingTok.accessCode || tokenDoc.accessCode;
+            if (isValidMixedYf5(existingTok.accessCode)) {
+              tokenDoc.accessCode = existingTok.accessCode.toUpperCase();
+            }
           } else if (!incomingIsFallback && existingIsFallback) {
             this.tokens.delete(existingHash);
           } else {
-            // Both are real or both are fallback: preserve non-deterministic accessCode if one has it
-            if (tokenDoc.accessCode === partDeterministicCode && existingTok.accessCode && existingTok.accessCode !== partDeterministicCode) {
+            if (
+              tokenDoc.accessCode === partDeterministicCode &&
+              existingTok.accessCode &&
+              isValidMixedYf5(existingTok.accessCode) &&
+              existingTok.accessCode !== partDeterministicCode
+            ) {
               tokenDoc.accessCode = existingTok.accessCode.toUpperCase();
             }
             this.tokens.delete(existingHash);
@@ -436,6 +467,15 @@ class StorageManager {
     }
 
     this.tokens.set(tokenDoc.tokenHash, tokenDoc);
+
+    // Sync participant in-memory accessCode if present
+    if (tokenDoc.participantId) {
+      const partObj = this.participants.get(tokenDoc.participantId) as any;
+      if (partObj && partObj.accessCode && partObj.accessCode !== tokenDoc.accessCode) {
+        aliasCodes.add(String(partObj.accessCode).toUpperCase());
+        partObj.accessCode = tokenDoc.accessCode;
+      }
+    }
 
     aliasPlainTokens.add(tokenDoc.plainToken);
     if (tokenDoc.participantId) {
@@ -2854,7 +2894,7 @@ class StorageManager {
 
     if (hasExistingBook && !quota.canModifyLayout && !hasUpdatedAnswers) {
       throw new Error(
-        'Has agotado tus opciones adicionales de modificación de maquetación. Para más modificaciones y/o actualizaciones por favor ponte en contacto con ForeverYou.'
+        'Has agotado tus opciones adicionales de modificación de maquetación. Para más modificaciones y/o actualizaciones por favor ponte en contacto con YouForever.'
       );
     }
 
@@ -4141,6 +4181,45 @@ class StorageManager {
       }
       return false;
     });
+  }
+
+  public getSystemStatisticsSummary() {
+    const interviews = Array.from(this.interviews.values());
+    const participants = Array.from(this.participants.values());
+    const tokens = Array.from(this.tokens.values());
+    const questions = Array.from(this.questions.values());
+    const answers = Array.from(this.answers.values());
+    const photos = Array.from(this.photos.values());
+    const audios = Array.from(this.audios.values());
+    const manuscripts = Array.from(this.manuscripts.values());
+    const bookVersions = Array.from(this.participantBookVersions.values());
+    const privacyConsents = Array.from(this.privacyConsents.values());
+    const bookShares = Array.from(this.bookShares.values());
+    const scheduledDeliveries = Array.from(this.scheduledDeliveries.values());
+    const secondaryAccess = Array.from(this.secondaryAccess.values());
+    const postMortemInstructions = Array.from(this.postMortemInstructions.values());
+    const arcoRequests = Array.from(this.arcoRequests.values());
+    const auditLogs = this.auditLogs;
+
+    return {
+      interviews,
+      participants,
+      tokens,
+      questions,
+      answers,
+      photosCount: photos.length,
+      audiosCount: audios.length,
+      manuscripts,
+      bookVersions,
+      privacyConsents,
+      bookShares,
+      scheduledDeliveries,
+      secondaryAccess,
+      postMortemInstructions,
+      arcoRequests,
+      auditLogsCount: auditLogs.length,
+      recentAuditLogs: auditLogs.slice(0, 25),
+    };
   }
 }
 

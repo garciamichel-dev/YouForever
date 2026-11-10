@@ -21,6 +21,7 @@ import {
 } from './demoGeminiService.ts';
 import { analyzeAndTranscribeAudioWithGemini } from './geminiService.ts';
 import { miEsenciaRouter } from './miEsencia/miEsenciaRouter.ts';
+import { miEsenciaStore } from './miEsencia/miEsenciaStore.ts';
 
 export const apiRouter: Router = express.Router();
 apiRouter.use(express.json({ limit: '100mb' }));
@@ -40,6 +41,50 @@ function checkDemoRateLimit(req: Request, maxPerWindow = 40, windowMs = 10 * 60 
   }
   entry.count += 1;
   return true;
+}
+
+// Anti-brute-force protection for access codes (YF-XXXXX) in Participant Portal & Mi Esencia
+const accessCodeBruteForceMap = new Map<
+  string,
+  { failedCount: number; windowStart: number; blockedUntil: number }
+>();
+
+export function checkAccessCodeBruteForce(req: Request): {
+  blocked: boolean;
+  retryAfterMinutes: number;
+} {
+  const key = String(req.ip || req.headers['x-forwarded-for'] || 'anon');
+  const now = Date.now();
+  const entry = accessCodeBruteForceMap.get(key);
+  if (!entry) return { blocked: false, retryAfterMinutes: 0 };
+  if (entry.blockedUntil > now) {
+    const mins = Math.max(1, Math.ceil((entry.blockedUntil - now) / 60000));
+    return { blocked: true, retryAfterMinutes: mins };
+  }
+  if (now - entry.windowStart > 60 * 1000) {
+    accessCodeBruteForceMap.delete(key);
+  }
+  return { blocked: false, retryAfterMinutes: 0 };
+}
+
+export function recordAccessCodeFailure(req: Request): void {
+  const key = String(req.ip || req.headers['x-forwarded-for'] || 'anon');
+  const now = Date.now();
+  const entry = accessCodeBruteForceMap.get(key);
+  if (!entry || now - entry.windowStart > 60 * 1000) {
+    accessCodeBruteForceMap.set(key, { failedCount: 1, windowStart: now, blockedUntil: 0 });
+    return;
+  }
+  entry.failedCount += 1;
+  if (entry.failedCount >= 8) {
+    entry.blockedUntil = now + 15 * 60 * 1000;
+  }
+  accessCodeBruteForceMap.set(key, entry);
+}
+
+export function resetAccessCodeFailures(req: Request): void {
+  const key = String(req.ip || req.headers['x-forwarded-for'] || 'anon');
+  accessCodeBruteForceMap.delete(key);
 }
 
 // Ensure Firestore state is hydrated before processing non-demo API requests
@@ -951,6 +996,15 @@ apiRouter.post('/interviews/restore-cache', requireAdmin, (req: Request, res: Re
 // 7. Participant Portal Endpoints
 apiRouter.post('/participant/session', (req: Request, res: Response) => {
   try {
+    const bruteCheck = checkAccessCodeBruteForce(req);
+    if (bruteCheck.blocked) {
+      res.status(429).json({
+        success: false,
+        error: `Demasiados intentos fallidos de código de acceso. Por seguridad anti-fuerza bruta, espera ${bruteCheck.retryAfterMinutes} minuto(s) antes de volver a intentar.`,
+      });
+      return;
+    }
+
     const { token, cachedInterviews, cachedBookVersions } = req.body;
     if (!token) {
       res.status(400).json({ success: false, error: 'Token de invitación requerido.' });
@@ -964,7 +1018,16 @@ apiRouter.post('/participant/session', (req: Request, res: Response) => {
       storage.restoreFromClientCache(cachedInterviews, cachedBookVersions);
     }
 
-    const { token: resolvedTokenDoc, interview, participant } = storage.resolveToken(token);
+    let resolvedResult;
+    try {
+      resolvedResult = storage.resolveToken(token);
+    } catch (resolveErr) {
+      recordAccessCodeFailure(req);
+      throw resolveErr;
+    }
+    resetAccessCodeFailures(req);
+
+    const { token: resolvedTokenDoc, interview, participant } = resolvedResult;
     const questions = storage.getQuestionsForVersion(interview.questionnaireVersionId);
     const answers = storage.getAnswersForInterview(interview.id);
     const otherParticipants = storage.getParticipantsForInterview(interview.id);
@@ -1780,6 +1843,28 @@ apiRouter.post('/demo/audio/transcribe', async (req: Request, res: Response) => 
     res.status(500).json({
       success: false,
       error: 'No fue posible transcribir el audio en este momento. Puedes escribir tu recuerdo con tu teclado.',
+    });
+  }
+});
+
+// Unified Real-Time System Statistics Endpoint (Quantitative + Qualitative across Interviews, Books, Privacy & Mi Esencia)
+apiRouter.get('/admin/system-statistics', requireAdmin, async (_req: Request, res: Response) => {
+  try {
+    await miEsenciaStore.ensureInitialized();
+    const core = storage.getSystemStatisticsSummary();
+    const miEsencia = miEsenciaStore.getAdminOverviewData();
+    res.json({
+      success: true,
+      data: {
+        generatedAt: new Date().toISOString(),
+        core,
+        miEsencia,
+      },
+    });
+  } catch (err: unknown) {
+    res.status(500).json({
+      success: false,
+      error: (err as Error).message || 'Error al obtener las estadísticas del sistema.',
     });
   }
 });

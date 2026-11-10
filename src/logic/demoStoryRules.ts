@@ -138,7 +138,7 @@ export const DEMO_TEMPORARY_PRIVACY_NOTICE =
   'Esta demostración utiliza inteligencia artificial para convertir tus recuerdos en un pequeño libro. Tus respuestas se conservarán temporalmente en este navegador durante la sesión y no se guardarán en nuestra base de datos. Para generar las preguntas y la historia, el texto necesario se enviará al proveedor de inteligencia artificial.';
 
 export const DEMO_CLOSING_PAGE_CENTRAL_TEXT = 'Esta historia continuará...';
-export const DEMO_CLOSING_PAGE_BRAND_MARK = '<< ForeverYou >>';
+export const DEMO_CLOSING_PAGE_BRAND_MARK = '<< YouForever >>';
 
 export const DEMO_MAX_BASE_QUESTIONS = 5;
 export const DEMO_MAX_AI_FOLLOW_UPS = 3;
@@ -857,11 +857,11 @@ export function buildSafeDemoPdfFilename(profile: DemoBasicProfile): string {
   if (profile.mode === 'pareja') {
     const p1 = sanitizeSegment(profile.partner1Name || 'Participante_1') || 'Participante_1';
     const p2 = sanitizeSegment(profile.partner2Name || 'Participante_2') || 'Participante_2';
-    return `ForeverYou_Nuestra_Historia_${p1}_y_${p2}.pdf`;
+    return `YouForever_Nuestra_Historia_${p1}_y_${p2}.pdf`;
   }
 
   const name = sanitizeSegment(profile.displayName || profile.fullName || 'Protagonista') || 'Protagonista';
-  return `ForeverYou_Mi_Historia_${name}.pdf`;
+  return `YouForever_Mi_Historia_${name}.pdf`;
 }
 
 /**

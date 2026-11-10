@@ -862,7 +862,7 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
               <ForeverYouLogo variant="horizontal" theme="light" size="sm" />
               <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-500/20 border border-amber-400/30 text-amber-200 text-xs font-semibold tracking-wide uppercase">
                 <Sparkles className="w-3.5 h-3.5" />
-                Estudio Editorial ForeverYou • Entrevista Concluida
+                Estudio Editorial YouForever • Entrevista Concluida
               </div>
             </div>
             <h2 className="text-2xl sm:text-3xl font-serif font-bold">
@@ -1512,7 +1512,7 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
                         'Esta historia continuará...'}
                       »
                     </em>
-                    ) acompañada del sello <strong>&lt;&lt; ForeverYou &gt;&gt;</strong>.
+                    ) acompañada del sello <strong>&lt;&lt; YouForever &gt;&gt;</strong>.
                   </div>
 
                   {/* Chapters & Paragraphs Editor */}
@@ -1813,7 +1813,7 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
                     </p>
                     <p className="text-amber-800 mt-1">
                       Para más modificaciones y/o actualizaciones de tu libro, por favor ponte en contacto con{' '}
-                      <strong className="font-bold">ForeverYou</strong>.
+                      <strong className="font-bold">YouForever</strong>.
                     </p>
                   </div>
                 )}
@@ -2014,7 +2014,7 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
                 Una vez agotadas tus opciones adicionales de modificación,{' '}
                 <strong>no tendrás más cambios y/o modificaciones disponibles</strong> para tu libro
                 en el portal, y para más modificaciones y/o actualizaciones deberás ponerte en
-                contacto directamente con <strong>ForeverYou</strong>.
+                contacto directamente con <strong>YouForever</strong>.
               </p>
               <p className="text-xs text-stone-600 pt-1 border-t border-amber-200/70">
                 Nota: Tus respuestas de la entrevista permanecen en modo de solo lectura. Al guardar

@@ -988,7 +988,7 @@ export const DemoFreeTrialView: React.FC<DemoFreeTrialViewProps> = ({
               </h1>
 
               <p className="text-stone-600 text-sm sm:text-base max-w-2xl mx-auto leading-relaxed">
-                Vive la experiencia de ForeverYou de forma gratuita. Responde 8 preguntas en total (5 preguntas esenciales y 3 generadas mediante IA), elige entre 5 portadas de colección y 5 diseños interiores, y descarga al instante tu pequeño libro autobiográfico en PDF.
+                Vive la experiencia de YouForever de forma gratuita. Responde 8 preguntas en total (5 preguntas esenciales y 3 generadas mediante IA), elige entre 5 portadas de colección y 5 diseños interiores, y descarga al instante tu pequeño libro autobiográfico en PDF.
               </p>
 
               <div className="pt-2 flex flex-col sm:flex-row items-center justify-center gap-4">
@@ -1765,7 +1765,7 @@ export const DemoFreeTrialView: React.FC<DemoFreeTrialViewProps> = ({
                 ¿Cómo quieres que esté escrita tu historia?
               </h2>
               <p className="text-xs sm:text-sm text-stone-600 max-w-xl mx-auto">
-                Elige la perspectiva literaria con la que ForeverYou redactará los capítulos de tu libro a partir de tus recuerdos reales.
+                Elige la perspectiva literaria con la que YouForever redactará los capítulos de tu libro a partir de tus recuerdos reales.
               </p>
             </div>
 
@@ -1904,7 +1904,7 @@ export const DemoFreeTrialView: React.FC<DemoFreeTrialViewProps> = ({
               <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-stone-100 pb-4">
                 <div>
                   <span className="text-xs font-semibold text-amber-800 uppercase tracking-wider">
-                    Estudio Editorial ForeverYou
+                    Estudio Editorial YouForever
                   </span>
                   <h2 className="font-serif text-2xl sm:text-3xl font-bold text-stone-900">
                     Diseña el libro que contará tu historia
@@ -3280,7 +3280,7 @@ export const DemoFreeTrialView: React.FC<DemoFreeTrialViewProps> = ({
             <div className="flex items-start justify-between gap-4 border-b border-stone-100 pb-4">
               <div>
                 <span className="text-xs font-bold text-amber-800 uppercase tracking-wider">
-                  Contratación ForeverYou
+                  Contratación YouForever
                 </span>
                 <h3 className="font-serif text-2xl font-bold text-stone-900">
                   Crear mi libro autobiográfico completo
@@ -3307,7 +3307,7 @@ export const DemoFreeTrialView: React.FC<DemoFreeTrialViewProps> = ({
                 className="py-3 px-4 bg-emerald-800 hover:bg-emerald-900 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-2 transition"
               >
                 <MessageCircle className="w-4 h-4" />
-                <span>Solicitar por WhatsApp ahora</span>
+                <span>WhatsApp: +52 9681040015</span>
               </a>
 
               <a
@@ -3315,7 +3315,7 @@ export const DemoFreeTrialView: React.FC<DemoFreeTrialViewProps> = ({
                 className="py-3 px-4 bg-stone-100 hover:bg-stone-200 text-stone-900 border border-stone-300 text-xs font-bold rounded-xl flex items-center justify-center gap-2 transition"
               >
                 <Mail className="w-4 h-4 text-amber-800" />
-                <span>Solicitar por Correo Electrónico</span>
+                <span>youforever.team@gmail.com</span>
               </a>
             </div>
 

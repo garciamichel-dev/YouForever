@@ -148,7 +148,8 @@ export default function App() {
 
           const email = user.email.toLowerCase().trim();
           setAdminUser(email);
-          const authorized = email === 'garcia.michel@gmail.com';
+          const authorized =
+            email === 'garcia.michel@gmail.com' || email === 'youforever.team@gmail.com';
           setIsAuthorizedAdmin(authorized);
 
           const urlParams = new URLSearchParams(window.location.search);
@@ -192,7 +193,8 @@ export default function App() {
       if (result.user?.email) {
         const email = result.user.email.toLowerCase().trim();
         setAdminUser(email);
-        const authorized = email === 'garcia.michel@gmail.com';
+        const authorized =
+          email === 'garcia.michel@gmail.com' || email === 'youforever.team@gmail.com';
         setIsAuthorizedAdmin(authorized);
         if (authorized) {
           setCurrentView('admin');
@@ -308,7 +310,7 @@ export default function App() {
                 <div className="flex items-center gap-2.5">
                   <ForeverYouLogo variant="app_icon" size="xs" />
                   <p className="font-serif text-stone-300">
-                    ForeverYou • Plataforma de Entrevistas de Vida &amp; Patrimonio Testimonial
+                    YouForever • Plataforma de Entrevistas de Vida &amp; Patrimonio Testimonial
                   </p>
                 </div>
                 <div className="flex items-center space-x-4 text-[11px] text-stone-400">

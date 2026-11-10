@@ -1,6 +1,6 @@
 {
-  "summary":  "Plan de implementación para el control manual de límites y contadores de mensajes diarios (por avatar, por código familiar individual y en bloque para todos) desde el panel de administración de Mi Esencia, con sincronización automática en vivo en la ventana de conversación del familiar (/miesencia) sin recargar la página.",
-  "updatedAt":  "2026-11-10T03:04:25.591713285Z",
+  "summary":  "Plan de implementación completo que incluye: (1) unificación de las 5 pestañas de la barra superior (Navbar) sin íconos con los textos 'Mi Esencia' y 'Prueba Gratuita', y (2) creación del nuevo módulo integral de 'Estadísticas' (cuantitativas y cualitativas en tiempo real, con filtros por entrevista/avatar y exportación de reportes) tanto en el Panel Administrador como en Mi Esencia.",
+  "updatedAt":  "2026-11-10T20:47:40.551224321Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

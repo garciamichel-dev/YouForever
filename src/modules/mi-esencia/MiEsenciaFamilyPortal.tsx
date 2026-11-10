@@ -542,7 +542,7 @@ export const MiEsenciaFamilyPortal: React.FC<MiEsenciaFamilyPortalProps> = ({
               </div>
               <p className="text-stone-700 dark:text-stone-300">
                 Es la verdad biográfica original de la persona entrevistada, tomada directamente del{' '}
-                <strong>PDF Compilado Testimonial Fidedigno</strong> con todas sus preguntas y respuestas reales.
+                <strong>Compilado Testimonial Fidedigno</strong> con todas sus preguntas y respuestas reales.
                 Es <strong>inmutable</strong>: ningún familiar ni conversación posterior puede borrar, alterar ni contradecir lo que dejó contado de viva voz.
               </p>
             </div>
@@ -636,7 +636,7 @@ export const MiEsenciaFamilyPortal: React.FC<MiEsenciaFamilyPortalProps> = ({
               <p className="text-stone-700 dark:text-stone-300">
                 Si deseas contar con <strong>más mensajes diarios</strong> y/o{' '}
                 <strong>aumentar tu cuota</strong> de conversación para ti o tu familia, por favor{' '}
-                <strong>ponte en contacto con ForeverYou</strong> para indicarte los{' '}
+                <strong>ponte en contacto con YouForever</strong> para indicarte los{' '}
                 <strong>planes de mejoras y actualizaciones disponibles</strong>.
               </p>
             </div>
@@ -724,7 +724,7 @@ export const MiEsenciaFamilyPortal: React.FC<MiEsenciaFamilyPortalProps> = ({
                   type="text"
                   value={personalCode}
                   onChange={(e) => setPersonalCode(e.target.value.toUpperCase())}
-                  placeholder="Ej. FY-ANA-8F3K-29A1"
+                  placeholder="Ej. YF-8K4M2"
                   className="w-full pl-10 pr-4 py-2.5 bg-stone-50 dark:bg-stone-950 border border-stone-300 dark:border-stone-700 rounded-xl text-sm font-mono text-amber-800 dark:text-amber-200 placeholder:text-stone-400 dark:placeholder:text-stone-600 focus:outline-none focus:border-amber-500"
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') handleVerifyCode();
@@ -768,7 +768,7 @@ export const MiEsenciaFamilyPortal: React.FC<MiEsenciaFamilyPortalProps> = ({
         </div>
 
         <footer className="text-center text-xs text-stone-500 dark:text-stone-600 py-2">
-          ForeverYou • Subsistema Mi Esencia (/miesencia)
+          YouForever • Subsistema Mi Esencia (/miesencia)
         </footer>
       </div>
     );
@@ -893,7 +893,7 @@ export const MiEsenciaFamilyPortal: React.FC<MiEsenciaFamilyPortalProps> = ({
             <button
               type="button"
               onClick={() => setShowFaqModal(true)}
-              title="Ver detalles de cuota diaria y cómo solicitar más mensajes a ForeverYou"
+              title="Ver detalles de cuota diaria y cómo solicitar más mensajes a YouForever"
               className={`px-3 py-1.5 rounded-xl border text-xs font-medium transition flex items-center gap-2 cursor-pointer ${
                 dailyMessagesRemaining <= 5
                   ? 'bg-rose-950/60 hover:bg-rose-900/60 border-rose-700/60 text-rose-200'

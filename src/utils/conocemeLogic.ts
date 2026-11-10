@@ -491,31 +491,35 @@ export function validateInquiryForm(input: InquiryFormInput): InquiryValidationR
   };
 }
 
+export const OFFICIAL_CONTACT_EMAIL = 'youforever.team@gmail.com';
+export const OFFICIAL_WHATSAPP_DISPLAY = '+52 9681040015';
+export const OFFICIAL_WHATSAPP_NUMBER = '529681040015';
+
 export function buildWhatsAppInquiryUrl(input: Partial<InquiryFormInput>): string {
   const modalityLabels: Record<string, string> = {
     individual: 'Legado Individual',
     compartida: 'Historia Compartida (Pareja)',
-    familiar: 'Edición Familiar Especial',
+    familiar: 'Edición Familiar + Mi Esencia',
   };
   const chosenModality = modalityLabels[input.modality || 'individual'] || 'Legado Individual';
   const namePart = input.fullName?.trim() ? `Soy ${input.fullName.trim()}. ` : '';
   const relationPart = input.recipientRelation?.trim()
-    ? `Me interesa regalar ForeverYou para: ${input.recipientRelation.trim()} (${chosenModality}). `
-    : `Me interesa conocer más sobre ForeverYou en la modalidad ${chosenModality}. `;
+    ? `Me interesa regalar YouForever para: ${input.recipientRelation.trim()} (${chosenModality}). `
+    : `Me interesa conocer más sobre YouForever en la modalidad ${chosenModality}. `;
   const extraMsg = input.message?.trim() ? `Detalles adicionales: ${input.message.trim()}` : '';
 
-  const fullText = `Hola, vengo de la página /conoceme de ForeverYou. ${namePart}${relationPart}${extraMsg}`.trim();
-  return `https://wa.me/?text=${encodeURIComponent(fullText)}`;
+  const fullText = `Hola, vengo de la página /conoceme de YouForever. ${namePart}${relationPart}${extraMsg}`.trim();
+  return `https://wa.me/${OFFICIAL_WHATSAPP_NUMBER}?text=${encodeURIComponent(fullText)}`;
 }
 
 export function buildMailtoInquiryUrl(input: Partial<InquiryFormInput>): string {
-  const subject = `Interés en ForeverYou - Regalo de Historia de Vida${
+  const subject = `Interés en YouForever - Regalo de Historia de Vida${
     input.recipientRelation?.trim() ? ` (${input.recipientRelation.trim()})` : ''
   }`;
   const bodyLines = [
-    'Hola equipo de ForeverYou,',
+    'Hola equipo de YouForever,',
     '',
-    'Me gustaría recibir atención personalizada para adquirir ForeverYou.',
+    'Me gustaría recibir atención personalizada para adquirir YouForever.',
     input.fullName?.trim() ? `• Nombre: ${input.fullName.trim()}` : '',
     input.contactInfo?.trim() ? `• Contacto: ${input.contactInfo.trim()}` : '',
     input.recipientRelation?.trim() ? `• Para quién es la entrevista: ${input.recipientRelation.trim()}` : '',
@@ -525,5 +529,5 @@ export function buildMailtoInquiryUrl(input: Partial<InquiryFormInput>): string 
     .filter(Boolean)
     .join('\n');
 
-  return `mailto:garcia.michel@gmail.com?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(bodyLines)}`;
+  return `mailto:${OFFICIAL_CONTACT_EMAIL}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(bodyLines)}`;
 }

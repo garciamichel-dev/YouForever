@@ -118,7 +118,7 @@ test('buildSafeDemoPdfFilename produces clean human-readable filenames without s
   };
   assert.equal(
     buildSafeDemoPdfFilename(individualProfile),
-    'ForeverYou_Mi_Historia_Maria_Elena.pdf'
+    'YouForever_Mi_Historia_Maria_Elena.pdf'
   );
 
   const coupleProfile: DemoBasicProfile = {
@@ -130,7 +130,7 @@ test('buildSafeDemoPdfFilename produces clean human-readable filenames without s
   };
   assert.equal(
     buildSafeDemoPdfFilename(coupleProfile),
-    'ForeverYou_Nuestra_Historia_Ana_Sofia_y_Carlos_Andres.pdf'
+    'YouForever_Nuestra_Historia_Ana_Sofia_y_Carlos_Andres.pdf'
   );
 });
 
@@ -191,7 +191,7 @@ test('composeBookPages always generates between 5 and 10 pages and enforces mand
   assert.equal(lastPage.centralClosingText, DEMO_CLOSING_PAGE_CENTRAL_TEXT);
   assert.equal(lastPage.centralClosingText, 'Esta historia continuará...');
   assert.equal(lastPage.bottomRightBrand, DEMO_CLOSING_PAGE_BRAND_MARK);
-  assert.equal(lastPage.bottomRightBrand, '<< ForeverYou >>');
+  assert.equal(lastPage.bottomRightBrand, '<< YouForever >>');
   assert.equal(lastPage.showPageNumber, false);
 });
 

@@ -87,7 +87,7 @@ export const PrivacyAdminPanel: React.FC<PrivacyAdminPanelProps> = ({ adminEmail
                 Políticas de Privacidad y Cumplimiento Normativo
               </h3>
               <p className="text-xs text-stone-400">
-                Aviso de Privacidad Integral de ForeverYou (17 Secciones) • Verificabilidad Criptográfica SHA-256
+                Aviso de Privacidad Integral de YouForever (17 Secciones) • Verificabilidad Criptográfica SHA-256
               </p>
             </div>
           </div>

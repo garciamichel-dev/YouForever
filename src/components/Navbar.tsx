@@ -1,10 +1,10 @@
 import React from 'react';
-import { ShieldCheck, LogOut, Sparkles, ExternalLink } from 'lucide-react';
+import { ShieldCheck, LogOut } from 'lucide-react';
 import { ForeverYouLogo } from './ForeverYouLogo';
 import { ThemeToggleButton } from '../context/ThemeContext';
 
 interface NavbarProps {
-  currentView: 'admin' | 'participant' | 'conoceme' | 'demo';
+  currentView: 'admin' | 'participant' | 'conoceme' | 'demo' | 'mi_esencia';
   onSelectView: (view: 'admin' | 'participant' | 'conoceme' | 'demo' | 'mi_esencia') => void;
   adminEmail: string | null;
   isAuthorizedAdmin: boolean;
@@ -22,6 +22,13 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenFaq: _onOpenFaq,
   onOpenPrivacyNotice: _onOpenPrivacyNotice,
 }) => {
+  const getTabClassName = (isActive: boolean) =>
+    `px-3 py-1.5 rounded-md text-xs sm:text-sm font-medium transition-colors cursor-pointer ${
+      isActive
+        ? 'bg-amber-800/80 text-amber-100 border border-amber-600/40 shadow-xs'
+        : 'text-stone-300 hover:text-white hover:bg-stone-800'
+    }`;
+
   return (
     <header className="bg-stone-900 text-stone-100 border-b border-stone-800 sticky top-0 z-40 shadow-sm">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -45,21 +52,13 @@ export const Navbar: React.FC<NavbarProps> = ({
               <>
                 <button
                   onClick={() => onSelectView('admin')}
-                  className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs sm:text-sm font-medium transition-colors cursor-pointer ${
-                    currentView === 'admin'
-                      ? 'bg-amber-800/80 text-amber-100 border border-amber-600/40 shadow-xs'
-                      : 'text-stone-300 hover:text-white hover:bg-stone-800'
-                  }`}
+                  className={getTabClassName(currentView === 'admin')}
                 >
-                  <span>Panel Administrador</span>
+                  Panel Administrador
                 </button>
                 <button
                   onClick={() => onSelectView('participant')}
-                  className={`px-3 py-1.5 rounded-md text-xs sm:text-sm font-medium transition-colors cursor-pointer ${
-                    currentView === 'participant'
-                      ? 'bg-amber-800/80 text-amber-100 border border-amber-600/40 shadow-xs'
-                      : 'text-stone-300 hover:text-white hover:bg-stone-800'
-                  }`}
+                  className={getTabClassName(currentView === 'participant')}
                 >
                   Portal del Participante
                 </button>
@@ -69,39 +68,27 @@ export const Navbar: React.FC<NavbarProps> = ({
                     e.preventDefault();
                     onSelectView('mi_esencia');
                   }}
-                  className="flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs sm:text-sm font-medium transition-colors cursor-pointer text-amber-300 hover:text-amber-100 bg-amber-950/50 hover:bg-amber-900/60 border border-amber-700/50"
+                  className={getTabClassName(currentView === 'mi_esencia')}
                   title="Ir al portal familiar Mi Esencia (/miesencia)"
                 >
-                  <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-                  <span>Mi Esencia (/miesencia)</span>
-                  <ExternalLink className="w-3 h-3 text-amber-400/80" />
+                  Mi Esencia
                 </a>
                 <button
                   onClick={() => onSelectView('conoceme')}
-                  className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs sm:text-sm font-medium transition-colors cursor-pointer ${
-                    currentView === 'conoceme'
-                      ? 'bg-amber-800/80 text-amber-100 border border-amber-600/40 shadow-xs'
-                      : 'text-amber-300 hover:text-amber-100 hover:bg-stone-800'
-                  }`}
+                  className={getTabClassName(currentView === 'conoceme')}
                   title="Ir a la sección comercial Conóceme (/conoceme)"
                 >
-                  <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-                  <span>Conóceme</span>
+                  Conóceme
                 </button>
               </>
             )}
 
             <button
               onClick={() => onSelectView('demo')}
-              className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs sm:text-sm font-medium transition-colors cursor-pointer ${
-                currentView === 'demo'
-                  ? 'bg-amber-700 text-amber-50 border border-amber-500/60 shadow-xs'
-                  : 'text-amber-200 hover:text-white bg-stone-800/70 hover:bg-stone-800 border border-amber-700/40'
-              }`}
-              title="Prueba gratuita — Mi historia en 8 preguntas (/demo)"
+              className={getTabClassName(currentView === 'demo')}
+              title="Prueba Gratuita — Mi historia en 8 preguntas (/demo)"
             >
-              <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-              <span>Prueba gratuita</span>
+              Prueba Gratuita
             </button>
           </nav>
 
@@ -131,4 +118,3 @@ export const Navbar: React.FC<NavbarProps> = ({
     </header>
   );
 };
-

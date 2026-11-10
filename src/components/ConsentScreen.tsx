@@ -169,7 +169,7 @@ export const ConsentScreen: React.FC<ConsentScreenProps> = ({
         </div>
         <div className="inline-flex items-center space-x-2 px-3 py-1 rounded-full bg-amber-100/80 text-amber-950 text-xs font-semibold tracking-wide border border-amber-200">
           <Shield className="w-3.5 h-3.5 text-amber-800" />
-          <span>Consentimiento Informado Obligatorio • ForeverYou</span>
+          <span>Consentimiento Informado Obligatorio • YouForever</span>
         </div>
         <h1 className="font-serif text-3xl sm:text-4xl font-bold text-stone-900 leading-tight">
           Antes de comenzar tu historia
@@ -182,7 +182,7 @@ export const ConsentScreen: React.FC<ConsentScreenProps> = ({
       {/* Intro Warm Narrative Box */}
       <div className="bg-amber-50/70 border border-amber-200/90 rounded-3xl p-6 sm:p-7 shadow-xs text-stone-800 space-y-3">
         <p className="text-sm leading-relaxed text-stone-700">
-          En <strong>ForeverYou</strong> queremos ayudarte a conservar tus recuerdos, experiencias, fotografías y testimonios para crear tu libro autobiográfico.
+          En <strong>YouForever</strong> queremos ayudarte a conservar tus recuerdos, experiencias, fotografías y testimonios para crear tu libro autobiográfico.
         </p>
         <p className="text-sm leading-relaxed text-stone-700">
           Antes de comenzar, queremos explicarte con total claridad cómo utilizaremos tu información, quién podrá acceder a ella y qué derechos tienes.
@@ -271,7 +271,7 @@ export const ConsentScreen: React.FC<ConsentScreenProps> = ({
               </span>
             </div>
             <p className="text-xs sm:text-sm text-stone-800 font-medium leading-relaxed mt-0.5">
-              He tenido acceso al Aviso de Privacidad Integral de ForeverYou y reconozco haber recibido información sobre el tratamiento de mis datos personales, sus finalidades y mis derechos.
+              He tenido acceso al Aviso de Privacidad Integral de YouForever y reconozco haber recibido información sobre el tratamiento de mis datos personales, sus finalidades y mis derechos.
             </p>
           </div>
         </label>
@@ -297,7 +297,7 @@ export const ConsentScreen: React.FC<ConsentScreenProps> = ({
               </span>
             </div>
             <p className="text-xs sm:text-sm text-stone-800 font-medium leading-relaxed mt-0.5">
-              Autorizo el tratamiento de los datos personales que proporcione durante mi entrevista, incluidos mis testimonios escritos, grabaciones y fotografías, para registrar, preservar, organizar y elaborar mi libro autobiográfico mediante ForeverYou y sus proveedores tecnológicos autorizados, conforme al Aviso de Privacidad.
+              Autorizo el tratamiento de los datos personales que proporcione durante mi entrevista, incluidos mis testimonios escritos, grabaciones y fotografías, para registrar, preservar, organizar y elaborar mi libro autobiográfico mediante YouForever y sus proveedores tecnológicos autorizados, conforme al Aviso de Privacidad.
             </p>
           </div>
         </label>
@@ -427,7 +427,7 @@ export const ConsentScreen: React.FC<ConsentScreenProps> = ({
               </span>
             </div>
             <p className="text-xs sm:text-sm text-stone-800 leading-relaxed mt-0.5">
-              Autorizo que los testimonios o materiales que seleccione específicamente puedan utilizarse con fines promocionales de ForeverYou.
+              Autorizo que los testimonios o materiales que seleccione específicamente puedan utilizarse con fines promocionales de YouForever.
             </p>
           </div>
         </label>

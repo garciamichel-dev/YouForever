@@ -276,7 +276,7 @@ export const PrivacySettingsModal: React.FC<PrivacySettingsModalProps> = ({
                 Mi Privacidad y Mis Autorizaciones
               </h3>
               <p className="text-xs text-stone-500">
-                Panel de Control de Privacidad y Legado • ForeverYou
+                Panel de Control de Privacidad y Legado • YouForever
               </p>
             </div>
           </div>
@@ -557,7 +557,7 @@ export const PrivacySettingsModal: React.FC<PrivacySettingsModalProps> = ({
                       Uso promocional de fragmentos (Opcional)
                     </span>
                     <span className="text-xs text-stone-500">
-                      Permite utilizar fragmentos de tu historia en comunicaciones institucionales de ForeverYou.
+                      Permite utilizar fragmentos de tu historia en comunicaciones institucionales de YouForever.
                     </span>
                   </div>
                 </label>
@@ -900,7 +900,7 @@ export const PrivacySettingsModal: React.FC<PrivacySettingsModalProps> = ({
 
         {/* Modal Footer */}
         <div className="p-4 border-t border-stone-200 bg-stone-50 flex items-center justify-between text-xs text-stone-500 shrink-0">
-          <span>ForeverYou • Responsable de Datos: {RESPONSIBLE_CONTACT_EMAIL}</span>
+          <span>YouForever • Responsable de Datos: {RESPONSIBLE_CONTACT_EMAIL}</span>
           <button
             type="button"
             onClick={onClose}
