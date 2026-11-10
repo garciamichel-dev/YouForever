@@ -1,6 +1,6 @@
 {
-  "summary":  "Plan de implementación actualizado con conmutador global de Modo Claro y Modo Oscuro (ícono Sol/Luna) en todas las páginas de ForeverYou, además de paridad con ChatGPT Web en Mi Esencia, borrado definitivo con advertencia en BDD, ajuste manual de cuotas mensuales, edición completa de planes y códigos familiares agrupados por avatar, aceptación única del aviso de transparencia, menú de Preguntas Frecuentes (Niveles A, B y C), sugerencias dinámicas adaptadas al avatar, limpieza de conmutaciones de respaldo y ruta oficial /miesencia.",
-  "updatedAt":  "2026-11-09T18:21:47.760807003Z",
+  "summary":  "Plan de implementación para el control manual de límites y contadores de mensajes diarios (por avatar, por código familiar individual y en bloque para todos) desde el panel de administración de Mi Esencia, con sincronización automática en vivo en la ventana de conversación del familiar (/miesencia) sin recargar la página.",
+  "updatedAt":  "2026-11-10T03:04:25.591713285Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

@@ -1,6 +1,7 @@
 {
   "name": "ForeverYou - Entrevistas de Vida Asistidas por IA",
-  "description": "ForeverYou: Plataforma full-stack para recopilar y preservar historias de vida y patrimonio familiar mediante entrevistas éticas asistidas por IA.",
+  "description": "YouForever transforma recuerdos, experiencias y emociones en un legado eterno, mediante libros autobiográficos personalizados y conversaciones impulsadas por inteligencia artificial que recrean la esencia de tus seres queridos.",
   "requestFramePermissions": ["microphone", "camera"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
+

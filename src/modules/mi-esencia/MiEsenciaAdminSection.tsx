@@ -227,6 +227,17 @@ export const MiEsenciaAdminSection: React.FC<MiEsenciaAdminSectionProps> = ({ ad
     Record<string, { used: number; quota: number }>
   >({});
 
+  // Control manual de uso diario (por defecto, masivo, por avatar y por código familiar individual)
+  const [bulkDailyQuotaInput, setBulkDailyQuotaInput] = useState<number>(50);
+  const [bulkResetAllDailyCounters, setBulkResetAllDailyCounters] = useState<boolean>(false);
+  const [bulkSaveDailyAsDefault, setBulkSaveDailyAsDefault] = useState<boolean>(true);
+  const [perAvatarDailyQuotaEdits, setPerAvatarDailyQuotaEdits] = useState<Record<string, number>>(
+    {}
+  );
+  const [perInterlocutorDailyEdits, setPerInterlocutorDailyEdits] = useState<
+    Record<string, { usedToday: number; dailyLimit: number }>
+  >({});
+
   // Edición manual de planes y precios activos
   const [editingPlan, setEditingPlan] = useState<MiEsenciaPlanRecord | null>(null);
 
@@ -242,12 +253,16 @@ export const MiEsenciaAdminSection: React.FC<MiEsenciaAdminSectionProps> = ({ ad
     affectionateCallName: string;
     email: string;
     customPersonalCode: string;
+    customDailyMessageLimit: number;
+    messagesSentToday: number;
   }>({
     fullName: '',
     relationshipToPerson: '',
     affectionateCallName: '',
     email: '',
     customPersonalCode: '',
+    customDailyMessageLimit: 50,
+    messagesSentToday: 0,
   });
 
   const showNotice = (type: 'ok' | 'err', text: string) => {
@@ -775,6 +790,104 @@ export const MiEsenciaAdminSection: React.FC<MiEsenciaAdminSectionProps> = ({ ad
       await fetchOverview();
     } catch {
       showNotice('err', 'Error al aplicar el ajuste mensual masivo.');
+    }
+  };
+
+  const handleUpdateAvatarDailyUsage = async (params: {
+    avatarId: string;
+    dailyMessageQuotaPerInterlocutor?: number;
+    propagateToAllAvatarInterlocutors?: boolean;
+    resetDailyCountersForAvatar?: boolean;
+  }) => {
+    try {
+      const res = await fetch('/api/mi-esencia/admin/subscriptions/daily-usage', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-email': adminEmail,
+        },
+        body: JSON.stringify(params),
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        showNotice('err', json.error || 'No se pudo actualizar el límite diario del avatar.');
+        return;
+      }
+      showNotice(
+        'ok',
+        params.resetDailyCountersForAvatar
+          ? 'Límite diario del avatar actualizado y contadores de hoy reiniciados a 0.'
+          : 'Límite diario del avatar actualizado y sincronizado en vivo con sus familiares.'
+      );
+      await fetchOverview();
+    } catch {
+      showNotice('err', 'Error al actualizar el límite diario del avatar.');
+    }
+  };
+
+  const handleApplyBulkDailyUsage = async () => {
+    try {
+      const res = await fetch('/api/mi-esencia/admin/subscriptions/daily-usage-bulk', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-email': adminEmail,
+        },
+        body: JSON.stringify({
+          dailyMessageQuota: bulkDailyQuotaInput,
+          resetAllDailyCounters: bulkResetAllDailyCounters,
+          saveAsDefaultForNewAvatars: bulkSaveDailyAsDefault,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        showNotice('err', json.error || 'No se pudo aplicar el ajuste masivo de límite diario.');
+        return;
+      }
+      showNotice(
+        'ok',
+        `Límite diario (${bulkDailyQuotaInput} msjs/día) aplicado en bloque a ${
+          json.data?.updatedAvatarsCount ?? 0
+        } avatar(es) y ${json.data?.updatedInterlocutorsCount ?? 0} familiar(es)${
+          bulkResetAllDailyCounters ? ' con reinicio de mensajes de hoy a 0' : ''
+        }.`
+      );
+      await fetchOverview();
+    } catch {
+      showNotice('err', 'Error al aplicar el ajuste masivo de límite diario.');
+    }
+  };
+
+  const handleUpdateInterlocutorDailyUsage = async (params: {
+    interlocutorId: string;
+    interlocutorName: string;
+    customDailyMessageLimit?: number;
+    messagesSentToday?: number;
+    resetDailyCounter?: boolean;
+  }) => {
+    try {
+      const res = await fetch('/api/mi-esencia/admin/interlocutors/daily-usage', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-email': adminEmail,
+        },
+        body: JSON.stringify(params),
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        showNotice('err', json.error || 'No se pudo actualizar la cuota diaria del familiar.');
+        return;
+      }
+      showNotice(
+        'ok',
+        `Cuota diaria de ${params.interlocutorName} actualizada en vivo (${
+          json.data?.messagesSentToday ?? 0
+        } usados hoy / límite ${json.data?.customDailyMessageLimit ?? params.customDailyMessageLimit ?? 50} msjs/día).`
+      );
+      await fetchOverview();
+    } catch {
+      showNotice('err', 'Error al actualizar la cuota diaria del familiar.');
     }
   };
 
@@ -1933,20 +2046,86 @@ export const MiEsenciaAdminSection: React.FC<MiEsenciaAdminSectionProps> = ({ ad
                 onClick={handleApplyBulkMonthlyUsage}
                 className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-stone-950 text-xs font-semibold cursor-pointer"
               >
-                Aplicar a Todos los Avatares
+                Aplicar Límite Mensual a Todos
+              </button>
+            </div>
+          </div>
+
+          {/* Control Manual de Uso Diario de Mensajes (Por Defecto y Masivo para Todos) */}
+          <div className="bg-white rounded-2xl border border-stone-200 p-6 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h4 className="font-serif text-base font-bold text-stone-900">
+                  Control Manual de Límite Diario de Mensajes (Por Defecto y en Bloque para Todos)
+                </h4>
+                <p className="text-xs text-stone-500">
+                  Configura el límite de mensajes diarios por familiar para todos los avatares y/o
+                  reinicia a 0 los mensajes usados hoy. Los cambios se sincronizan automáticamente
+                  en vivo en la ventana <code>/miesencia</code>.
+                </p>
+              </div>
+              <span className="px-3 py-1 rounded-full bg-emerald-100 text-emerald-900 text-xs font-semibold">
+                Límite diario por defecto: {overview.config.defaultDailyMessageQuota ?? 50} msjs/día
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-end">
+              <div>
+                <label className="block text-xs font-semibold text-stone-700 mb-1">
+                  Límite Diario Configurable (msjs/día)
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  value={bulkDailyQuotaInput}
+                  onChange={(e) => setBulkDailyQuotaInput(Math.max(0, Number(e.target.value)))}
+                  className="w-full px-3 py-2 rounded-xl border border-stone-300 text-xs"
+                />
+              </div>
+
+              <label className="flex items-center gap-2 text-xs text-stone-700 cursor-pointer pb-2">
+                <input
+                  type="checkbox"
+                  checked={bulkSaveDailyAsDefault}
+                  onChange={(e) => setBulkSaveDailyAsDefault(e.target.checked)}
+                  className="rounded border-stone-300"
+                />
+                <span>Guardar como límite diario por defecto</span>
+              </label>
+
+              <label className="flex items-center gap-2 text-xs text-stone-700 cursor-pointer pb-2">
+                <input
+                  type="checkbox"
+                  checked={bulkResetAllDailyCounters}
+                  onChange={(e) => setBulkResetAllDailyCounters(e.target.checked)}
+                  className="rounded border-stone-300"
+                />
+                <span>Reiniciar mensajes usados hoy a 0 en todos</span>
+              </label>
+
+              <button
+                type="button"
+                onClick={handleApplyBulkDailyUsage}
+                className="px-4 py-2 rounded-xl bg-stone-900 hover:bg-stone-800 text-amber-300 text-xs font-semibold cursor-pointer"
+              >
+                Aplicar Límite Diario a Todos
               </button>
             </div>
           </div>
 
           <div className="bg-white rounded-2xl border border-stone-200 p-6 space-y-3">
             <h4 className="font-serif text-base text-stone-900">
-              Detalle de Suscripciones y Ajuste Manual de Uso Mensual por Avatar
+              Detalle de Suscripciones y Ajuste Manual de Límites Mensuales y Diarios por Avatar
             </h4>
             {overview.subscriptions.map((sub) => {
               const editState = perAvatarUsageEdits[sub.avatarId] || {
                 used: sub.messagesUsedThisMonth,
                 quota: sub.monthlyMessageQuota,
               };
+              const dailyQuotaEdit =
+                perAvatarDailyQuotaEdits[sub.avatarId] ??
+                sub.dailyMessageQuotaPerInterlocutor ??
+                50;
               return (
                 <div
                   key={sub.subscriptionId}
@@ -1965,7 +2144,7 @@ export const MiEsenciaAdminSection: React.FC<MiEsenciaAdminSectionProps> = ({ ad
                       Estado: {sub.status}
                     </span>
                   </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-4 gap-2 text-stone-600">
+                  <div className="grid grid-cols-1 sm:grid-cols-5 gap-2 text-stone-600">
                     <p>
                       <strong>Plan:</strong> {sub.planName}
                     </p>
@@ -1982,12 +2161,18 @@ export const MiEsenciaAdminSection: React.FC<MiEsenciaAdminSectionProps> = ({ ad
                         {sub.messagesUsedThisMonth} / {sub.monthlyMessageQuota} msjs
                       </span>
                     </p>
+                    <p>
+                      <strong>Límite Diario Avatar:</strong>{' '}
+                      <span className="font-semibold text-emerald-800">
+                        {sub.dailyMessageQuotaPerInterlocutor} msjs/día por familiar
+                      </span>
+                    </p>
                   </div>
 
                   {/* Controles de edición manual de uso mensual de este avatar */}
                   <div className="pt-2 border-t border-stone-100 flex flex-wrap items-center gap-3">
                     <div className="flex items-center gap-1.5">
-                      <span className="text-stone-600 font-medium">Mensajes usados:</span>
+                      <span className="text-stone-600 font-medium">Mensajes usados (mes):</span>
                       <input
                         type="number"
                         min={0}
@@ -2033,7 +2218,7 @@ export const MiEsenciaAdminSection: React.FC<MiEsenciaAdminSectionProps> = ({ ad
                       }
                       className="px-3 py-1.5 rounded-lg bg-stone-900 text-amber-300 font-semibold cursor-pointer"
                     >
-                      Guardar Uso y Límite
+                      Guardar Uso Mensual
                     </button>
                     <button
                       type="button"
@@ -2051,7 +2236,56 @@ export const MiEsenciaAdminSection: React.FC<MiEsenciaAdminSectionProps> = ({ ad
                       className="px-3 py-1.5 rounded-lg bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-900 font-medium flex items-center gap-1 cursor-pointer"
                     >
                       <RotateCcw className="w-3.5 h-3.5" />
-                      <span>Reiniciar Contador a 0</span>
+                      <span>Reiniciar Mes a 0</span>
+                    </button>
+                  </div>
+
+                  {/* Controles de edición manual de límite diario y reinicio diario de este avatar */}
+                  <div className="pt-2 border-t border-stone-100 flex flex-wrap items-center gap-3">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-stone-600 font-medium">
+                        Límite diario por familiar (msjs/día):
+                      </span>
+                      <input
+                        type="number"
+                        min={0}
+                        value={dailyQuotaEdit}
+                        onChange={(e) =>
+                          setPerAvatarDailyQuotaEdits((prev) => ({
+                            ...prev,
+                            [sub.avatarId]: Math.max(0, Number(e.target.value)),
+                          }))
+                        }
+                        className="w-24 px-2.5 py-1 rounded-lg border border-stone-300 text-xs"
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleUpdateAvatarDailyUsage({
+                          avatarId: sub.avatarId,
+                          dailyMessageQuotaPerInterlocutor: dailyQuotaEdit,
+                          propagateToAllAvatarInterlocutors: true,
+                        })
+                      }
+                      className="px-3 py-1.5 rounded-lg bg-emerald-800 hover:bg-emerald-700 text-white font-semibold cursor-pointer"
+                    >
+                      Guardar Límite Diario del Avatar
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleUpdateAvatarDailyUsage({
+                          avatarId: sub.avatarId,
+                          dailyMessageQuotaPerInterlocutor: dailyQuotaEdit,
+                          propagateToAllAvatarInterlocutors: true,
+                          resetDailyCountersForAvatar: true,
+                        })
+                      }
+                      className="px-3 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-900 font-medium flex items-center gap-1 cursor-pointer"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      <span>Reiniciar Usados Hoy a 0 (Familiares de este Avatar)</span>
                     </button>
                   </div>
                 </div>
@@ -2555,230 +2789,365 @@ export const MiEsenciaAdminSection: React.FC<MiEsenciaAdminSectionProps> = ({ ad
                                 const isEditingThis =
                                   editingCredentialId === cred.accessCredentialId;
 
-                                return (
-                                  <div
-                                    key={cred.accessCredentialId}
-                                    className="p-4 rounded-xl border border-stone-200 space-y-3 text-xs"
-                                  >
-                                    <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
-                                      <div className="space-y-1">
-                                        <div className="flex flex-wrap items-center gap-2">
-                                          <span className="font-bold text-stone-900 text-sm">
-                                            {cred.interlocutorName}
-                                          </span>
-                                          <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 font-medium">
-                                            {cred.relationshipToPerson}
-                                          </span>
-                                          {linkedInter?.affectionateCallName && (
-                                            <span className="px-2 py-0.5 rounded-full bg-stone-100 text-stone-700">
-                                              Apodo: «{linkedInter.affectionateCallName}»
-                                            </span>
-                                          )}
-                                          <span
-                                            className={`px-2 py-0.5 rounded-full font-semibold ${
-                                              cred.status === 'activo'
-                                                ? 'bg-emerald-100 text-emerald-900'
-                                                : 'bg-red-100 text-red-900'
-                                            }`}
-                                          >
-                                            {cred.status}
-                                          </span>
-                                        </div>
-                                        <p className="font-mono text-stone-800">
-                                          Código personal:{' '}
-                                          <strong>{cred.personalCodePlain}</strong>
-                                        </p>
-                                        <p className="text-stone-500 break-all">
-                                          Enlace privado exclusivo: {fullPrivateUrl}
-                                        </p>
-                                      </div>
+                                  const effectiveDailyLimit = Math.max(
+                                    0,
+                                    Number(
+                                      linkedInter?.customDailyMessageLimit ??
+                                        sub.dailyMessageQuotaPerInterlocutor ??
+                                        overview.config.defaultDailyMessageQuota ??
+                                        50
+                                    )
+                                  );
+                                  const usedToday = Math.max(
+                                    0,
+                                    Number(linkedInter?.messagesSentToday ?? 0)
+                                  );
+                                  const remainingToday = Math.max(0, effectiveDailyLimit - usedToday);
+                                  const interEdit = linkedInter
+                                    ? perInterlocutorDailyEdits[linkedInter.interlocutorId] || {
+                                        usedToday,
+                                        dailyLimit: effectiveDailyLimit,
+                                      }
+                                    : { usedToday, dailyLimit: effectiveDailyLimit };
 
-                                      <div className="flex flex-wrap items-center gap-2 shrink-0">
-                                        <button
-                                          type="button"
-                                          onClick={() => {
-                                            if (isEditingThis) {
-                                              setEditingCredentialId(null);
-                                            } else {
-                                              setEditingCredentialId(cred.accessCredentialId);
-                                              setCredentialEditForm({
-                                                fullName: cred.interlocutorName,
-                                                relationshipToPerson: cred.relationshipToPerson,
-                                                affectionateCallName:
-                                                  linkedInter?.affectionateCallName || '',
-                                                email: linkedInter?.email || '',
-                                                customPersonalCode: cred.personalCodePlain,
-                                              });
-                                            }
-                                          }}
-                                          className="px-3 py-1.5 rounded-lg bg-amber-100 hover:bg-amber-200 text-amber-950 font-semibold flex items-center gap-1 cursor-pointer"
-                                        >
-                                          <Edit3 className="w-3.5 h-3.5" />
-                                          <span>
-                                            {isEditingThis ? 'Cerrar Edición' : 'Modificar Código'}
-                                          </span>
-                                        </button>
-                                        <button
-                                          onClick={() => {
-                                            navigator.clipboard?.writeText(fullPrivateUrl);
-                                            showNotice(
-                                              'ok',
-                                              'Enlace privado copiado al portapapeles.'
-                                            );
-                                          }}
-                                          className="px-3 py-1.5 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-800 font-medium flex items-center gap-1 cursor-pointer"
-                                        >
-                                          <Copy className="w-3.5 h-3.5" />
-                                          <span>Copiar Enlace</span>
-                                        </button>
-                                        <button
-                                          onClick={() =>
-                                            setPreviewPersonalCode(cred.personalCodePlain)
-                                          }
-                                          className="px-3 py-1.5 rounded-lg bg-stone-900 text-amber-300 font-medium flex items-center gap-1 cursor-pointer"
-                                        >
-                                          <ExternalLink className="w-3.5 h-3.5" />
-                                          <span>Abrir Portal Familiar</span>
-                                        </button>
-                                        <button
-                                          onClick={() =>
-                                            handleCredentialStatus(
-                                              cred.accessCredentialId,
-                                              'activo',
-                                              true
-                                            )
-                                          }
-                                          className="px-3 py-1.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 font-medium cursor-pointer"
-                                        >
-                                          Regenerar Código
-                                        </button>
-                                        {cred.status === 'activo' ? (
+                                  return (
+                                    <div
+                                      key={cred.accessCredentialId}
+                                      className="p-4 rounded-xl border border-stone-200 space-y-3 text-xs"
+                                    >
+                                      <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+                                        <div className="space-y-1">
+                                          <div className="flex flex-wrap items-center gap-2">
+                                            <span className="font-bold text-stone-900 text-sm">
+                                              {cred.interlocutorName}
+                                            </span>
+                                            <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 font-medium">
+                                              {cred.relationshipToPerson}
+                                            </span>
+                                            {linkedInter?.affectionateCallName && (
+                                              <span className="px-2 py-0.5 rounded-full bg-stone-100 text-stone-700">
+                                                Apodo: «{linkedInter.affectionateCallName}»
+                                              </span>
+                                            )}
+                                            <span
+                                              className={`px-2 py-0.5 rounded-full font-semibold ${
+                                                cred.status === 'activo'
+                                                  ? 'bg-emerald-100 text-emerald-900'
+                                                  : 'bg-red-100 text-red-900'
+                                              }`}
+                                            >
+                                              {cred.status}
+                                            </span>
+                                            <span
+                                              className={`px-2.5 py-0.5 rounded-full font-semibold ${
+                                                remainingToday === 0
+                                                  ? 'bg-rose-100 text-rose-900 border border-rose-300'
+                                                  : 'bg-sky-100 text-sky-900'
+                                              }`}
+                                            >
+                                              Hoy: {usedToday} usados / {effectiveDailyLimit} límite
+                                              diario ({remainingToday} restantes)
+                                            </span>
+                                          </div>
+                                          <p className="font-mono text-stone-800">
+                                            Código personal:{' '}
+                                            <strong>{cred.personalCodePlain}</strong>
+                                          </p>
+                                          <p className="text-stone-500 break-all">
+                                            Enlace privado exclusivo: {fullPrivateUrl}
+                                          </p>
+                                        </div>
+
+                                        <div className="flex flex-wrap items-center gap-2 shrink-0">
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              if (isEditingThis) {
+                                                setEditingCredentialId(null);
+                                              } else {
+                                                setEditingCredentialId(cred.accessCredentialId);
+                                                setCredentialEditForm({
+                                                  fullName: cred.interlocutorName,
+                                                  relationshipToPerson: cred.relationshipToPerson,
+                                                  affectionateCallName:
+                                                    linkedInter?.affectionateCallName || '',
+                                                  email: linkedInter?.email || '',
+                                                  customPersonalCode: cred.personalCodePlain,
+                                                  customDailyMessageLimit: effectiveDailyLimit,
+                                                  messagesSentToday: usedToday,
+                                                });
+                                              }
+                                            }}
+                                            className="px-3 py-1.5 rounded-lg bg-amber-100 hover:bg-amber-200 text-amber-950 font-semibold flex items-center gap-1 cursor-pointer"
+                                          >
+                                            <Edit3 className="w-3.5 h-3.5" />
+                                            <span>
+                                              {isEditingThis ? 'Cerrar Edición' : 'Modificar Código'}
+                                            </span>
+                                          </button>
+                                          <button
+                                            onClick={() => {
+                                              navigator.clipboard?.writeText(fullPrivateUrl);
+                                              showNotice(
+                                                'ok',
+                                                'Enlace privado copiado al portapapeles.'
+                                              );
+                                            }}
+                                            className="px-3 py-1.5 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-800 font-medium flex items-center gap-1 cursor-pointer"
+                                          >
+                                            <Copy className="w-3.5 h-3.5" />
+                                            <span>Copiar Enlace</span>
+                                          </button>
                                           <button
                                             onClick={() =>
-                                              handleCredentialStatus(
-                                                cred.accessCredentialId,
-                                                'revocado',
-                                                false
-                                              )
+                                              setPreviewPersonalCode(cred.personalCodePlain)
                                             }
-                                            className="px-3 py-1.5 rounded-lg bg-red-50 text-red-800 font-medium cursor-pointer"
+                                            className="px-3 py-1.5 rounded-lg bg-stone-900 text-amber-300 font-medium flex items-center gap-1 cursor-pointer"
                                           >
-                                            Revocar
+                                            <ExternalLink className="w-3.5 h-3.5" />
+                                            <span>Abrir Portal Familiar</span>
                                           </button>
-                                        ) : (
                                           <button
                                             onClick={() =>
                                               handleCredentialStatus(
                                                 cred.accessCredentialId,
                                                 'activo',
-                                                false
+                                                true
                                               )
                                             }
-                                            className="px-3 py-1.5 rounded-lg bg-emerald-50 text-emerald-800 font-medium cursor-pointer"
+                                            className="px-3 py-1.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 font-medium cursor-pointer"
                                           >
-                                            Reactivar
+                                            Regenerar Código
                                           </button>
-                                        )}
-                                        <button
-                                          onClick={() =>
-                                            handleDeleteCredential(
-                                              cred.accessCredentialId,
-                                              cred.interlocutorName,
-                                              cred.personalCodePlain
-                                            )
-                                          }
-                                          className="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white font-medium flex items-center gap-1 cursor-pointer"
-                                          title="Borrar definitivamente este código personal y su enlace privado"
-                                        >
-                                          <Trash2 className="w-3.5 h-3.5" />
-                                          <span>Borrar</span>
-                                        </button>
-                                      </div>
-                                    </div>
-
-                                    {isEditingThis && (
-                                      <div className="pt-3 border-t border-stone-200 bg-stone-50 p-3 rounded-xl space-y-3">
-                                        <div className="grid grid-cols-1 sm:grid-cols-5 gap-2.5">
-                                          <div>
-                                            <label className="block text-[11px] font-semibold text-stone-700 mb-1">
-                                              Código Personal
-                                            </label>
-                                            <input
-                                              type="text"
-                                              value={credentialEditForm.customPersonalCode}
-                                              onChange={(e) =>
-                                                setCredentialEditForm({
-                                                  ...credentialEditForm,
-                                                  customPersonalCode: e.target.value.toUpperCase(),
-                                                })
-                                              }
-                                              className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white font-mono text-xs"
-                                            />
-                                          </div>
-                                          <div>
-                                            <label className="block text-[11px] font-semibold text-stone-700 mb-1">
-                                              Nombre del Familiar
-                                            </label>
-                                            <input
-                                              type="text"
-                                              value={credentialEditForm.fullName}
-                                              onChange={(e) =>
-                                                setCredentialEditForm({
-                                                  ...credentialEditForm,
-                                                  fullName: e.target.value,
-                                                })
-                                              }
-                                              className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-xs"
-                                            />
-                                          </div>
-                                          <div>
-                                            <label className="block text-[11px] font-semibold text-stone-700 mb-1">
-                                              Parentesco
-                                            </label>
-                                            <input
-                                              type="text"
-                                              value={credentialEditForm.relationshipToPerson}
-                                              onChange={(e) =>
-                                                setCredentialEditForm({
-                                                  ...credentialEditForm,
-                                                  relationshipToPerson: e.target.value,
-                                                })
-                                              }
-                                              className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-xs"
-                                            />
-                                          </div>
-                                          <div>
-                                            <label className="block text-[11px] font-semibold text-stone-700 mb-1">
-                                              Apodo Afectuoso
-                                            </label>
-                                            <input
-                                              type="text"
-                                              value={credentialEditForm.affectionateCallName}
-                                              onChange={(e) =>
-                                                setCredentialEditForm({
-                                                  ...credentialEditForm,
-                                                  affectionateCallName: e.target.value,
-                                                })
-                                              }
-                                              className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-xs"
-                                            />
-                                          </div>
-                                          <div className="flex items-end gap-2">
+                                          {cred.status === 'activo' ? (
                                             <button
-                                              type="button"
                                               onClick={() =>
-                                                handleSaveEditedCredential(cred.accessCredentialId)
+                                                handleCredentialStatus(
+                                                  cred.accessCredentialId,
+                                                  'revocado',
+                                                  false
+                                                )
                                               }
-                                              className="w-full py-1.5 px-3 rounded-lg bg-stone-900 text-amber-300 font-semibold text-xs cursor-pointer"
+                                              className="px-3 py-1.5 rounded-lg bg-red-50 text-red-800 font-medium cursor-pointer"
                                             >
-                                              Actualizar Código
+                                              Revocar
                                             </button>
-                                          </div>
+                                          ) : (
+                                            <button
+                                              onClick={() =>
+                                                handleCredentialStatus(
+                                                  cred.accessCredentialId,
+                                                  'activo',
+                                                  false
+                                                )
+                                              }
+                                              className="px-3 py-1.5 rounded-lg bg-emerald-50 text-emerald-800 font-medium cursor-pointer"
+                                            >
+                                              Reactivar
+                                            </button>
+                                          )}
+                                          <button
+                                            onClick={() =>
+                                              handleDeleteCredential(
+                                                cred.accessCredentialId,
+                                                cred.interlocutorName,
+                                                cred.personalCodePlain
+                                              )
+                                            }
+                                            className="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white font-medium flex items-center gap-1 cursor-pointer"
+                                            title="Borrar definitivamente este código personal y su enlace privado"
+                                          >
+                                            <Trash2 className="w-3.5 h-3.5" />
+                                            <span>Borrar</span>
+                                          </button>
                                         </div>
                                       </div>
-                                    )}
-                                  </div>
-                                );
+
+                                      {/* Control rápido de mensajes diarios y usados hoy para este código familiar */}
+                                      {linkedInter && (
+                                        <div className="pt-2 border-t border-stone-100 flex flex-wrap items-center gap-3">
+                                          <div className="flex items-center gap-1.5">
+                                            <span className="text-stone-600 font-medium">
+                                              Usados hoy:
+                                            </span>
+                                            <input
+                                              type="number"
+                                              min={0}
+                                              value={interEdit.usedToday}
+                                              onChange={(e) =>
+                                                setPerInterlocutorDailyEdits((prev) => ({
+                                                  ...prev,
+                                                  [linkedInter.interlocutorId]: {
+                                                    usedToday: Math.max(0, Number(e.target.value)),
+                                                    dailyLimit: interEdit.dailyLimit,
+                                                  },
+                                                }))
+                                              }
+                                              className="w-20 px-2 py-1 rounded-lg border border-stone-300 text-xs"
+                                            />
+                                          </div>
+                                          <div className="flex items-center gap-1.5">
+                                            <span className="text-stone-600 font-medium">
+                                              Límite diario individual:
+                                            </span>
+                                            <input
+                                              type="number"
+                                              min={0}
+                                              value={interEdit.dailyLimit}
+                                              onChange={(e) =>
+                                                setPerInterlocutorDailyEdits((prev) => ({
+                                                  ...prev,
+                                                  [linkedInter.interlocutorId]: {
+                                                    usedToday: interEdit.usedToday,
+                                                    dailyLimit: Math.max(0, Number(e.target.value)),
+                                                  },
+                                                }))
+                                              }
+                                              className="w-24 px-2 py-1 rounded-lg border border-stone-300 text-xs"
+                                            />
+                                          </div>
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              handleUpdateInterlocutorDailyUsage({
+                                                interlocutorId: linkedInter.interlocutorId,
+                                                interlocutorName: cred.interlocutorName,
+                                                customDailyMessageLimit: interEdit.dailyLimit,
+                                                messagesSentToday: interEdit.usedToday,
+                                              })
+                                            }
+                                            className="px-3 py-1 rounded-lg bg-stone-900 text-amber-300 font-semibold cursor-pointer"
+                                          >
+                                            Guardar Límite y Usados Hoy
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              setPerInterlocutorDailyEdits((prev) => ({
+                                                ...prev,
+                                                [linkedInter.interlocutorId]: {
+                                                  usedToday: 0,
+                                                  dailyLimit: interEdit.dailyLimit,
+                                                },
+                                              }));
+                                              handleUpdateInterlocutorDailyUsage({
+                                                interlocutorId: linkedInter.interlocutorId,
+                                                interlocutorName: cred.interlocutorName,
+                                                customDailyMessageLimit: interEdit.dailyLimit,
+                                                resetDailyCounter: true,
+                                              });
+                                            }}
+                                            className="px-2.5 py-1 rounded-lg bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-900 font-medium flex items-center gap-1 cursor-pointer"
+                                          >
+                                            <RotateCcw className="w-3.5 h-3.5" />
+                                            <span>Reiniciar Hoy a 0</span>
+                                          </button>
+                                        </div>
+                                      )}
+
+                                      {isEditingThis && (
+                                        <div className="pt-3 border-t border-stone-200 bg-stone-50 p-3 rounded-xl space-y-3">
+                                          <div className="grid grid-cols-1 sm:grid-cols-6 gap-2.5">
+                                            <div>
+                                              <label className="block text-[11px] font-semibold text-stone-700 mb-1">
+                                                Código Personal
+                                              </label>
+                                              <input
+                                                type="text"
+                                                value={credentialEditForm.customPersonalCode}
+                                                onChange={(e) =>
+                                                  setCredentialEditForm({
+                                                    ...credentialEditForm,
+                                                    customPersonalCode: e.target.value.toUpperCase(),
+                                                  })
+                                                }
+                                                className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white font-mono text-xs"
+                                              />
+                                            </div>
+                                            <div>
+                                              <label className="block text-[11px] font-semibold text-stone-700 mb-1">
+                                                Nombre del Familiar
+                                              </label>
+                                              <input
+                                                type="text"
+                                                value={credentialEditForm.fullName}
+                                                onChange={(e) =>
+                                                  setCredentialEditForm({
+                                                    ...credentialEditForm,
+                                                    fullName: e.target.value,
+                                                  })
+                                                }
+                                                className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-xs"
+                                              />
+                                            </div>
+                                            <div>
+                                              <label className="block text-[11px] font-semibold text-stone-700 mb-1">
+                                                Parentesco
+                                              </label>
+                                              <input
+                                                type="text"
+                                                value={credentialEditForm.relationshipToPerson}
+                                                onChange={(e) =>
+                                                  setCredentialEditForm({
+                                                    ...credentialEditForm,
+                                                    relationshipToPerson: e.target.value,
+                                                  })
+                                                }
+                                                className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-xs"
+                                              />
+                                            </div>
+                                            <div>
+                                              <label className="block text-[11px] font-semibold text-stone-700 mb-1">
+                                                Apodo Afectuoso
+                                              </label>
+                                              <input
+                                                type="text"
+                                                value={credentialEditForm.affectionateCallName}
+                                                onChange={(e) =>
+                                                  setCredentialEditForm({
+                                                    ...credentialEditForm,
+                                                    affectionateCallName: e.target.value,
+                                                  })
+                                                }
+                                                className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-xs"
+                                              />
+                                            </div>
+                                            <div>
+                                              <label className="block text-[11px] font-semibold text-stone-700 mb-1">
+                                                Límite Diario (msjs)
+                                              </label>
+                                              <input
+                                                type="number"
+                                                min={0}
+                                                value={credentialEditForm.customDailyMessageLimit}
+                                                onChange={(e) =>
+                                                  setCredentialEditForm({
+                                                    ...credentialEditForm,
+                                                    customDailyMessageLimit: Math.max(
+                                                      0,
+                                                      Number(e.target.value)
+                                                    ),
+                                                  })
+                                                }
+                                                className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-xs"
+                                              />
+                                            </div>
+                                            <div className="flex items-end gap-2">
+                                              <button
+                                                type="button"
+                                                onClick={() =>
+                                                  handleSaveEditedCredential(cred.accessCredentialId)
+                                                }
+                                                className="w-full py-1.5 px-3 rounded-lg bg-stone-900 text-amber-300 font-semibold text-xs cursor-pointer"
+                                              >
+                                                Actualizar Código
+                                              </button>
+                                            </div>
+                                          </div>
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
                               })
                             )}
                           </div>

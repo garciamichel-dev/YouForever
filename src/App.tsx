@@ -98,6 +98,34 @@ export default function App() {
     }
   }, []);
 
+  // Ensure SEO metadata (title, description, keywords, OpenGraph, Twitter) is applied across all pages
+  useEffect(() => {
+    const title = 'YouForever: Tu historia. Tu esencia. Para siempre.';
+    const description =
+      'YouForever transforma recuerdos, experiencias y emociones en un legado eterno, mediante libros autobiográficos personalizados y conversaciones impulsadas por inteligencia artificial que recrean la esencia de tus seres queridos.';
+    const keywords =
+      'Legado eterno, recuerdos para siempre, historias que trascienden, memoria familiar, conexión entre generaciones, amor que perdura, autobiografías personalizadas, inteligencia artificial emocional, preservar historias de vida, herencia emocional.';
+
+    document.title = title;
+
+    const upsertMeta = (attr: 'name' | 'property', key: string, content: string) => {
+      let el = document.head.querySelector(`meta[${attr}="${key}"]`) as HTMLMetaElement | null;
+      if (!el) {
+        el = document.createElement('meta');
+        el.setAttribute(attr, key);
+        document.head.appendChild(el);
+      }
+      el.setAttribute('content', content);
+    };
+
+    upsertMeta('name', 'description', description);
+    upsertMeta('name', 'keywords', keywords);
+    upsertMeta('property', 'og:title', title);
+    upsertMeta('property', 'og:description', description);
+    upsertMeta('name', 'twitter:title', title);
+    upsertMeta('name', 'twitter:description', description);
+  }, [currentView]);
+
   // Listen to Firebase Auth state
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(

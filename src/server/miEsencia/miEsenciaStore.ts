@@ -1544,6 +1544,9 @@ class MiEsenciaStore {
     email?: string;
     phone?: string;
     customPersonalCode?: string;
+    customDailyMessageLimit?: number | null;
+    messagesSentToday?: number;
+    resetDailyCounter?: boolean;
     status?: 'activo' | 'pausado' | 'revocado';
     adminEmail: string;
   }): Promise<{
@@ -1575,6 +1578,22 @@ class MiEsenciaStore {
       }
       if (typeof params.phone === 'string') {
         inter.phone = params.phone.trim() || undefined;
+      }
+      if (params.customDailyMessageLimit === null) {
+        inter.customDailyMessageLimit = undefined;
+      } else if (
+        typeof params.customDailyMessageLimit === 'number' &&
+        !Number.isNaN(params.customDailyMessageLimit)
+      ) {
+        inter.customDailyMessageLimit = Math.max(0, Math.floor(params.customDailyMessageLimit));
+      }
+      if (params.resetDailyCounter) {
+        inter.messagesSentToday = 0;
+      } else if (
+        typeof params.messagesSentToday === 'number' &&
+        !Number.isNaN(params.messagesSentToday)
+      ) {
+        inter.messagesSentToday = Math.max(0, Math.floor(params.messagesSentToday));
       }
       inter.updatedAt = nowIso;
     }
@@ -1876,6 +1895,192 @@ class MiEsenciaStore {
       defaultMonthlyMessageQuota: this.config.defaultMonthlyMessageQuota,
       subscriptions: updatedSubs,
     };
+  }
+
+  /**
+   * Ajusta de forma manual el límite diario de mensajes de un avatar y/o reinicia los contadores
+   * diarios usados hoy por los familiares asociados a ese avatar.
+   */
+  public async updateSubscriptionDailyUsage(params: {
+    avatarId: string;
+    dailyMessageQuotaPerInterlocutor?: number;
+    propagateToAllAvatarInterlocutors?: boolean;
+    resetDailyCountersForAvatar?: boolean;
+    adminEmail: string;
+  }): Promise<{
+    subscription: MiEsenciaSubscriptionRecord;
+    updatedInterlocutors: MiEsenciaInterlocutor[];
+  }> {
+    const sub = this.subscriptions.get(params.avatarId);
+    if (!sub) {
+      throw new Error('Suscripción del avatar no encontrada.');
+    }
+
+    const nowIso = new Date().toISOString();
+    if (
+      typeof params.dailyMessageQuotaPerInterlocutor === 'number' &&
+      !Number.isNaN(params.dailyMessageQuotaPerInterlocutor)
+    ) {
+      sub.dailyMessageQuotaPerInterlocutor = Math.max(
+        0,
+        Math.floor(params.dailyMessageQuotaPerInterlocutor)
+      );
+    }
+
+    const updatedInterlocutors: MiEsenciaInterlocutor[] = [];
+    for (const [iid, inter] of this.interlocutors.entries()) {
+      if (inter.avatarId !== params.avatarId) continue;
+      let changed = false;
+      if (
+        params.propagateToAllAvatarInterlocutors !== false &&
+        typeof params.dailyMessageQuotaPerInterlocutor === 'number'
+      ) {
+        inter.customDailyMessageLimit = Math.max(
+          0,
+          Math.floor(params.dailyMessageQuotaPerInterlocutor)
+        );
+        changed = true;
+      }
+      if (params.resetDailyCountersForAvatar) {
+        inter.messagesSentToday = 0;
+        changed = true;
+      }
+      if (changed) {
+        inter.updatedAt = nowIso;
+        this.interlocutors.set(iid, inter);
+        updatedInterlocutors.push(inter);
+      }
+    }
+
+    sub.updatedAt = nowIso;
+    sub.historyLog.push({
+      id: `log_${crypto.randomBytes(4).toString('hex')}`,
+      action: 'ajuste_manual_uso_diario',
+      previousExpiresAt: sub.expiresAt,
+      newExpiresAt: sub.expiresAt,
+      performedBy: params.adminEmail,
+      notes: `Límite diario del avatar ajustado manualmente a ${sub.dailyMessageQuotaPerInterlocutor} msjs/día${
+        params.resetDailyCountersForAvatar ? ' (contadores diarios reiniciados a 0)' : ''
+      }.`,
+      timestamp: nowIso,
+    });
+
+    this.subscriptions.set(sub.avatarId, sub);
+    await Promise.all([
+      this.persistDoc('mi_esencia_subscriptions', sub.avatarId, sub),
+      ...updatedInterlocutors.map((i) =>
+        this.persistDoc('mi_esencia_interlocutors', i.interlocutorId, i)
+      ),
+    ]);
+
+    return { subscription: sub, updatedInterlocutors };
+  }
+
+  /**
+   * Aplica en bloque un límite diario configurable a todos los avatares y familiares,
+   * permite reiniciar a 0 los mensajes usados hoy de todos y/o guardarlo como valor por defecto.
+   */
+  public async applyDailyQuotaToAllSubscriptions(params: {
+    dailyMessageQuota?: number;
+    resetAllDailyCounters?: boolean;
+    saveAsDefaultForNewAvatars?: boolean;
+    adminEmail: string;
+  }): Promise<{
+    updatedAvatarsCount: number;
+    updatedInterlocutorsCount: number;
+    defaultDailyMessageQuota?: number;
+  }> {
+    const nowIso = new Date().toISOString();
+    const quotaVal =
+      typeof params.dailyMessageQuota === 'number' && !Number.isNaN(params.dailyMessageQuota)
+        ? Math.max(0, Math.floor(params.dailyMessageQuota))
+        : undefined;
+
+    if (params.saveAsDefaultForNewAvatars && typeof quotaVal === 'number') {
+      await this.updateConfig({ defaultDailyMessageQuota: quotaVal }, params.adminEmail);
+    }
+
+    const updatedSubs: MiEsenciaSubscriptionRecord[] = [];
+    for (const [aid, sub] of this.subscriptions.entries()) {
+      if (typeof quotaVal === 'number') {
+        sub.dailyMessageQuotaPerInterlocutor = quotaVal;
+      }
+      sub.updatedAt = nowIso;
+      this.subscriptions.set(aid, sub);
+      updatedSubs.push(sub);
+    }
+
+    const updatedInterlocutors: MiEsenciaInterlocutor[] = [];
+    for (const [iid, inter] of this.interlocutors.entries()) {
+      let changed = false;
+      if (typeof quotaVal === 'number') {
+        inter.customDailyMessageLimit = quotaVal;
+        changed = true;
+      }
+      if (params.resetAllDailyCounters) {
+        inter.messagesSentToday = 0;
+        changed = true;
+      }
+      if (changed) {
+        inter.updatedAt = nowIso;
+        this.interlocutors.set(iid, inter);
+        updatedInterlocutors.push(inter);
+      }
+    }
+
+    await Promise.all([
+      ...updatedSubs.map((s) => this.persistDoc('mi_esencia_subscriptions', s.avatarId, s)),
+      ...updatedInterlocutors.map((i) =>
+        this.persistDoc('mi_esencia_interlocutors', i.interlocutorId, i)
+      ),
+    ]);
+
+    return {
+      updatedAvatarsCount: updatedSubs.length,
+      updatedInterlocutorsCount: updatedInterlocutors.length,
+      defaultDailyMessageQuota: this.config.defaultDailyMessageQuota,
+    };
+  }
+
+  /**
+   * Ajusta de forma individual el límite diario y/o el contador de mensajes usados hoy
+   * de un familiar específico (código personal).
+   */
+  public async updateInterlocutorDailyUsage(params: {
+    interlocutorId: string;
+    customDailyMessageLimit?: number | null;
+    messagesSentToday?: number;
+    resetDailyCounter?: boolean;
+    adminEmail: string;
+  }): Promise<MiEsenciaInterlocutor> {
+    const inter = this.interlocutors.get(params.interlocutorId);
+    if (!inter) {
+      throw new Error('Familiar / interlocutor no encontrado.');
+    }
+
+    const nowIso = new Date().toISOString();
+    if (params.customDailyMessageLimit === null) {
+      inter.customDailyMessageLimit = undefined;
+    } else if (
+      typeof params.customDailyMessageLimit === 'number' &&
+      !Number.isNaN(params.customDailyMessageLimit)
+    ) {
+      inter.customDailyMessageLimit = Math.max(0, Math.floor(params.customDailyMessageLimit));
+    }
+
+    if (params.resetDailyCounter) {
+      inter.messagesSentToday = 0;
+    } else if (
+      typeof params.messagesSentToday === 'number' &&
+      !Number.isNaN(params.messagesSentToday)
+    ) {
+      inter.messagesSentToday = Math.max(0, Math.floor(params.messagesSentToday));
+    }
+
+    inter.updatedAt = nowIso;
+    this.interlocutors.set(inter.interlocutorId, inter);
+    await this.persistDoc('mi_esencia_interlocutors', inter.interlocutorId, inter);
+    return inter;
   }
 
   public async createCoupon(params: {
@@ -2485,11 +2690,18 @@ class MiEsenciaStore {
     }
 
     // Verificar cuotas de uso diarias y mensuales
-    const dailyLimit =
-      interlocutor.customDailyMessageLimit || subscription.dailyMessageQuotaPerInterlocutor || 50;
+    const dailyLimit = Math.max(
+      0,
+      Number(
+        interlocutor.customDailyMessageLimit ??
+          subscription.dailyMessageQuotaPerInterlocutor ??
+          this.config.defaultDailyMessageQuota ??
+          50
+      )
+    );
     if (interlocutor.messagesSentToday >= dailyLimit) {
       throw new Error(
-        `Has alcanzado el límite diario de ${dailyLimit} mensajes para hoy. Mañana podrás continuar conversando.`
+        `Has alcanzado tu límite diario de ${dailyLimit} mensajes por hoy (${interlocutor.messagesSentToday} usados). Si necesitas más mensajes hoy, ponte en contacto con ForeverYou.`
       );
     }
 

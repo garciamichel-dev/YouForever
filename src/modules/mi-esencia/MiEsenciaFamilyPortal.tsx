@@ -234,15 +234,109 @@ export const MiEsenciaFamilyPortal: React.FC<MiEsenciaFamilyPortalProps> = ({
 
   // Cálculo de mensajes diarios usados y disponibles para el interlocutor
   const dailyMessageLimit = Math.max(
-    1,
+    0,
     Number(
-      interlocutor?.customDailyMessageLimit ||
-        subscription?.dailyMessageQuotaPerInterlocutor ||
+      interlocutor?.customDailyMessageLimit ??
+        subscription?.dailyMessageQuotaPerInterlocutor ??
         50
     )
   );
   const dailyMessagesUsed = Math.max(0, Number(interlocutor?.messagesSentToday || 0));
   const dailyMessagesRemaining = Math.max(0, dailyMessageLimit - dailyMessagesUsed);
+  const isDailyLimitReached = dailyMessagesUsed >= dailyMessageLimit;
+
+  // Sincronización automática en vivo del límite y contador diario desde administración sin recargar la página
+  useEffect(() => {
+    if (!isAuthenticated || !personalCode.trim()) return;
+    let cancelled = false;
+
+    const syncLiveQuotaStatus = async () => {
+      try {
+        const res = await fetch('/api/mi-esencia/family/quota-status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ personalCode: personalCode.trim() }),
+        });
+        if (!res.ok) return;
+        const json = await res.json();
+        if (cancelled || !json.success || !json.data) return;
+
+        const nextInter: MiEsenciaInterlocutor | undefined = json.data.interlocutor;
+        const nextSub: MiEsenciaSubscriptionRecord | undefined = json.data.subscription;
+
+        if (nextSub) {
+          setSubscription((prev) => {
+            if (
+              prev &&
+              prev.dailyMessageQuotaPerInterlocutor === nextSub.dailyMessageQuotaPerInterlocutor &&
+              prev.messagesUsedThisMonth === nextSub.messagesUsedThisMonth &&
+              prev.monthlyMessageQuota === nextSub.monthlyMessageQuota &&
+              prev.status === nextSub.status
+            ) {
+              return prev;
+            }
+            return nextSub;
+          });
+        }
+
+        if (nextInter) {
+          setInterlocutor((prev) => {
+            if (!prev) return nextInter;
+            const mergedFullName =
+              !isGenericAdministrativeInterlocutorName(prev.fullName) &&
+              isGenericAdministrativeInterlocutorName(nextInter.fullName)
+                ? prev.fullName
+                : nextInter.fullName;
+            if (
+              prev.messagesSentToday === nextInter.messagesSentToday &&
+              prev.customDailyMessageLimit === nextInter.customDailyMessageLimit &&
+              prev.fullName === mergedFullName
+            ) {
+              return prev;
+            }
+            return {
+              ...nextInter,
+              fullName: mergedFullName,
+              affectionateCallName: nextInter.affectionateCallName || prev.affectionateCallName,
+            };
+          });
+
+          const nextLimit = Math.max(
+            0,
+            Number(
+              nextInter.customDailyMessageLimit ??
+                nextSub?.dailyMessageQuotaPerInterlocutor ??
+                50
+            )
+          );
+          const nextUsed = Math.max(0, Number(nextInter.messagesSentToday || 0));
+          if (nextUsed < nextLimit) {
+            setSendError((prevErr) =>
+              prevErr && /l[ií]mite diario/i.test(prevErr) ? null : prevErr
+            );
+          }
+        }
+      } catch {
+        // Silencioso en caso de intermitencia de red
+      }
+    };
+
+    const intervalId = window.setInterval(syncLiveQuotaStatus, 4000);
+    const onFocusOrVisible = () => {
+      if (document.visibilityState === 'visible') {
+        syncLiveQuotaStatus();
+      }
+    };
+    window.addEventListener('focus', onFocusOrVisible);
+    document.addEventListener('visibilitychange', onFocusOrVisible);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', onFocusOrVisible);
+      document.removeEventListener('visibilitychange', onFocusOrVisible);
+    };
+  }, [isAuthenticated, personalCode]);
 
   const handlePrefillMemoryInput = (text: string) => {
     setMessageInput(text);
@@ -820,7 +914,7 @@ export const MiEsenciaFamilyPortal: React.FC<MiEsenciaFamilyPortalProps> = ({
                 >
                   {dailyMessagesRemaining}
                 </strong>{' '}
-                restantes
+                restantes <span className="text-stone-400">(de {dailyMessageLimit})</span>
               </span>
             </button>
 
@@ -1118,6 +1212,27 @@ export const MiEsenciaFamilyPortal: React.FC<MiEsenciaFamilyPortalProps> = ({
           </button>
         </div>
 
+        {isDailyLimitReached && (
+          <div className="mb-2 mt-2 p-3 rounded-xl bg-amber-50 dark:bg-amber-950/60 border border-amber-300 dark:border-amber-800 text-amber-900 dark:text-amber-200 text-xs flex items-center justify-between gap-3 flex-wrap">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
+              <span>
+                Has utilizado tus <strong>{dailyMessagesUsed}</strong> mensajes diarios disponibles
+                hoy (límite actual: <strong>{dailyMessageLimit}</strong>). Si el administrador
+                amplía tu límite diario, podrás continuar conversando aquí mismo de inmediato sin
+                recargar la página.
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowFaqModal(true)}
+              className="px-2.5 py-1 rounded-lg bg-amber-600 hover:bg-amber-500 text-stone-950 font-semibold text-[11px] cursor-pointer shrink-0"
+            >
+              ¿Cómo obtener más mensajes?
+            </button>
+          </div>
+        )}
+
         {sendError && (
           <div className="mb-2 mt-2 p-3 rounded-xl bg-red-50 dark:bg-red-950/60 border border-red-200 dark:border-red-800 text-red-800 dark:text-red-200 text-xs flex items-center gap-2">
             <AlertTriangle className="w-4 h-4 text-red-600 dark:text-red-400 shrink-0" />
@@ -1132,14 +1247,17 @@ export const MiEsenciaFamilyPortal: React.FC<MiEsenciaFamilyPortalProps> = ({
             type="text"
             value={messageInput}
             onChange={(e) => setMessageInput(e.target.value)}
+            disabled={isDailyLimitReached}
             placeholder={
-              isAwaitingIdentification
+              isDailyLimitReached
+                ? `Límite diario alcanzado (${dailyMessagesUsed}/${dailyMessageLimit} mensajes hoy)...`
+                : isAwaitingIdentification
                 ? 'Escribe tu nombre y tu parentesco (ej. «Soy Sofía, tu nieta»)...'
                 : `Escribe un mensaje para conversar con ${activePerson?.preferredName || 'Mi Esencia'}...`
             }
-            className="flex-1 px-3 py-2 text-sm text-stone-900 dark:text-stone-100 bg-transparent focus:outline-none"
+            className="flex-1 px-3 py-2 text-sm text-stone-900 dark:text-stone-100 bg-transparent focus:outline-none disabled:opacity-50"
             onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
+              if (e.key === 'Enter' && !e.shiftKey && !isDailyLimitReached) {
                 e.preventDefault();
                 handleSendMessage();
               }
@@ -1147,7 +1265,7 @@ export const MiEsenciaFamilyPortal: React.FC<MiEsenciaFamilyPortalProps> = ({
           />
           <button
             onClick={() => handleSendMessage()}
-            disabled={isSending || !messageInput.trim()}
+            disabled={isSending || !messageInput.trim() || isDailyLimitReached}
             className="px-4 py-2.5 rounded-xl bg-stone-900 dark:bg-amber-600 hover:bg-stone-800 dark:hover:bg-amber-500 disabled:opacity-40 text-amber-200 dark:text-stone-950 font-medium text-xs transition flex items-center gap-1.5 cursor-pointer"
           >
             <Send className="w-3.5 h-3.5" />

@@ -335,6 +335,60 @@ miEsenciaRouter.post(
 );
 
 miEsenciaRouter.post(
+  '/admin/subscriptions/daily-usage',
+  requireMiEsenciaAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      await miEsenciaStore.ensureInitialized();
+      const admin = (req as any).adminUser as string;
+      const result = await miEsenciaStore.updateSubscriptionDailyUsage({
+        ...(req.body || {}),
+        adminEmail: admin,
+      });
+      res.json({ success: true, data: result });
+    } catch (err: unknown) {
+      res.status(400).json({ success: false, error: (err as Error).message });
+    }
+  }
+);
+
+miEsenciaRouter.post(
+  '/admin/subscriptions/daily-usage-bulk',
+  requireMiEsenciaAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      await miEsenciaStore.ensureInitialized();
+      const admin = (req as any).adminUser as string;
+      const result = await miEsenciaStore.applyDailyQuotaToAllSubscriptions({
+        ...(req.body || {}),
+        adminEmail: admin,
+      });
+      res.json({ success: true, data: result });
+    } catch (err: unknown) {
+      res.status(400).json({ success: false, error: (err as Error).message });
+    }
+  }
+);
+
+miEsenciaRouter.post(
+  '/admin/interlocutors/daily-usage',
+  requireMiEsenciaAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      await miEsenciaStore.ensureInitialized();
+      const admin = (req as any).adminUser as string;
+      const result = await miEsenciaStore.updateInterlocutorDailyUsage({
+        ...(req.body || {}),
+        adminEmail: admin,
+      });
+      res.json({ success: true, data: result });
+    } catch (err: unknown) {
+      res.status(400).json({ success: false, error: (err as Error).message });
+    }
+  }
+);
+
+miEsenciaRouter.post(
   '/admin/persons/delete',
   requireMiEsenciaAdmin,
   async (req: Request, res: Response) => {
@@ -715,6 +769,27 @@ miEsenciaRouter.post('/family/accept-consent', async (req: Request, res: Respons
     res.json({
       success: true,
       data: { interlocutor },
+    });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
+miEsenciaRouter.post('/family/quota-status', async (req: Request, res: Response) => {
+  try {
+    await miEsenciaStore.ensureInitialized();
+    const { personalCode } = req.body || {};
+    const check = miEsenciaStore.verifyPersonalAccessCode(personalCode);
+    if (!check.valid) {
+      res.status(401).json({ success: false, error: check.error || 'No autorizado.' });
+      return;
+    }
+    res.json({
+      success: true,
+      data: {
+        interlocutor: check.interlocutor,
+        subscription: check.subscription,
+      },
     });
   } catch (err: unknown) {
     res.status(400).json({ success: false, error: (err as Error).message });

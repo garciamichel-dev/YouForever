@@ -454,6 +454,7 @@ export interface MiEsenciaGlobalConfig {
   miEsenciaEnabled: boolean;
   defaultSpontaneityLevel: MiEsenciaSpontaneityLevel;
   defaultMonthlyMessageQuota?: number;
+  defaultDailyMessageQuota?: number;
   defaultGeminiModel?: string;
   defaultOpenAiModel?: string;
   enableAutomaticProviderFallback?: boolean;
@@ -476,6 +477,7 @@ export const DEFAULT_MI_ESENCIA_CONFIG: MiEsenciaGlobalConfig = {
   miEsenciaEnabled: true, // Entregado activo por defecto según acuerdo con el usuario
   defaultSpontaneityLevel: 'moderado',
   defaultMonthlyMessageQuota: 1000,
+  defaultDailyMessageQuota: 50,
   defaultGeminiModel: 'gemini-3-flash-preview',
   defaultOpenAiModel: 'gpt-6',
   enableAutomaticProviderFallback: true,
