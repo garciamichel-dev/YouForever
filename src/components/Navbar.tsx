@@ -1,10 +1,11 @@
 import React from 'react';
-import { ShieldCheck, LogOut, Sparkles } from 'lucide-react';
+import { ShieldCheck, LogOut, Sparkles, ExternalLink } from 'lucide-react';
 import { ForeverYouLogo } from './ForeverYouLogo';
+import { ThemeToggleButton } from '../context/ThemeContext';
 
 interface NavbarProps {
   currentView: 'admin' | 'participant' | 'conoceme' | 'demo';
-  onSelectView: (view: 'admin' | 'participant' | 'conoceme' | 'demo') => void;
+  onSelectView: (view: 'admin' | 'participant' | 'conoceme' | 'demo' | 'mi_esencia') => void;
   adminEmail: string | null;
   isAuthorizedAdmin: boolean;
   onLogout: () => void;
@@ -62,6 +63,19 @@ export const Navbar: React.FC<NavbarProps> = ({
                 >
                   Portal del Participante
                 </button>
+                <a
+                  href="/miesencia"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    onSelectView('mi_esencia');
+                  }}
+                  className="flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs sm:text-sm font-medium transition-colors cursor-pointer text-amber-300 hover:text-amber-100 bg-amber-950/50 hover:bg-amber-900/60 border border-amber-700/50"
+                  title="Ir al portal familiar Mi Esencia (/miesencia)"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Mi Esencia (/miesencia)</span>
+                  <ExternalLink className="w-3 h-3 text-amber-400/80" />
+                </a>
                 <button
                   onClick={() => onSelectView('conoceme')}
                   className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs sm:text-sm font-medium transition-colors cursor-pointer ${
@@ -93,6 +107,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           {/* Actions */}
           <div className="flex items-center space-x-2 sm:space-x-3">
+            <ThemeToggleButton />
 
             {/* Admin Badge & Logout - ONLY visible when authorized admin */}
             {isAuthorizedAdmin && adminEmail && (
@@ -116,3 +131,4 @@ export const Navbar: React.FC<NavbarProps> = ({
     </header>
   );
 };
+

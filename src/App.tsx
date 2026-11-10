@@ -12,16 +12,34 @@ import { FAQModal } from './components/FAQModal.tsx';
 import { IntegralPrivacyNoticeModal } from './components/IntegralPrivacyNoticeModal.tsx';
 import { ConocemeView } from './components/ConocemeView.tsx';
 import { DemoFreeTrialView } from './components/DemoFreeTrialView.tsx';
+import { MiEsenciaFamilyPortal } from './modules/mi-esencia/MiEsenciaFamilyPortal.tsx';
 import { auth, googleProvider } from './firebase/config.ts';
 import { onAuthStateChanged, signInWithPopup, signOut } from 'firebase/auth';
 import { Clock, HelpCircle } from 'lucide-react';
 import { getActiveParticipantSession } from './utils/participantSessionStorage.ts';
 import { ForeverYouLogo } from './components/ForeverYouLogo';
+import { ThemeProvider, ThemeToggleButton } from './context/ThemeContext';
+
+function isMiEsenciaLocation(): boolean {
+  const urlParams = new URLSearchParams(window.location.search);
+  const view = urlParams.get('view');
+  return (
+    window.location.pathname.startsWith('/miesencia') ||
+    window.location.pathname.startsWith('/mi-esencia') ||
+    urlParams.get('miesencia') === '1' ||
+    urlParams.get('mi-esencia') === '1' ||
+    view === 'miesencia' ||
+    view === 'mi-esencia'
+  );
+}
 
 export default function App() {
-  const [currentView, setCurrentView] = useState<'admin' | 'participant' | 'conoceme' | 'demo'>(() => {
+  const [currentView, setCurrentView] = useState<'admin' | 'participant' | 'conoceme' | 'demo' | 'mi_esencia'>(() => {
     const urlParams = new URLSearchParams(window.location.search);
     const view = urlParams.get('view');
+    if (isMiEsenciaLocation()) {
+      return 'mi_esencia';
+    }
     if (window.location.pathname.startsWith('/demo') || view === 'demo') {
       return 'demo';
     }
@@ -37,6 +55,13 @@ export default function App() {
   const [isAuthorizedAdmin, setIsAuthorizedAdmin] = useState<boolean>(false);
   const [isAuthChecking, setIsAuthChecking] = useState<boolean>(true);
   const [participantToken, setParticipantToken] = useState<string | null>(null);
+  const [miEsenciaCode, setMiEsenciaCode] = useState<string | null>(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    if (isMiEsenciaLocation()) {
+      return urlParams.get('code') || urlParams.get('token');
+    }
+    return null;
+  });
   const [isFaqOpen, setIsFaqOpen] = useState(false);
   const [isPrivacyNoticeOpen, setIsPrivacyNoticeOpen] = useState(false);
 
@@ -45,6 +70,7 @@ export default function App() {
     const urlParams = new URLSearchParams(window.location.search);
     let token = urlParams.get('token') || urlParams.get('code');
     const view = urlParams.get('view');
+    const isMiEsenciaUrl = isMiEsenciaLocation();
     const isDemoUrl = window.location.pathname.startsWith('/demo') || view === 'demo';
     const isConocemeUrl = window.location.pathname.startsWith('/conoceme') || view === 'conoceme';
     const isAdminUrl = window.location.pathname.startsWith('/admin') || view === 'admin';
@@ -55,7 +81,10 @@ export default function App() {
       token = hashParams.get('token') || hashParams.get('code');
     }
 
-    if (isDemoUrl) {
+    if (isMiEsenciaUrl) {
+      if (token) setMiEsenciaCode(token);
+      setCurrentView('mi_esencia');
+    } else if (isDemoUrl) {
       setCurrentView('demo');
     } else if (isConocemeUrl) {
       setCurrentView('conoceme');
@@ -96,6 +125,7 @@ export default function App() {
 
           const urlParams = new URLSearchParams(window.location.search);
           const token = urlParams.get('token') || urlParams.get('code');
+          const isMiEsenciaUrl = isMiEsenciaLocation();
           const isDemoUrl =
             window.location.pathname.startsWith('/demo') || urlParams.get('view') === 'demo';
           const isConocemeUrl =
@@ -105,6 +135,7 @@ export default function App() {
           const hasStoredParticipantSession = Boolean(getActiveParticipantSession());
 
           if (
+            !isMiEsenciaUrl &&
             !isDemoUrl &&
             !isConocemeUrl &&
             authorized &&
@@ -161,8 +192,10 @@ export default function App() {
     setCurrentView('participant');
   };
 
-  const handleSelectView = (view: 'admin' | 'participant' | 'conoceme' | 'demo') => {
-    if (view === 'demo') {
+  const handleSelectView = (view: 'admin' | 'participant' | 'conoceme' | 'demo' | 'mi_esencia') => {
+    if (view === 'mi_esencia') {
+      window.history.pushState({}, '', '/miesencia');
+    } else if (view === 'demo') {
       window.history.pushState({}, '', '/demo');
     } else if (view === 'conoceme') {
       window.history.pushState({}, '', '/conoceme');
@@ -175,95 +208,107 @@ export default function App() {
   };
 
   const isParticipantInterviewActive = currentView === 'participant' && Boolean(participantToken);
+  const isNavbarHidden = isParticipantInterviewActive || currentView === 'conoceme' || currentView === 'demo';
 
   return (
-    <div className="min-h-screen bg-stone-100/70 text-stone-900 font-sans flex flex-col selection:bg-amber-200">
-      {!isParticipantInterviewActive && currentView !== 'conoceme' && currentView !== 'demo' && (
-        <Navbar
-          currentView={currentView}
-          onSelectView={handleSelectView}
-          adminEmail={adminUser}
-          isAuthorizedAdmin={isAuthorizedAdmin}
-          onLogout={handleLogout}
-          onOpenFaq={() => setIsFaqOpen(true)}
-          onOpenPrivacyNotice={() => setIsPrivacyNoticeOpen(true)}
-        />
-      )}
-
-      <main className={isParticipantInterviewActive || currentView === 'conoceme' || currentView === 'demo' ? 'flex-1' : 'flex-1 py-6'}>
-        {currentView === 'demo' ? (
-          <DemoFreeTrialView
-            onNavigateToConoceme={() => handleSelectView('conoceme')}
-          />
-        ) : currentView === 'conoceme' ? (
-          <ConocemeView
-            onNavigateToPortal={() => handleSelectView('participant')}
-            onNavigateToDemo={() => handleSelectView('demo')}
-            onBackToAdmin={isAuthorizedAdmin ? () => handleSelectView('admin') : undefined}
-            onOpenFaq={() => setIsFaqOpen(true)}
-            onOpenPrivacyNotice={() => setIsPrivacyNoticeOpen(true)}
-          />
-        ) : currentView === 'admin' ? (
-          isAuthChecking ? (
-            <div className="flex flex-col items-center justify-center py-20 text-stone-500 space-y-3">
-              <Clock className="w-8 h-8 animate-spin text-amber-700" />
-              <p className="text-sm font-medium">Verificando sesión administrativa...</p>
-            </div>
-          ) : isAuthorizedAdmin && adminUser ? (
-            <AdminDashboard
-              adminEmail={adminUser}
-              onEnterParticipantPortal={handleEnterParticipantWithToken}
-              onOpenConoceme={() => handleSelectView('conoceme')}
-            />
-          ) : (
-            <AdminLoginView
+    <ThemeProvider>
+      {currentView === 'mi_esencia' ? (
+        <MiEsenciaFamilyPortal initialCode={miEsenciaCode} />
+      ) : (
+        <div className="min-h-screen bg-stone-100/70 dark:bg-stone-950 text-stone-900 dark:text-stone-100 font-sans flex flex-col selection:bg-amber-200 transition-colors">
+          {!isNavbarHidden ? (
+            <Navbar
+              currentView={currentView}
+              onSelectView={handleSelectView}
               adminEmail={adminUser}
               isAuthorizedAdmin={isAuthorizedAdmin}
-              onLogin={handleLogin}
               onLogout={handleLogout}
+              onOpenFaq={() => setIsFaqOpen(true)}
+              onOpenPrivacyNotice={() => setIsPrivacyNoticeOpen(true)}
             />
-          )
-        ) : (
-          <ParticipantPortal
-            initialToken={participantToken}
-            onOpenFaq={() => setIsFaqOpen(true)}
-            onClearToken={() => setParticipantToken(null)}
+          ) : (
+            <div className="fixed bottom-4 right-4 z-50">
+              <ThemeToggleButton className="shadow-lg" />
+            </div>
+          )}
+
+          <main className={isNavbarHidden ? 'flex-1' : 'flex-1 py-6'}>
+            {currentView === 'demo' ? (
+              <DemoFreeTrialView
+                onNavigateToConoceme={() => handleSelectView('conoceme')}
+              />
+            ) : currentView === 'conoceme' ? (
+              <ConocemeView
+                onNavigateToPortal={() => handleSelectView('participant')}
+                onNavigateToDemo={() => handleSelectView('demo')}
+                onBackToAdmin={isAuthorizedAdmin ? () => handleSelectView('admin') : undefined}
+                onOpenFaq={() => setIsFaqOpen(true)}
+                onOpenPrivacyNotice={() => setIsPrivacyNoticeOpen(true)}
+              />
+            ) : currentView === 'admin' ? (
+              isAuthChecking ? (
+                <div className="flex flex-col items-center justify-center py-20 text-stone-500 space-y-3">
+                  <Clock className="w-8 h-8 animate-spin text-amber-700" />
+                  <p className="text-sm font-medium">Verificando sesión administrativa...</p>
+                </div>
+              ) : isAuthorizedAdmin && adminUser ? (
+                <AdminDashboard
+                  adminEmail={adminUser}
+                  onEnterParticipantPortal={handleEnterParticipantWithToken}
+                  onOpenConoceme={() => handleSelectView('conoceme')}
+                />
+              ) : (
+                <AdminLoginView
+                  adminEmail={adminUser}
+                  isAuthorizedAdmin={isAuthorizedAdmin}
+                  onLogin={handleLogin}
+                  onLogout={handleLogout}
+                />
+              )
+            ) : (
+              <ParticipantPortal
+                initialToken={participantToken}
+                onOpenFaq={() => setIsFaqOpen(true)}
+                onClearToken={() => setParticipantToken(null)}
+              />
+            )}
+          </main>
+
+          {!isParticipantInterviewActive && (
+            <footer className="bg-stone-900 text-stone-400 py-6 text-center text-xs border-t border-stone-800">
+              <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5">
+                  <ForeverYouLogo variant="app_icon" size="xs" />
+                  <p className="font-serif text-stone-300">
+                    ForeverYou • Plataforma de Entrevistas de Vida &amp; Patrimonio Testimonial
+                  </p>
+                </div>
+                <div className="flex items-center space-x-4 text-[11px] text-stone-400">
+                  <button
+                    onClick={() => setIsFaqOpen(true)}
+                    className="inline-flex items-center space-x-1 hover:text-amber-300 transition cursor-pointer"
+                  >
+                    <HelpCircle className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Preguntas Frecuentes</span>
+                  </button>
+                  <span>•</span>
+                  <span className="text-stone-500">
+                    Fidelidad testimonial estricta • Criptografía SHA-256
+                  </span>
+                </div>
+              </div>
+            </footer>
+          )}
+
+          {/* Global FAQ & Privacy Modals */}
+          <FAQModal isOpen={isFaqOpen} onClose={() => setIsFaqOpen(false)} />
+          <IntegralPrivacyNoticeModal
+            isOpen={isPrivacyNoticeOpen}
+            onClose={() => setIsPrivacyNoticeOpen(false)}
           />
-        )}
-      </main>
-
-      {!isParticipantInterviewActive && (
-        <footer className="bg-stone-900 text-stone-400 py-6 text-center text-xs border-t border-stone-800">
-          <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-3">
-            <div className="flex items-center gap-2.5">
-              <ForeverYouLogo variant="app_icon" size="xs" />
-              <p className="font-serif text-stone-300">
-                ForeverYou • Plataforma de Entrevistas de Vida &amp; Patrimonio Testimonial
-              </p>
-            </div>
-            <div className="flex items-center space-x-4 text-[11px] text-stone-400">
-              <button
-                onClick={() => setIsFaqOpen(true)}
-                className="inline-flex items-center space-x-1 hover:text-amber-300 transition cursor-pointer"
-              >
-                <HelpCircle className="w-3.5 h-3.5 text-amber-400" />
-                <span>Preguntas Frecuentes</span>
-              </button>
-              <span>•</span>
-              <span className="text-stone-500">
-                Fidelidad testimonial estricta • Criptografía SHA-256
-              </span>
-            </div>
-          </div>
-        </footer>
+        </div>
       )}
-
-      {/* Global FAQ & Privacy Modals */}
-      <FAQModal isOpen={isFaqOpen} onClose={() => setIsFaqOpen(false)} />
-      <IntegralPrivacyNoticeModal
-        isOpen={isPrivacyNoticeOpen}
-        onClose={() => setIsPrivacyNoticeOpen(false)}
-      />
-    </div>
+    </ThemeProvider>
   );
 }
+

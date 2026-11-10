@@ -6,6 +6,7 @@ import { InterviewsPanel } from './InterviewsPanel.tsx';
 import { ManuscriptsView } from './ManuscriptsView.tsx';
 import { AuditLogsPanel } from './AuditLogsPanel.tsx';
 import { PrivacyAdminPanel } from './PrivacyAdminPanel.tsx';
+import { MiEsenciaAdminSection } from '../modules/mi-esencia/MiEsenciaAdminSection.tsx';
 
 interface AdminDashboardProps {
   adminEmail: string | null;
@@ -20,7 +21,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onEnterParticipantPortal,
   onOpenConoceme,
 }) => {
-  const [activeTab, setActiveTab] = useState<'interviews' | 'questions' | 'config' | 'manuscripts' | 'audit' | 'privacy'>('interviews');
+  const [activeTab, setActiveTab] = useState<'interviews' | 'questions' | 'config' | 'manuscripts' | 'audit' | 'privacy' | 'mi_esencia'>('interviews');
   const [selectedInterviewIdForManuscript, setSelectedInterviewIdForManuscript] = useState<string | null>(null);
 
   const handleOpenManuscript = (interviewId: string) => {
@@ -43,6 +44,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           >
             <Users className="w-4 h-4" />
             <span>Gestión de Entrevistas</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('mi_esencia')}
+            className={`flex items-center space-x-2 py-3 px-3 sm:px-4 border-b-2 transition whitespace-nowrap cursor-pointer ${
+              activeTab === 'mi_esencia'
+                ? 'border-amber-700 text-amber-900 font-bold'
+                : 'border-transparent text-stone-500 hover:text-stone-800'
+            }`}
+          >
+            <Sparkles className="w-4 h-4 text-amber-700" />
+            <span>Mi Esencia</span>
           </button>
 
           <button
@@ -130,6 +143,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             onOpenManuscript={handleOpenManuscript}
             onEnterParticipantPortal={onEnterParticipantPortal}
           />
+        )}
+
+        {activeTab === 'mi_esencia' && (
+          <MiEsenciaAdminSection adminEmail={adminEmail || ''} />
         )}
 
         {activeTab === 'questions' && (

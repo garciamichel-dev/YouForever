@@ -1,6 +1,6 @@
 {
-  "summary":  "Plan de implementación actualizado con la integración del sistema de logotipo oficial de ForeverYou (4 variantes: Principal Vertical, Horizontal Lockup, App Icon y Print/Monochrome) en toda la plataforma web, favicon y en todos los nuevos libros PDF (Portada, Portadilla y Página final de cierre), además de la depuración ortográfica y de congruencia lógica.",
-  "updatedAt":  "2026-11-07T20:59:43.193219519Z",
+  "summary":  "Plan de implementación actualizado con conmutador global de Modo Claro y Modo Oscuro (ícono Sol/Luna) en todas las páginas de ForeverYou, además de paridad con ChatGPT Web en Mi Esencia, borrado definitivo con advertencia en BDD, ajuste manual de cuotas mensuales, edición completa de planes y códigos familiares agrupados por avatar, aceptación única del aviso de transparencia, menú de Preguntas Frecuentes (Niveles A, B y C), sugerencias dinámicas adaptadas al avatar, limpieza de conmutaciones de respaldo y ruta oficial /miesencia.",
+  "updatedAt":  "2026-11-09T18:21:47.760807003Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

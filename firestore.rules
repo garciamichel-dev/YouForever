@@ -129,6 +129,101 @@ service cloud.firestore {
       allow create, update: if isValidId(versionId) && request.resource.data.interviewId is string;
       allow delete: if isValidId(versionId);
     }
+
+    match /mi_esencia_config/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /mi_esencia_plans/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /mi_esencia_subscriptions/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /mi_esencia_persons/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /mi_esencia_pdfs/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /mi_esencia_testimonies/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /mi_esencia_relations/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /mi_esencia_interlocutors/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /mi_esencia_credentials/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /mi_esencia_memories/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /mi_esencia_contradictions/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /mi_esencia_payments/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /mi_esencia_coupons/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /mi_esencia_snapshots/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /mi_esencia_conversations/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /mi_esencia_notifications/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /mi_esencia_prompt_library/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /mi_esencia_prompt_versions/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /mi_esencia_fallback_logs/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
   }
 }
 

@@ -20,6 +20,7 @@ import {
   generateTransientDemoManuscript,
 } from './demoGeminiService.ts';
 import { analyzeAndTranscribeAudioWithGemini } from './geminiService.ts';
+import { miEsenciaRouter } from './miEsencia/miEsenciaRouter.ts';
 
 export const apiRouter: Router = express.Router();
 apiRouter.use(express.json({ limit: '100mb' }));
@@ -1782,6 +1783,9 @@ apiRouter.post('/demo/audio/transcribe', async (req: Request, res: Response) => 
     });
   }
 });
+
+// Isolated Mi Esencia Subsystem Routes (/api/mi-esencia/*)
+apiRouter.use('/mi-esencia', miEsenciaRouter);
 
 // Explicit 404 handler for API routes to guarantee JSON response and prevent falling through to Vite SPA index.html
 apiRouter.use((req: Request, res: Response) => {

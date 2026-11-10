@@ -334,6 +334,15 @@
         "createdAt": { "type": "string", "description": "ISO creation timestamp" }
       },
       "required": ["id", "interviewId", "participantId", "versionNumber", "title", "narrativeStyle", "editorialConfig", "manuscript", "createdAt"]
+    },
+    "MiEsenciaRecord": {
+      "title": "MiEsenciaRecord",
+      "description": "Isolated document in the Mi Esencia biographical conversational subsystem",
+      "type": "object",
+      "properties": {
+        "createdAt": { "type": "string", "description": "ISO timestamp" },
+        "updatedAt": { "type": "string", "description": "ISO timestamp" }
+      }
     }
   },
   "firestore": {
@@ -408,6 +417,82 @@
     "/participantBookVersions/{versionId}": {
       "schema": { "$ref": "#/entities/ParticipantBookVersion" },
       "description": "Immutable generated PDF book versions for interviewees"
+    },
+    "/mi_esencia_config/{docId}": {
+      "schema": { "$ref": "#/entities/MiEsenciaRecord" },
+      "description": "Mi Esencia global configuration"
+    },
+    "/mi_esencia_plans/{docId}": {
+      "schema": { "$ref": "#/entities/MiEsenciaRecord" },
+      "description": "Mi Esencia commercial plans"
+    },
+    "/mi_esencia_subscriptions/{docId}": {
+      "schema": { "$ref": "#/entities/MiEsenciaRecord" },
+      "description": "Mi Esencia family avatar subscriptions"
+    },
+    "/mi_esencia_persons/{docId}": {
+      "schema": { "$ref": "#/entities/MiEsenciaRecord" },
+      "description": "Mi Esencia biographical person profiles"
+    },
+    "/mi_esencia_pdfs/{docId}": {
+      "schema": { "$ref": "#/entities/MiEsenciaRecord" },
+      "description": "Mi Esencia archived Compilado Testimonial Fidedigno PDFs"
+    },
+    "/mi_esencia_testimonies/{docId}": {
+      "schema": { "$ref": "#/entities/MiEsenciaRecord" },
+      "description": "Mi Esencia immutable Level A testimony blocks"
+    },
+    "/mi_esencia_relations/{docId}": {
+      "schema": { "$ref": "#/entities/MiEsenciaRecord" },
+      "description": "Mi Esencia extracted related family members"
+    },
+    "/mi_esencia_interlocutors/{docId}": {
+      "schema": { "$ref": "#/entities/MiEsenciaRecord" },
+      "description": "Mi Esencia authorized family interlocutors"
+    },
+    "/mi_esencia_credentials/{docId}": {
+      "schema": { "$ref": "#/entities/MiEsenciaRecord" },
+      "description": "Mi Esencia cryptographic personal access codes"
+    },
+    "/mi_esencia_memories/{docId}": {
+      "schema": { "$ref": "#/entities/MiEsenciaRecord" },
+      "description": "Mi Esencia selective conversational memories (Level B & C)"
+    },
+    "/mi_esencia_contradictions/{docId}": {
+      "schema": { "$ref": "#/entities/MiEsenciaRecord" },
+      "description": "Mi Esencia family memory contradictions"
+    },
+    "/mi_esencia_payments/{docId}": {
+      "schema": { "$ref": "#/entities/MiEsenciaRecord" },
+      "description": "Mi Esencia payments and renewals"
+    },
+    "/mi_esencia_coupons/{docId}": {
+      "schema": { "$ref": "#/entities/MiEsenciaRecord" },
+      "description": "Mi Esencia promotional coupons"
+    },
+    "/mi_esencia_snapshots/{docId}": {
+      "schema": { "$ref": "#/entities/MiEsenciaRecord" },
+      "description": "Mi Esencia state snapshots for partial/total rollback"
+    },
+    "/mi_esencia_conversations/{docId}": {
+      "schema": { "$ref": "#/entities/MiEsenciaRecord" },
+      "description": "Mi Esencia family conversation sessions"
+    },
+    "/mi_esencia_notifications/{docId}": {
+      "schema": { "$ref": "#/entities/MiEsenciaRecord" },
+      "description": "Mi Esencia notifications and reminders"
+    },
+    "/mi_esencia_prompt_library/{docId}": {
+      "schema": { "$ref": "#/entities/MiEsenciaRecord" },
+      "description": "Mi Esencia global administrative prompt library"
+    },
+    "/mi_esencia_prompt_versions/{docId}": {
+      "schema": { "$ref": "#/entities/MiEsenciaRecord" },
+      "description": "Mi Esencia prompt version history for avatars and library"
+    },
+    "/mi_esencia_fallback_logs/{docId}": {
+      "schema": { "$ref": "#/entities/MiEsenciaRecord" },
+      "description": "Mi Esencia automatic provider fallback logs"
     }
   }
 }
