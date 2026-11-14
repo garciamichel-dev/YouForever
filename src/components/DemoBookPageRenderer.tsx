@@ -419,6 +419,11 @@ export const DemoComposedPageView: React.FC<{
         : photo.focusY === 'bottom'
         ? 'center bottom'
         : 'center center';
+    const natW = photo.width && photo.width > 0 ? photo.width : 800;
+    const natH = photo.height && photo.height > 0 ? photo.height : 600;
+    const ar = natW / natH;
+    const widthClass =
+      ar <= 0.85 ? 'w-3/5 max-w-[62%]' : ar <= 1.15 ? 'w-2/3 max-w-[72%]' : 'w-4/5 max-w-[86%]';
     const editorialCaption = formatPhotoEditorialCaption(photo.caption);
     const fallbackSvgDataUrl = `data:image/svg+xml;utf8,${encodeURIComponent(
       `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 200" fill="none"><rect width="320" height="200" rx="12" fill="#F5EFE6"/><rect x="16" y="16" width="288" height="168" rx="8" stroke="${borderColorHex}" stroke-width="1.5" stroke-dasharray="4 4" opacity="0.65"/><circle cx="122" cy="78" r="16" stroke="${borderColorHex}" stroke-width="2" opacity="0.75"/><path d="M58 156L114 106L158 142L206 94L262 156H58Z" stroke="${borderColorHex}" stroke-width="2" stroke-linejoin="round" opacity="0.75"/></svg>`
@@ -426,7 +431,7 @@ export const DemoComposedPageView: React.FC<{
     return (
       <div className="w-full flex flex-col items-center justify-center my-2 shrink-0 overflow-hidden">
         <div
-          className={`relative w-4/5 ${heightClass} shrink-0 rounded-lg overflow-hidden border shadow-xs flex items-center justify-center bg-black/5`}
+          className={`relative ${widthClass} ${heightClass} shrink-0 rounded-lg overflow-hidden border shadow-xs flex items-center justify-center bg-black/5`}
           style={{ borderColor: borderColorHex }}
         >
           <img

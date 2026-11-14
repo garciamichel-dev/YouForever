@@ -113,8 +113,28 @@ export const AuditLogsPanel: React.FC<AuditLogsPanelProps> = ({ adminEmail }) =>
                     <td className="px-4 py-3 whitespace-nowrap text-stone-700 font-medium">
                       {l.performedBy}
                     </td>
-                    <td className="px-4 py-3 max-w-sm truncate text-[11px] text-stone-500 font-mono">
-                      {l.details ? JSON.stringify(l.details) : '—'}
+                    <td className="px-4 py-3 max-w-md text-[11px] text-stone-600">
+                      {l.details ? (
+                        <div className="space-y-1">
+                          {Boolean((l.details as any).internalReasonCode) && (
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span className="px-1.5 py-0.5 rounded bg-amber-100 border border-amber-300 text-amber-950 font-mono font-bold text-[10px]">
+                                {String((l.details as any).internalReasonCode)}
+                              </span>
+                              {Boolean((l.details as any).diagnosticSummary) && (
+                                <span className="text-amber-900 font-medium text-[11px]">
+                                  {String((l.details as any).diagnosticSummary)}
+                                </span>
+                              )}
+                            </div>
+                          )}
+                          <div className="font-mono text-[10px] text-stone-500 truncate">
+                            {JSON.stringify(l.details)}
+                          </div>
+                        </div>
+                      ) : (
+                        '—'
+                      )}
                     </td>
                   </tr>
                 ))

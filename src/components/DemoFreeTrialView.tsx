@@ -658,12 +658,19 @@ export const DemoFreeTrialView: React.FC<DemoFreeTrialViewProps> = ({
 
   // Fallback manuscript recovery if network fails
   const handleUseFaithfulFallbackManuscript = () => {
-    const fallback = buildFaithfulFallbackManuscript({
+    const baseFallback = buildFaithfulFallbackManuscript({
       profile,
       responses,
       narrativeStyle,
       dedication: editorialConfig.dedication,
     });
+    const fallback: DemoManuscript = {
+      ...baseFallback,
+      generationStatus: 'incomplete_draft',
+      status: 'incomplete_draft',
+      incompleteDraftNotice:
+        'Este borrador preliminar reúne tus respuestas originales, pero todavía necesita una nueva generación para quedar redactado como libro completo. Puedes leerlo ahora y volver a intentarlo cuando quieras.',
+    };
     setAiGeneratedManuscript(fallback);
     setWorkingManuscript(fallback);
     setHasManualEdits(false);
@@ -1990,6 +1997,32 @@ export const DemoFreeTrialView: React.FC<DemoFreeTrialViewProps> = ({
               </div>
             </div>
 
+            {(workingManuscript.generationStatus === 'incomplete_draft' ||
+              workingManuscript.status === 'incomplete_draft') && (
+              <div
+                data-testid="demo-incomplete-draft-banner"
+                className="bg-amber-50 border-2 border-amber-300 text-amber-950 rounded-2xl p-4 sm:p-5 text-sm flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 shadow-xs"
+              >
+                <div className="space-y-1">
+                  <div className="text-xs font-extrabold tracking-wide uppercase text-amber-900">
+                    BORRADOR INCOMPLETO — PENDIENTE DE REVISIÓN
+                  </div>
+                  <p className="text-xs text-amber-900 leading-relaxed">
+                    {workingManuscript.incompleteDraftNotice ||
+                      'Puedes leer este borrador preliminar aquí, pero todavía necesita volver a generarse para reunir todos tus recuerdos con total fluidez.'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handleGenerateManuscript(narrativeStyle)}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-amber-800 hover:bg-amber-900 text-white text-xs font-semibold shrink-0 cursor-pointer"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>Intentar de nuevo</span>
+                </button>
+              </div>
+            )}
+
             {/* ============================================================= */}
             {/* SUB-TAB 1: DISEÑO DE PORTADA, INTERIORES Y FORMATO FÍSICO     */}
             {/* ============================================================= */}
@@ -2406,6 +2439,37 @@ export const DemoFreeTrialView: React.FC<DemoFreeTrialViewProps> = ({
                         placeholder="Para quienes amo con todo mi corazón..."
                         className="w-full p-3 border border-stone-300 rounded-xl text-xs sm:text-sm text-stone-900"
                       />
+                    </div>
+
+                    <div className="flex flex-wrap gap-4 pt-2 border-t border-stone-100">
+                      <label className="inline-flex items-center gap-2 text-xs text-stone-800 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(editorialConfig.includeTableOfContents)}
+                          onChange={(e) =>
+                            setEditorialConfig((prev) => ({
+                              ...prev,
+                              includeTableOfContents: e.target.checked,
+                            }))
+                          }
+                          className="w-4 h-4 rounded border-stone-300 text-amber-800"
+                        />
+                        <span>Incluir índice de capítulos</span>
+                      </label>
+                      <label className="inline-flex items-center gap-2 text-xs text-stone-800 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(editorialConfig.includeEditorialCredits)}
+                          onChange={(e) =>
+                            setEditorialConfig((prev) => ({
+                              ...prev,
+                              includeEditorialCredits: e.target.checked,
+                            }))
+                          }
+                          className="w-4 h-4 rounded border-stone-300 text-amber-800"
+                        />
+                        <span>Incluir página de créditos editoriales</span>
+                      </label>
                     </div>
                   </div>
                 </div>

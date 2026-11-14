@@ -59,6 +59,8 @@ export function createInitialDemoSessionState(nowMs: number = Date.now()): DemoT
       customSubtitle: '',
       customAuthors: '',
       dedication: '',
+      includeTableOfContents: true,
+      includeEditorialCredits: false,
     },
     aiGeneratedManuscript: null,
     workingManuscript: null,

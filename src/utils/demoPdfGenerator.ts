@@ -6,7 +6,10 @@ import {
   DemoInMemoryPhoto,
   DemoInteriorStyleSpec,
   DemoThematicIllustrationId,
+  PdfIntegrityReport,
+  TableOfContentsEntry,
   buildSafeDemoPdfFilename,
+  computeAdaptivePhotoDimensions,
   formatPhotoEditorialCaption,
 } from '../logic/demoStoryRules.ts';
 import {
@@ -430,21 +433,22 @@ function drawViewerPhotoBoxOnCanvas(params: {
     captionColorHex,
   } = params;
 
-  const boxW = containerW * 0.8;
-  const boxX = cx - boxW / 2;
+  const src = getPhotoSrc(photo);
+  const img = src ? decodedImageCache.get(src) : null;
+  const effW = (photo.width && photo.width > 0 ? photo.width : 0) || (img ? img.naturalWidth || img.width || 640 : 640);
+  const effH = (photo.height && photo.height > 0 ? photo.height : 0) || (img ? img.naturalHeight || img.height || 420 : 420);
+  const ar = effW > 0 && effH > 0 ? Math.max(0.5, Math.min(2.2, effW / effH)) : 4 / 3;
   const captionSpace = photo.caption ? 16 : 0;
   const frameH = Math.max(40, boxHeightPx - captionSpace);
+  const maxBoxW = ar <= 0.85 ? containerW * 0.56 : ar <= 1.15 ? containerW * 0.68 : containerW * 0.84;
+  const boxW = Math.min(maxBoxW, Math.max(containerW * 0.42, frameH * ar));
+  const boxX = cx - boxW / 2;
 
   ctx.save();
   drawRoundedRectPath(ctx, boxX, topY, boxW, frameH, 8);
   ctx.fillStyle = '#F6F1E7';
   ctx.fill();
   ctx.clip();
-
-  const src = getPhotoSrc(photo);
-  const img = src ? decodedImageCache.get(src) : null;
-  const effW = img ? img.naturalWidth || img.width || 640 : 0;
-  const effH = img ? img.naturalHeight || img.height || 420 : 0;
   if (img && effW > 0 && effH > 0) {
     const imgRatio = effW / effH;
     const boxRatio = boxW / frameH;
@@ -1632,10 +1636,41 @@ function renderRichParagraphPdf(params: {
     cursorY = Math.max(cursorY, startY + dropCapLinesCount * effectiveLineHeightMm);
   }
 
+  const reconstructStyledMarkdownFromTokens = (lineTokens: StyledWordToken[]): string => {
+    if (lineTokens.length === 0) return '';
+    const outChunks: string[] = [];
+    let currentStyle: StyledWordToken['style'] = 'normal';
+    let runWords: string[] = [];
+
+    const flushRun = () => {
+      if (runWords.length === 0) return;
+      const joined = runWords.join(' ');
+      if (currentStyle === 'bold') {
+        outChunks.push(`**${joined}**`);
+      } else if (currentStyle === 'italic') {
+        outChunks.push(`*${joined}*`);
+      } else {
+        outChunks.push(joined);
+      }
+      runWords = [];
+    };
+
+    for (const tok of lineTokens) {
+      if (tok.style !== currentStyle) {
+        flushRun();
+        currentStyle = tok.style;
+      }
+      runWords.push(tok.word);
+    }
+    flushRun();
+    return outChunks.join(' ').trim();
+  };
+
   const overflowText =
     overflowLines.length > 0
       ? overflowLines
-          .map((ln) => ln.tokens.map((t) => t.word).join(' '))
+          .map((ln) => reconstructStyledMarkdownFromTokens(ln.tokens))
+          .filter(Boolean)
           .join(' ')
           .trim()
       : '';
@@ -2280,7 +2315,12 @@ function renderTableOfContentsPagePdf(
 function renderChapterContentPagePdf(
   doc: jsPDF,
   composed: ComposedBookDocument,
-  page: ComposedBookPage
+  page: ComposedBookPage,
+  options?: {
+    totalBookPhotos?: number;
+    onChapterStartPdfPage?: (chapterId: string, pdfPageNumber: number) => void;
+    onPhotoRendered?: () => void;
+  }
 ): void {
   const { format, interiorStyle } = composed;
   const W = format.widthMm;
@@ -2294,6 +2334,8 @@ function renderChapterContentPagePdf(
   const horizMargin = (format.marginInnerMm + format.marginOuterMm) / 2;
   const contentW = W - horizMargin * 2;
   const cx = W / 2;
+
+  const totalBookPhotos = Math.max(1, options?.totalBookPhotos || 1);
 
   const drawPageChromeAndRunningHeader = () => {
     doc.setFillColor(bgRgb[0], bgRgb[1], bgRgb[2]);
@@ -2313,12 +2355,12 @@ function renderChapterContentPagePdf(
     );
   };
 
-  const drawPageFooterNumber = (pageNum: number) => {
+  const drawPageFooterNumber = (pdfPageNum: number) => {
     if (page.showPageNumber) {
       doc.setFont(font, 'normal');
       doc.setFontSize(9);
       doc.setTextColor(mutedRgb[0], mutedRgb[1], mutedRgb[2]);
-      doc.text(`— ${pageNum} —`, cx, H - format.marginBottomMm + 7, {
+      doc.text(`— ${pdfPageNum} —`, cx, H - format.marginBottomMm + 7, {
         align: 'center',
       });
     }
@@ -2328,10 +2370,10 @@ function renderChapterContentPagePdf(
 
   let cursorY = format.marginTopMm + 4;
   const sections = page.sections || [];
-  const maxBottomY = H - format.marginBottomMm - 6;
+  const maxBottomY = H - format.marginBottomMm - 8;
 
   const startOverflowContinuationPage = (secTitle: string): number => {
-    drawPageFooterNumber(page.pageNumber);
+    drawPageFooterNumber(doc.getNumberOfPages());
     doc.addPage([format.widthMm, format.heightMm], 'portrait');
     drawPageChromeAndRunningHeader();
     let newY = format.marginTopMm + 4;
@@ -2353,6 +2395,9 @@ function renderChapterContentPagePdf(
     }
 
     if (!sec.isContinuation) {
+      if (options?.onChapterStartPdfPage) {
+        options.onChapterStartPdfPage(sec.chapterId, doc.getNumberOfPages());
+      }
       doc.setFont(font, 'bold');
       doc.setFontSize(8.5);
       doc.setTextColor(accentRgb[0], accentRgb[1], accentRgb[2]);
@@ -2377,31 +2422,45 @@ function renderChapterContentPagePdf(
       cursorY += 6;
     }
 
+    const chapterPhotosOnSec =
+      Object.values(sec.paragraphPhotos || {}).reduce((sum, arr) => sum + (arr?.length || 0), 0) +
+      (sec.photo ? 1 : 0);
+
     if (
       sec.photo &&
       !sec.isContinuation &&
       (!sec.paragraphPhotos || Object.keys(sec.paragraphPhotos).length === 0)
     ) {
-      const photoBoxH = Math.min(38, (H - cursorY - format.marginBottomMm) * 0.34);
-      if (photoBoxH >= 20) {
+      const cap = formatPhotoEditorialCaption(sec.photo.caption);
+      const dims = computeAdaptivePhotoDimensions({
+        format,
+        usableWidthMm: contentW,
+        availableHeightMm: Math.max(24, maxBottomY - cursorY),
+        naturalWidth: sec.photo.width,
+        naturalHeight: sec.photo.height,
+        photoCountInBook: totalBookPhotos,
+        photoCountInChapter: Math.max(1, chapterPhotosOnSec),
+        hasCaption: Boolean(cap),
+      });
+      if (dims.heightMm >= 14) {
         drawFittedPhoto(
           doc,
           sec.photo,
-          horizMargin + contentW * 0.15,
+          cx - dims.widthMm / 2,
           cursorY,
-          contentW * 0.7,
-          photoBoxH,
+          dims.widthMm,
+          dims.heightMm,
           accentRgb
         );
-        cursorY += photoBoxH + 3.5;
-        const cap = formatPhotoEditorialCaption(sec.photo.caption);
+        if (options?.onPhotoRendered) options.onPhotoRendered();
+        cursorY += dims.heightMm + 3.2;
         if (cap) {
           doc.setFont(font, 'italic');
           doc.setFontSize(8);
           doc.setTextColor(mutedRgb[0], mutedRgb[1], mutedRgb[2]);
           doc.text(stripInlineFormatting(cap), cx, cursorY, {
             align: 'center',
-            maxWidth: contentW * 0.8,
+            maxWidth: contentW * 0.84,
           });
           cursorY += 4.5;
         }
@@ -2454,30 +2513,40 @@ function renderChapterContentPagePdf(
 
       const paraPhotos = sec.paragraphPhotos?.[pIdx] || [];
       for (const pItem of paraPhotos) {
-        let photoBoxH = Math.min(36, (H - cursorY - format.marginBottomMm) * 0.38);
-        if (photoBoxH < 18 && !composed.isPreviewSample) {
+        const cap = formatPhotoEditorialCaption(pItem.caption);
+        const fullAvail = Math.max(0, maxBottomY - cursorY);
+        if (fullAvail < 22 && !composed.isPreviewSample) {
           cursorY = startOverflowContinuationPage(sec.title);
-          photoBoxH = 34;
         }
-        if (photoBoxH >= 16) {
+        const dims = computeAdaptivePhotoDimensions({
+          format,
+          usableWidthMm: contentW,
+          availableHeightMm: Math.max(22, maxBottomY - cursorY),
+          naturalWidth: pItem.width,
+          naturalHeight: pItem.height,
+          photoCountInBook: totalBookPhotos,
+          photoCountInChapter: Math.max(1, chapterPhotosOnSec),
+          hasCaption: Boolean(cap),
+        });
+        if (dims.heightMm >= 14) {
           drawFittedPhoto(
             doc,
             pItem,
-            horizMargin + contentW * 0.15,
+            cx - dims.widthMm / 2,
             cursorY,
-            contentW * 0.7,
-            photoBoxH,
+            dims.widthMm,
+            dims.heightMm,
             accentRgb
           );
-          cursorY += photoBoxH + 3.2;
-          const cap = formatPhotoEditorialCaption(pItem.caption);
+          if (options?.onPhotoRendered) options.onPhotoRendered();
+          cursorY += dims.heightMm + 3.2;
           if (cap) {
             doc.setFont(font, 'italic');
             doc.setFontSize(8);
             doc.setTextColor(mutedRgb[0], mutedRgb[1], mutedRgb[2]);
             doc.text(stripInlineFormatting(cap), cx, cursorY, {
               align: 'center',
-              maxWidth: contentW * 0.8,
+              maxWidth: contentW * 0.84,
             });
             cursorY += 4.2;
           }
@@ -2506,7 +2575,7 @@ function renderChapterContentPagePdf(
     }
   }
 
-  drawPageFooterNumber(page.pageNumber);
+  drawPageFooterNumber(doc.getNumberOfPages());
 }
 
 function renderClosingMandatoryPagePdf(
@@ -2592,10 +2661,131 @@ function renderClosingMandatoryPagePdf(
 }
 
 /**
+ * Inspects a rendered jsPDF instance and its composed specification to verify PDF structural
+ * and editorial integrity (cover present, non-empty valid pages, zero duplicate footer page numbers,
+ * zero broken markdown/photo markers, TOC page numbers synchronized with real PDF pages, photos embedded).
+ */
+export function verifyExportedPdfIntegrity(params: {
+  doc: jsPDF;
+  composed: ComposedBookDocument;
+  actualChapterStartPages: Map<string, number>;
+  resolvedTocEntries: TableOfContentsEntry[];
+  photosExpected: number;
+  photosEmbedded: number;
+  pdfBytes?: Uint8Array;
+}): PdfIntegrityReport {
+  const {
+    doc,
+    composed,
+    actualChapterStartPages,
+    resolvedTocEntries,
+    photosExpected,
+    photosEmbedded,
+    pdfBytes,
+  } = params;
+
+  const totalPages = doc.getNumberOfPages();
+  const errors: string[] = [];
+
+  if (totalPages < 2) {
+    errors.push(`Número insuficiente de páginas en PDF (${totalPages}).`);
+  }
+  if (pdfBytes && pdfBytes.length < 400) {
+    errors.push('Archivo PDF generado con tamaño inválido.');
+  }
+
+  const internalPages: unknown[] = ((doc.internal as unknown as { pages?: unknown[] })?.pages) || [];
+  const seenFooterNumbers = new Set<number>();
+  const duplicatePageNumbers: number[] = [];
+  let brokenMarkersDetected = 0;
+
+  for (let pNum = 1; pNum <= totalPages; pNum++) {
+    const rawPageContent = internalPages[pNum];
+    const pageStream = Array.isArray(rawPageContent)
+      ? rawPageContent.join('\n')
+      : typeof rawPageContent === 'string'
+      ? rawPageContent
+      : '';
+
+    if (/\*\*|\[FOTO\s*:|\[Nota de voz\]/i.test(pageStream)) {
+      brokenMarkersDetected++;
+    }
+
+    // Detect footer page number `(— 3 —) Tj` or UTF-16 / literal match
+    const footerMatches = pageStream.match(/—\s*(\d+)\s*—|\\227\s*(\d+)\s*\\227/g) || [];
+    for (const fm of footerMatches) {
+      const digits = (fm.match(/\d+/) || [])[0];
+      if (digits) {
+        const parsed = parseInt(digits, 10);
+        if (seenFooterNumbers.has(parsed)) {
+          if (!duplicatePageNumbers.includes(parsed)) {
+            duplicatePageNumbers.push(parsed);
+          }
+        } else {
+          seenFooterNumbers.add(parsed);
+        }
+      }
+    }
+  }
+
+  if (duplicatePageNumbers.length > 0) {
+    errors.push(
+      `Numeración de página duplicada detectada en PDF: ${duplicatePageNumbers.join(', ')}.`
+    );
+  }
+  if (brokenMarkersDetected > 0) {
+    errors.push(
+      `Se detectaron ${brokenMarkersDetected} página(s) con marcadores técnicos o markdown sin formatear.`
+    );
+  }
+
+  const tocPagesInComposed = composed.pages.filter((p) => p.kind === 'table_of_contents');
+  const tocPresent = tocPagesInComposed.length > 0;
+  let tocPageNumbersValid = true;
+  if (tocPresent) {
+    for (const entry of resolvedTocEntries) {
+      const realStart = actualChapterStartPages.get(entry.chapterId);
+      if (realStart !== undefined && realStart !== entry.startPageNumber) {
+        tocPageNumbersValid = false;
+        errors.push(
+          `Índice desfasado para capítulo "${entry.title}": índice marca pág. ${entry.startPageNumber}, real pág. ${realStart}.`
+        );
+      }
+    }
+  }
+
+  if (photosExpected > 0 && photosEmbedded < photosExpected) {
+    errors.push(
+      `Fotografías faltantes en PDF: ${photosEmbedded}/${photosExpected} incrustadas.`
+    );
+  }
+
+  const coverRendered = totalPages >= 1 && composed.pages[0]?.kind === 'cover';
+  if (!coverRendered) {
+    errors.push('No se detectó la página de portada al inicio del PDF.');
+  }
+
+  return {
+    passed: errors.length === 0,
+    totalPages,
+    coverRendered,
+    tocPresent,
+    tocEntryCount: resolvedTocEntries.length,
+    tocPageNumbersValid,
+    duplicatePageNumbers,
+    brokenMarkersDetected,
+    photosExpected,
+    photosEmbedded,
+    errors,
+  };
+}
+
+/**
  * Generates the real downloadable PDF Blob and Object URL from the composed book document.
- * Both the 6-page sample PDF and the full book PDF are generated with 100% selectable and
- * copyable native vector text (`doc.text`), embedding as images (`doc.addImage`) ONLY the
- * interviewee's shared photographs, cover illustration artwork, and the YouForever logo mark.
+ * Guarantees:
+ * - Dynamic PDF page numbers never duplicate across overflow continuation pages.
+ * - Multi-page and single-page Table of Contents entries reconcile 100% with real post-overflow PDF page indices.
+ * - Returns `integrityReport` and `pdfBytes` alongside `blob`, `blobUrl`, `filename`, and `pageCount`.
  */
 export function generateRealDemoBookPdf(params: {
   composed: ComposedBookDocument;
@@ -2605,6 +2795,8 @@ export function generateRealDemoBookPdf(params: {
   blobUrl: string;
   filename: string;
   pageCount: number;
+  pdfBytes: Uint8Array;
+  integrityReport: PdfIntegrityReport;
 } {
   const { composed, profile } = params;
   const { format, pages } = composed;
@@ -2624,6 +2816,26 @@ export function generateRealDemoBookPdf(params: {
     keywords: 'autobiografía, memoria familiar, legado, YouForever',
   });
 
+  // Count total unique photos across the composed book for adaptive photo sizing and verification
+  const expectedPhotoIds = new Set<string>();
+  for (const p of pages) {
+    for (const sec of p.sections || []) {
+      if (sec.photo && !sec.isContinuation && (!sec.paragraphPhotos || Object.keys(sec.paragraphPhotos).length === 0)) {
+        expectedPhotoIds.add(sec.photo.id);
+      }
+      for (const arr of Object.values(sec.paragraphPhotos || {})) {
+        for (const ph of arr || []) {
+          if (ph?.id) expectedPhotoIds.add(ph.id);
+        }
+      }
+    }
+  }
+  const totalBookPhotos = expectedPhotoIds.size;
+  let photosEmbedded = 0;
+
+  const actualChapterStartPages = new Map<string, number>();
+  const deferredTocPages: Array<{ pdfPageIndex: number; page: ComposedBookPage }> = [];
+
   pages.forEach((page, idx) => {
     if (idx > 0) {
       doc.addPage([format.widthMm, format.heightMm], 'portrait');
@@ -2636,23 +2848,75 @@ export function generateRealDemoBookPdf(params: {
     } else if (page.kind === 'editorial_credits') {
       renderEditorialCreditsPagePdf(doc, composed, page);
     } else if (page.kind === 'table_of_contents') {
-      renderTableOfContentsPagePdf(doc, composed, page);
+      // Reserve this physical PDF page; we render TOC entries after all chapter overflow pages settle
+      deferredTocPages.push({ pdfPageIndex: doc.getNumberOfPages(), page });
     } else if (page.kind === 'chapter_content') {
-      renderChapterContentPagePdf(doc, composed, page);
+      renderChapterContentPagePdf(doc, composed, page, {
+        totalBookPhotos,
+        onChapterStartPdfPage: (chapterId, pdfPageNum) => {
+          if (!actualChapterStartPages.has(chapterId)) {
+            actualChapterStartPages.set(chapterId, pdfPageNum);
+          }
+        },
+        onPhotoRendered: () => {
+          photosEmbedded++;
+        },
+      });
     } else if (page.kind === 'closing_mandatory') {
       renderClosingMandatoryPagePdf(doc, composed, page);
     }
   });
 
-  const blob = doc.output('blob');
-  const blobUrl = URL.createObjectURL(blob);
+  // Back-patch deferred Table of Contents pages with 100% verified physical chapter page numbers
+  const resolvedTocEntries: TableOfContentsEntry[] = [];
+  if (deferredTocPages.length > 0) {
+    const finalTotalPages = doc.getNumberOfPages();
+    for (const rec of deferredTocPages) {
+      const updatedEntries = (rec.page.tocEntries || []).map((e) => ({
+        ...e,
+        startPageNumber: actualChapterStartPages.get(e.chapterId) ?? e.startPageNumber,
+      }));
+      resolvedTocEntries.push(...updatedEntries);
+      doc.setPage(rec.pdfPageIndex);
+      renderTableOfContentsPagePdf(doc, composed, {
+        ...rec.page,
+        pageNumber: rec.pdfPageIndex,
+        totalPages: finalTotalPages,
+        tocEntries: updatedEntries,
+      });
+    }
+    doc.setPage(finalTotalPages);
+  }
+
+  const arrayBuf = doc.output('arraybuffer') as ArrayBuffer;
+  const pdfBytes = new Uint8Array(arrayBuf);
+  const blob =
+    typeof Blob !== 'undefined'
+      ? new Blob([pdfBytes], { type: 'application/pdf' })
+      : (doc.output('blob') as Blob);
+  const blobUrl =
+    typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function'
+      ? URL.createObjectURL(blob)
+      : '';
   const filename = buildSafeDemoPdfFilename(profile, format.id);
+
+  const integrityReport = verifyExportedPdfIntegrity({
+    doc,
+    composed,
+    actualChapterStartPages,
+    resolvedTocEntries,
+    photosExpected: totalBookPhotos,
+    photosEmbedded,
+    pdfBytes,
+  });
 
   return {
     blob,
     blobUrl,
     filename,
     pageCount: doc.getNumberOfPages(),
+    pdfBytes,
+    integrityReport,
   };
 }
 

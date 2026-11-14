@@ -19,16 +19,27 @@ import {
   MiEsenciaArchivedCompilationPdf,
 } from '../logic/miEsenciaRules.ts';
 import {
+  BookGenerationReasonCode,
   BOOK_GENERATION_ENGINE_VERSION,
   CANONICAL_AUDIT_RULES_VERSION,
   ComposedChapterSectionBlock,
+  ContextualRepairTask,
   DEMO_NARRATIVE_STYLES,
+  DemoChapterManuscript,
   DemoChapterPhotoPlacement,
   DemoInMemoryPhoto,
   DemoManuscript,
   DemoNarrativeStyleId,
+  DocumentaryAuditReport,
+  DocumentaryInventory,
+  EditorialQualityAuditReport,
   StructuredChapterTestimonyUnit,
+  TraceabilityMatrixEntry,
   auditAndApproveBookManuscript,
+  auditBookEditorialQuality,
+  buildContextualRepairTasks,
+  buildDocumentaryInventory,
+  buildEditorialChapterPlan,
   buildParticipantInitialManuscriptFromAnswers,
   cleanSpanishOralText,
   computeCanonicalManuscriptCacheKey,
@@ -37,8 +48,10 @@ import {
   formatPhotoEditorialCaption,
   repairManuscriptOmissions,
   resolveAnswerExclusionReason,
+  resolveCanonicalAnswerSource,
   resolveDocumentaryPhotoChapterAndParagraph,
   sanitizeAndRepairBookManuscript,
+  splitAnswerTextIntoIncludedAndExcludedSentences,
   stripInlinePhotoMarkers,
 } from '../logic/demoStoryRules.ts';
 
@@ -58,6 +71,28 @@ export interface AdaptiveQuestionResult {
   reason?: string;
 }
 
+export interface BookGenerationProgressEvent {
+  phase:
+    | 'preparing_sources'
+    | 'drafting_batches'
+    | 'auditing_semantics'
+    | 'repairing_chapters'
+    | 'finalizing';
+  currentBatch?: number;
+  totalBatches?: number;
+  completedBatches?: number;
+  repairPass?: number;
+  repairedChapters?: number;
+  totalRepairChapters?: number;
+  userMessage: string;
+}
+
+export interface BookBatchCheckpointPayload {
+  parsed: any;
+  respondedModel: string;
+  cachedTokens?: number;
+}
+
 export interface ManuscriptDraftResult {
   title: string;
   summary: string;
@@ -70,8 +105,17 @@ export interface ManuscriptDraftResult {
   compiledMarkdown: string;
   generatedAt: string;
   isFallbackDraft?: boolean;
-  generationStatus?: 'approved' | 'generated' | 'failed_audit';
+  generationStatus?: 'approved' | 'generated' | 'failed_audit' | 'incomplete_draft';
+  isPartialMemoir?: boolean;
+  incompleteDraftNotice?: string;
+  internalReasonCode?: BookGenerationReasonCode;
+  diagnosticSummary?: string;
+  documentaryAudit?: DocumentaryAuditReport;
+  editorialAudit?: EditorialQualityAuditReport;
 }
+
+const PLAIN_INCOMPLETE_DRAFT_USER_NOTICE =
+  'Este borrador preliminar todavía necesita una revisión para reunir todos tus recuerdos con total fidelidad y fluidez. Puedes leerlo ahora y volver a intentarlo cuando lo desees; no se guardará como versión definitiva hasta quedar completo.';
 
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY,
@@ -603,72 +647,160 @@ export async function generateManuscriptDraft(params: {
     bookStructureMode = 'prompt_autonomous',
   } = params;
 
-  const questionMap = new Map(questions.map((q) => [q.id, q]));
-  const structuredEntries = answers.map((a) => {
-    const q = questionMap.get(a.questionId);
-    const parentQ = a.parentQuestionId ? questionMap.get(a.parentQuestionId) : undefined;
-    const etapa = q?.lifeStage || parentQ?.lifeStage || 'legado_general';
-    const tema =
-      q?.topic ||
-      parentQ?.topic ||
-      (a.isAdditionalMemory ? 'informacion_adicional' : 'profundizacion');
-    const pregunta =
-      a.questionText ||
-      q?.text ||
-      (a.isAdditionalMemory
-        ? 'Información adicional incorporada por el entrevistado'
-        : 'Pregunta de profundización');
+  const participantNames = participants.map((p) => p.name).filter(Boolean);
+  const effectiveNarrativeStyle: DemoNarrativeStyleId = 'first_person_literary';
+  const activeLiteraryPrompt =
+    literaryPromptText && literaryPromptText.trim().length > 0
+      ? literaryPromptText.trim()
+      : DEFAULT_LITERARY_PROMPTS_TEXT[effectiveNarrativeStyle];
 
-    return {
-      etapa,
-      tema,
-      pregunta,
-      autor: a.participantName,
-      texto: a.notRecalled ? '[No recordado]' : a.answerText,
-      esProfundizacion: a.isFollowUp,
-      esRecuerdoAdicional: a.isAdditionalMemory,
-      fotografias: (a.photos || []).map((p) => ({
-        id: p.id,
-        url: p.imageUrl || `/api/photos/${p.id}`,
-        descripcionContexto: p.caption,
-        autor: p.participantName,
-        etapa: p.lifeStage || etapa,
-      })),
-    };
+  const editorialPlan = buildEditorialChapterPlan({
+    interviewTitle: interview.title,
+    storyMode: interview.storyMode,
+    participantNames,
+    answers,
+    questions,
+    bookStructureMode,
   });
 
-  const systemInstructionForDraft = `${literaryPromptText || ''}\n\nEres el biógrafo y editor de legado personal y memorias familiares de YouForever. Devuelve un objeto JSON con: "title", "summary", "chapters" (array de {title, lifeStage, content, participantAttributions}) y "compiledMarkdown".`.trim();
+  const questionMap = new Map(questions.map((q) => [q.id, q]));
+  const structuredEntries = answers
+    .filter((a) => resolveAnswerExclusionReason(a as any) === 'none')
+    .map((a) => {
+      const q = questionMap.get(a.questionId);
+      const parentQ = a.parentQuestionId ? questionMap.get(a.parentQuestionId) : undefined;
+      const etapa = q?.lifeStage || parentQ?.lifeStage || 'legado_general';
+      const tema =
+        q?.topic ||
+        parentQ?.topic ||
+        (a.isAdditionalMemory ? 'informacion_adicional' : 'profundizacion');
+      const pregunta =
+        a.questionText ||
+        q?.text ||
+        (a.isAdditionalMemory
+          ? 'Información adicional incorporada por el entrevistado'
+          : 'Pregunta de profundización');
+      const canonicalSource = resolveCanonicalAnswerSource(a);
+
+      return {
+        answerId: a.id,
+        etapa,
+        tema,
+        pregunta,
+        autor: a.participantName,
+        texto: a.notRecalled ? '[No recordado]' : canonicalSource.text,
+        notaDiscrepanciaAudio:
+          canonicalSource.hasWrittenText && canonicalSource.hasAudioTranscription
+            ? 'Respuesta escrita final priorizada sobre transcripción de audio.'
+            : undefined,
+        esProfundizacion: a.isFollowUp,
+        esRecuerdoAdicional: a.isAdditionalMemory,
+        fotografias: (a.photos || []).map((p) => ({
+          id: p.id,
+          url: p.imageUrl || `/api/photos/${p.id}`,
+          descripcionContexto: p.caption,
+          autor: p.participantName,
+          etapa: p.lifeStage || etapa,
+        })),
+      };
+    })
+    .filter((entry) => entry.texto.length > 0 || entry.fotografias.length > 0);
+
+  const plannedOutlineSummary = editorialPlan.chapters
+    .map(
+      (c) =>
+        `- Capítulo ${c.partNumber} (${c.stageKey}): "${c.suggestedTitleIndividual}" | Respuestas asignadas: ${c.assignedAnswerIds.join(', ')}`
+    )
+    .join('\n');
+
+  const partialMemoirRule = editorialPlan.isPartialMemoir
+    ? `\nENTREVISTA PARCIAL DETECTADA (ETAPAS DOCUMENTADAS: ${(editorialPlan.documentedStages || []).join(', ')}):
+- Presenta la obra honestamente como "${editorialPlan.partialMemoirSubtitle || 'Un libro parcial de memorias'}".
+- PROHIBIDO inventar infancia, adolescencia, adultez o vejez si no constan en los testimonios recibidos.\n`
+    : '';
+
+  const systemInstructionForDraft = `${activeLiteraryPrompt}\n\nEres el biógrafo y editor de legado personal y memorias familiares de YouForever. Devuelve un objeto JSON con: "title", "summary", "chapters" (array de {title, lifeStage, content, participantAttributions}) y "compiledMarkdown".`.trim();
 
   const prompt = `Debes componer el LIBRO COMPLETO DE HISTORIA DE VIDA Y LEGADO a partir EXCLUSIVAMENTE de los testimonios reales recopilados:
 Título de la obra: "${interview.title}"
 Modalidad: ${interview.storyMode === 'compartida' ? 'Historia Compartida (múltiples perspectivas familiares)' : 'Historia Individual y Testimonial'}
-Protagonista y Participantes: ${participants.map((p) => `${p.name} (${p.relationship})`).join(', ')}
+Protagonista y Participantes: ${participantNames.join(', ')}
+${partialMemoirRule}
+Plan editorial temático y cronológico sugerido (NO crees un capítulo por cada pregunta):
+${plannedOutlineSummary}
 
-Testimonios reales recopilados (incluye preguntas base, ramificaciones condicionales, preguntas de profundización autónoma, recuerdos libres y fotografías con contexto):
+Testimonios reales recopilados (con prioridad absoluta de la respuesta escrita final sobre transcripciones de voz):
 ${JSON.stringify(structuredEntries, null, 2)}
 
 DIRECTRICES PARA LA CREACIÓN DEL LIBRO COMPLETO DE HISTORIA Y LEGADO:
 1. ESTRUCTURA EDITORIAL DE LIBRO COMPLETO:
-   - Portada con Título y Subtítulo inspirador.
+   - Portada con Título y Subtítulo${editorialPlan.isPartialMemoir ? ' ("Un libro parcial de memorias")' : ' inspirador'}.
    - Prólogo y Semblanza: Introducción que presenta a la persona entrevistada, su época, sus raíces y el propósito trascendente de este libro.
    - Capítulos:
-     * UNA PREGUNTA RESPONDIDA NUNCA EQUIVALE A UN CAPÍTULO: agrupa múltiples recuerdos, respuestas y profundizaciones afines dentro de capítulos narrativos coherentes.
-     * Si el modo es autónomo ("prompt_autonomous"), organiza los capítulos según la riqueza temática y cronológica de la historia.
-     * Si no, organiza en las cinco etapas de vida cronológicas (Infancia, Juventud, Adultez, Madurez, Legado).
+     * UNA PREGUNTA RESPONDIDA NUNCA EQUIVALE A UN CAPÍTULO: sigue el plan editorial agrupando múltiples recuerdos afines en capítulos narrativos fluidos con títulos únicos sin sufijos "(2)" ni signos de pregunta.
+     * Si el modo es autónomo ("prompt_autonomous"), organiza los capítulos según la riqueza temática y cronológica real de la historia.
+     * Si es por etapas fijas, respeta únicamente las etapas que tengan testimonios reales sin inventar ni dejar capítulos vacíos.
    - Epílogo: Mensaje a la Posteridad y Legado para las Futuras Generaciones.
 
 2. FIDELIDAD ESTRICTA A LOS HECHOS:
-   - NUNCA inventes nombres, lugares, fechas ni hechos que no figuren en los testimonios.
-   - Si existen versiones divergentes en historias compartidas, consérvalas con respeto como miradas complementarias ("Mientras Don Fernando recuerda..., su hija evoca...").
-   - Distingue con claridad lo recordado con certeza de aquello que el protagonista declaró con incertidumbre o no recordar, y respeta cualquier solicitud explícita de exclusión.
+   - NUNCA inventes nombres, edades, lugares, fechas ni diálogos que no figuren en los testimonios.
+   - Conserva exactamente quién realizó cada acción, las negaciones y los matices de incertidumbre ("creo que", "tal vez", "no estoy seguro").
+   - Si existen versiones divergentes en historias compartidas, consérvalas con respeto como miradas complementarias.
+   - Si existe "notaDiscrepanciaAudio", respeta la respuesta escrita final como fuente autorizada.
 
 3. INTEGRACIÓN PERFECTA DE FOTOGRAFÍAS:
-   - Cuando un testimonio incluya "fotografias", inserta cada fotografía exactamente en el pasaje narrativo que le corresponde con la sintaxis:
+   - Cuando un testimonio incluya "fotografias", inserta cada fotografía en el pasaje narrativo que le corresponde con la sintaxis:
      ![Descripción o contexto de la foto | Aportada por Autor (Etapa)](/api/photos/ID_DE_LA_FOTO)
    - Integra la descripción y contexto aportado por el entrevistado dentro de la prosa narrativa.
 
 4. ESTILO Y EXTENSIÓN:
-   - Desarrolla una prosa fluida, cálida, digna y emotiva en español, que honre la voz real del entrevistado sin mutilar sus vivencias ni transcribir formato pregunta-respuesta.`;
+   - Desarrolla una prosa fluida, cálida, digna y emotiva en español, limpia de muletillas orales y sin formato pregunta-respuesta.`;
+
+  const renderMarkdownFromAuditedManuscript = (manu: DemoManuscript): string => {
+    const mdLines: string[] = [
+      `# ${manu.title}`,
+      `*${manu.subtitle}*`,
+      `\n## Prólogo\n`,
+      manu.introduction,
+    ];
+    for (const ch of manu.chapters) {
+      mdLines.push(`\n## Capítulo ${ch.partNumber}: ${ch.title}\n`);
+      ch.paragraphs.forEach((para, pIdx) => {
+        mdLines.push(`${para}\n`);
+        const matchingPlacements = (ch.photoPlacements || []).filter(
+          (pl) => pl.paragraphIndex === pIdx
+        );
+        for (const pl of matchingPlacements) {
+          mdLines.push(
+            formatPhotoMarkdownBlock({
+              id: pl.photoId,
+              interviewId: interview.id,
+              questionId: pl.questionId || '',
+              questionText: pl.shortCaption,
+              lifeStage: (ch.dimensionKey as any) || 'adultez',
+              topic: ch.title,
+              participantId: '',
+              participantName: manu.authors,
+              fileName: '',
+              mimeType: 'image/jpeg',
+              caption: pl.originalDescription || pl.shortCaption,
+              imageUrl: `/api/photos/${pl.photoId}`,
+              createdAt: new Date().toISOString(),
+            })
+          );
+        }
+      });
+    }
+    if (manu.closingMessage) {
+      mdLines.push(`\n## Epílogo\n`);
+      mdLines.push(manu.closingMessage);
+    }
+    return ensurePhotosPlacedInManuscript({
+      compiledMarkdown: mdLines.join('\n'),
+      answers,
+      questions,
+    });
+  };
 
   try {
     let rawJsonText: string | null = null;
@@ -741,99 +873,252 @@ DIRECTRICES PARA LA CREACIÓN DEL LIBRO COMPLETO DE HISTORIA Y LEGADO:
       compiledMarkdown: '',
       generatedAt: new Date().toISOString(),
     });
-    const enrichedMarkdown = ensurePhotosPlacedInManuscript({
-      compiledMarkdown: parsed.compiledMarkdown || '',
-      answers,
-      questions,
-    });
 
-    return {
-      ...parsed,
-      compiledMarkdown: enrichedMarkdown,
-      generatedAt: new Date().toISOString(),
-      isFallbackDraft: false,
-      generationStatus: 'approved',
-    };
-  } catch (_error) {
-    // Narrative chapter fallback: uses buildParticipantInitialManuscriptFromAnswers so it NEVER outputs
-    // mechanical "### Question" Q&A blocks and marks isFallbackDraft: true
-    const narrativeFallback = buildParticipantInitialManuscriptFromAnswers({
+    const baseDraftSkeleton = buildParticipantInitialManuscriptFromAnswers({
       interviewTitle: interview.title,
       storyMode: interview.storyMode,
-      participantNames: participants.map((p) => p.name),
+      participantNames,
       answers,
       questions,
-      narrativeStyle: 'first_person_literary',
+      narrativeStyle: effectiveNarrativeStyle,
       bookStructureMode,
     });
 
-    const markdownLines: string[] = [
-      `# ${narrativeFallback.manuscript.title}`,
-      `*${narrativeFallback.manuscript.subtitle}*`,
-      `\n## Prólogo\n`,
-      narrativeFallback.manuscript.introduction,
-    ];
+    const parsedAiChapters: DemoChapterManuscript[] = (parsed.chapters || [])
+      .map((ch, idx) => {
+        const cleanParas = String(ch.content || '')
+          .split(/\n{2,}/)
+          .map((p) => stripInlinePhotoMarkers(p.trim()))
+          .filter((p) => p.length > 0);
+        const planMatch =
+          editorialPlan.chapters[idx] ||
+          editorialPlan.chapters.find((p) => p.stageKey === ch.lifeStage);
+        return {
+          id: planMatch?.chapterId || `admin_cap_${idx + 1}`,
+          partNumber: idx + 1,
+          dimensionKey: (planMatch?.dimensionKey || ch.lifeStage || 'adultez') as any,
+          title:
+            stripInlinePhotoMarkers(ch.title || planMatch?.suggestedTitleIndividual || '').trim() ||
+            `Capítulo ${idx + 1}`,
+          paragraphs: cleanParas,
+          paragraphIds: cleanParas.map((_, pIdx) => `admin_cap_${idx + 1}_p_${pIdx + 1}`),
+          sourceAnswerIds: planMatch?.assignedAnswerIds,
+          sourceQuestionIds: planMatch?.assignedQuestionIds,
+        };
+      })
+      .filter((ch) => ch.paragraphs.length > 0);
 
-    const draftChapters: ManuscriptDraftResult['chapters'] = [];
+    let candidateManuscript: DemoManuscript = {
+      ...baseDraftSkeleton.manuscript,
+      title: (parsed.title || baseDraftSkeleton.manuscript.title).trim(),
+      subtitle: editorialPlan.isPartialMemoir
+        ? editorialPlan.partialMemoirSubtitle || 'Un libro parcial de memorias'
+        : baseDraftSkeleton.manuscript.subtitle,
+      introduction: (parsed.summary || baseDraftSkeleton.manuscript.introduction).trim(),
+      chapters:
+        parsedAiChapters.length > 0 ? parsedAiChapters : baseDraftSkeleton.manuscript.chapters,
+      aiGenerated: true,
+      isPartialMemoir: editorialPlan.isPartialMemoir,
+      documentedStages: editorialPlan.documentedStages,
+    };
 
-    for (const ch of narrativeFallback.manuscript.chapters) {
-      markdownLines.push(`\n## Capítulo ${ch.partNumber}: ${ch.title}\n`);
-      const chContentLines: string[] = [];
-
-      ch.paragraphs.forEach((para, pIdx) => {
-        markdownLines.push(`${para}\n`);
-        chContentLines.push(para);
-        const matchingPlacements = (ch.photoPlacements || []).filter(
-          (pl) => pl.paragraphIndex === pIdx
-        );
-        for (const pl of matchingPlacements) {
-          const photoBlock = formatPhotoMarkdownBlock({
-            id: pl.photoId,
-            interviewId: interview.id,
-            questionId: pl.questionId || '',
-            questionText: pl.shortCaption,
-            lifeStage: (ch.dimensionKey as any) || 'adultez',
-            topic: ch.title,
-            participantId: '',
-            participantName: narrativeFallback.manuscript.authors,
-            fileName: '',
-            mimeType: 'image/jpeg',
-            caption: pl.originalDescription || pl.shortCaption,
-            imageUrl: `/api/photos/${pl.photoId}`,
-            createdAt: new Date().toISOString(),
-          });
-          markdownLines.push(photoBlock);
-          chContentLines.push(photoBlock);
+    // Re-anchor photos across audited chapters
+    for (const origCh of baseDraftSkeleton.manuscript.chapters) {
+      for (const pl of origCh.photoPlacements || []) {
+        const targetLoc = resolveDocumentaryPhotoChapterAndParagraph({
+          chapters: candidateManuscript.chapters,
+          photoId: pl.photoId,
+          shortCaption: pl.shortCaption,
+          originalDescription: pl.originalDescription || pl.shortCaption,
+          answerId: pl.answerId,
+          questionId: pl.questionId,
+          dimensionKey: origCh.dimensionKey as any,
+          preferredChapterId: origCh.id,
+          preferredParagraphIndex: pl.paragraphIndex,
+        });
+        const tCh = candidateManuscript.chapters[targetLoc.chapterIndex];
+        if (tCh) {
+          tCh.photoPlacements = [
+            ...(tCh.photoPlacements || []),
+            {
+              ...pl,
+              chapterId: tCh.id,
+              paragraphIndex: targetLoc.paragraphIndex,
+              paragraphId: targetLoc.paragraphId,
+            },
+          ];
         }
-      });
+      }
+    }
 
-      draftChapters.push({
+    // Mandatory Hybrid Dual Audit + Contextual AI Repair Loop (unlimited chapters, bounded passes)
+    const alternateProvider: BookAiProvider =
+      configuredProvider === 'openai' ? 'gemini' : 'openai';
+    const alternateModel = configuredProvider === 'openai' ? geminiModel : openaiModel;
+    const primaryAdminModel = configuredProvider === 'openai' ? openaiModel : geminiModel;
+
+    let audited = await auditWithHybridSemantics({
+      manuscript: candidateManuscript,
+      answers,
+      questions,
+      provider: configuredProvider,
+      model: primaryAdminModel,
+      alternateProvider,
+      alternateModel,
+    });
+
+    for (let repairPass = 1; repairPass <= 4; repairPass++) {
+      if (audited.report.passed && audited.editorialAudit.passed) break;
+      const tasks = buildContextualRepairTasks({
+        manuscript: audited.manuscript,
+        report: audited.report,
+        editorialAudit: audited.editorialAudit,
+        inventory: audited.inventory,
+        editorialPlan,
+      }).filter((t) => t.autoRepairable);
+      if (tasks.length === 0) break;
+
+      const aiRepaired = await repairChaptersContextuallyWithAI({
+        manuscript: audited.manuscript,
+        tasks,
+        activeLiteraryPrompt,
+        narrativeStyle: effectiveNarrativeStyle,
+        authors: participantNames.join(', ') || interview.title,
+        isCouple: interview.storyMode === 'compartida' && participantNames.length >= 2,
+        answers,
+        questions,
+        provider: configuredProvider,
+        model: primaryAdminModel,
+        alternateProvider,
+        alternateModel,
+      });
+      if (aiRepaired && aiRepaired.improved) {
+        audited = aiRepaired.audited;
+      } else {
+        break;
+      }
+    }
+
+    if (!audited.report.passed || !audited.editorialAudit.passed) {
+      const hygieneRepaired = repairManuscriptOmissions({
+        manuscript: audited.manuscript,
+        answers,
+        questions,
+        storyMode: interview.storyMode,
+        participantNames,
+        maxAttempts: 2,
+      });
+      const preScore = computeManuscriptDefectScore(audited.report, audited.editorialAudit);
+      const hygieneScore = computeManuscriptDefectScore(
+        hygieneRepaired.report,
+        hygieneRepaired.editorialAudit
+      );
+      if (
+        hygieneScore < preScore ||
+        (hygieneRepaired.report.passed && hygieneRepaired.editorialAudit.passed)
+      ) {
+        audited = await auditWithHybridSemantics({
+          manuscript: hygieneRepaired.manuscript,
+          answers,
+          questions,
+          provider: configuredProvider,
+          model: primaryAdminModel,
+          alternateProvider,
+          alternateModel,
+        });
+      }
+    }
+
+    const bothPassed = audited.report.passed && audited.editorialAudit.passed;
+    const finalGenerationStatus = bothPassed ? 'approved' : 'incomplete_draft';
+    const failureDiag = bothPassed
+      ? null
+      : classifyBookFailureReasonCode({
+          report: audited.report,
+          editorialAudit: audited.editorialAudit,
+          repairPassesAttempted: audited.report.repairAttemptsUsed || 0,
+        });
+    const finalManuscript: DemoManuscript = {
+      ...audited.manuscript,
+      generationStatus: finalGenerationStatus,
+      status: finalGenerationStatus,
+      incompleteDraftNotice: bothPassed ? undefined : PLAIN_INCOMPLETE_DRAFT_USER_NOTICE,
+      internalReasonCode: failureDiag?.code,
+      diagnosticSummary: failureDiag?.summary,
+    };
+
+    const compiledMd = renderMarkdownFromAuditedManuscript(finalManuscript);
+
+    return {
+      title: finalManuscript.title,
+      summary: finalManuscript.introduction,
+      chapters: finalManuscript.chapters.map((ch) => ({
         title: ch.title,
         lifeStage: ch.dimensionKey,
-        content: chContentLines.join('\n\n'),
-        participantAttributions: participants.map((p) => p.name),
-      });
-    }
+        content: ch.paragraphs.join('\n\n'),
+        participantAttributions: participantNames,
+      })),
+      compiledMarkdown: compiledMd,
+      generatedAt: new Date().toISOString(),
+      isFallbackDraft: false,
+      generationStatus: finalGenerationStatus,
+      isPartialMemoir: editorialPlan.isPartialMemoir,
+      incompleteDraftNotice: finalManuscript.incompleteDraftNotice,
+      internalReasonCode: failureDiag?.code,
+      diagnosticSummary: failureDiag?.summary,
+      documentaryAudit: audited.report,
+      editorialAudit: audited.editorialAudit,
+    };
+  } catch (err: any) {
+    const narrativeFallback = buildParticipantInitialManuscriptFromAnswers({
+      interviewTitle: interview.title,
+      storyMode: interview.storyMode,
+      participantNames,
+      answers,
+      questions,
+      narrativeStyle: effectiveNarrativeStyle,
+      bookStructureMode,
+    });
 
-    if (narrativeFallback.manuscript.closingMessage) {
-      markdownLines.push(`\n## Epílogo\n`);
-      markdownLines.push(narrativeFallback.manuscript.closingMessage);
-    }
-
-    const fallbackMd = ensurePhotosPlacedInManuscript({
-      compiledMarkdown: markdownLines.join('\n'),
+    const auditedFallback = auditAndApproveBookManuscript({
+      manuscript: {
+        ...narrativeFallback.manuscript,
+        aiGenerated: false,
+      },
       answers,
       questions,
     });
 
+    const failureDiag = classifyBookFailureReasonCode({
+      error: err,
+      report: auditedFallback.report,
+      editorialAudit: auditedFallback.editorialAudit,
+    });
+
+    const draftChapters: ManuscriptDraftResult['chapters'] =
+      auditedFallback.manuscript.chapters.map((ch) => ({
+        title: ch.title,
+        lifeStage: ch.dimensionKey,
+        content: ch.paragraphs.join('\n\n'),
+        participantAttributions: participantNames,
+      }));
+
+    const fallbackMd = renderMarkdownFromAuditedManuscript(auditedFallback.manuscript);
+
     return {
-      title: narrativeFallback.manuscript.title,
-      summary: narrativeFallback.manuscript.introduction,
+      title: auditedFallback.manuscript.title,
+      summary: auditedFallback.manuscript.introduction,
       chapters: draftChapters,
       compiledMarkdown: fallbackMd,
       generatedAt: new Date().toISOString(),
       isFallbackDraft: true,
-      generationStatus: 'generated',
+      generationStatus: 'incomplete_draft',
+      isPartialMemoir: narrativeFallback.editorialPlan.isPartialMemoir,
+      incompleteDraftNotice: PLAIN_INCOMPLETE_DRAFT_USER_NOTICE,
+      internalReasonCode: failureDiag.code,
+      diagnosticSummary: failureDiag.summary,
+      documentaryAudit: auditedFallback.report,
+      editorialAudit: auditedFallback.editorialAudit,
     };
   }
 }
@@ -1241,7 +1526,11 @@ async function callGeminiBookModelBatch(params: {
   };
 
   const candidateModels = Array.from(
-    new Set([params.modelName, ...TEXT_FALLBACK_MODELS].filter(Boolean))
+    new Set(
+      [params.modelName, 'gemini-3-flash-preview', 'gemini-2.5-flash', 'gemini-flash-latest'].filter(
+        Boolean
+      )
+    )
   );
 
   let lastError: any = null;
@@ -1461,11 +1750,836 @@ const manuscriptBatchCheckpoints = new Map<
   >
 >();
 
+function computeManuscriptDefectScore(
+  docReport: DocumentaryAuditReport,
+  edReport: EditorialQualityAuditReport
+): number {
+  return (
+    (docReport.blockingDefects?.length || 0) * 10 +
+    (docReport.coverageAudit?.missingUnitIds?.length || 0) * 5 +
+    (docReport.semanticAudit?.ambiguousUnitsCount || 0) * 3 +
+    (edReport.blockingDefects?.length || 0) * 4
+  );
+}
+
+export interface SemanticJudgmentCaseInput {
+  unitId: string;
+  originalTestimony: string;
+  candidateExcerpt: string;
+  ambiguityReason: string;
+}
+
+export interface SemanticJudgmentVerdict {
+  unitId: string;
+  verdict: 'supported' | 'contradicted' | 'inconclusive';
+  rationale: string;
+}
+
+export type SemanticJudgeFunction = (params: {
+  cases: SemanticJudgmentCaseInput[];
+  narrativeStyle: DemoNarrativeStyleId;
+  provider: BookAiProvider;
+  model: string;
+  alternateProvider: BookAiProvider;
+  alternateModel: string;
+}) => Promise<SemanticJudgmentVerdict[]>;
+
+/**
+ * Invokes the configured AI provider ONLY on units marked 'ambiguous' by deterministic propositional rules,
+ * classifying each literary paraphrase or conversational negation edge case with a structured JSON verdict.
+ */
+export async function judgeAmbiguousSemanticUnitsWithAI(params: {
+  cases: SemanticJudgmentCaseInput[];
+  narrativeStyle: DemoNarrativeStyleId;
+  provider: BookAiProvider;
+  model: string;
+  alternateProvider: BookAiProvider;
+  alternateModel: string;
+}): Promise<SemanticJudgmentVerdict[]> {
+  const { cases, narrativeStyle, provider, model, alternateProvider, alternateModel } = params;
+  if (!cases || cases.length === 0) return [];
+
+  const allVerdicts: SemanticJudgmentVerdict[] = [];
+  const BATCH_SIZE = 12;
+
+  for (let i = 0; i < cases.length; i += BATCH_SIZE) {
+    const slice = cases.slice(i, i + BATCH_SIZE);
+    const judgePrompt = `Evalúa cuidadosamente cada par (testimonio original vs. fragmento redactado en el manuscrito).
+Estilo narrativo del libro: ${narrativeStyle}.
+Criterios estrictos de veredicto por unidad:
+- "supported": el fragmento redactado conserva el mismo hecho real, sujeto que actúa, polaridad (afirmación/negación) y dudas/incertidumbres aunque utilice paráfrasis literaria o vocabulario distinto.
+- "contradicted": el fragmento invierte quién hizo la acción, contradice una negación o afirmación real, convierte un intento en hecho consumado o inventa datos ajenos.
+- "inconclusive": el fragmento es demasiado vago o incompleto para confirmar fidelidad testimonial.
+
+Casos a evaluar:
+${JSON.stringify(slice, null, 2)}
+
+Responde EXCLUSIVAMENTE con un JSON válido:
+{
+  "verdicts": [
+    { "unitId": "id_de_unidad", "verdict": "supported" | "contradicted" | "inconclusive", "rationale": "explicación breve en español" }
+  ]
+}`;
+
+    const tryProvider = async (prov: BookAiProvider, mdl: string): Promise<SemanticJudgmentVerdict[] | null> => {
+      if (prov === 'openai') {
+        const apiKey = process.env.OPENAI_API_KEY;
+        if (!apiKey || apiKey === 'MY_OPENAI_API_KEY') return null;
+        const available = await getAvailableOpenAiModels(apiKey);
+        const resolvedModel =
+          available.length === 0 || available.includes(mdl)
+            ? mdl
+            : available.find((m) => /^gpt-4o|^gpt-4\.1/.test(m)) || 'gpt-4o';
+        const openai = new OpenAI({ apiKey });
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 22000);
+        try {
+          const resp = await withTimeout(
+            openai.chat.completions.create(
+              {
+                model: resolvedModel,
+                response_format: { type: 'json_object' },
+                messages: [
+                  {
+                    role: 'system',
+                    content:
+                      'Eres un auditor semántico documental estricto de biografías. Evalúas fidelidad factual sin tolerar invenciones ni inversiones de sentido. Devuelves únicamente JSON.',
+                  },
+                  { role: 'user', content: judgePrompt },
+                ],
+              },
+              { signal: ctrl.signal }
+            ),
+            22000,
+            () => {
+              ctrl.abort();
+              return null;
+            }
+          );
+          const raw = resp?.choices?.[0]?.message?.content || '';
+          const parsed = safeJsonExtract<{ verdicts?: SemanticJudgmentVerdict[] } | null>(raw, null);
+          return Array.isArray(parsed?.verdicts) ? parsed!.verdicts : null;
+        } finally {
+          clearTimeout(timer);
+        }
+      } else {
+        const apiKey = process.env.GEMINI_API_KEY;
+        if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') return null;
+        const raw = await generateJsonWithFallback({
+          prompt: judgePrompt,
+          systemInstruction:
+            'Eres un auditor semántico documental estricto de biografías. Evalúas fidelidad factual sin tolerar invenciones ni inversiones de sentido.',
+          models: Array.from(new Set([mdl, 'gemini-3-flash-preview', 'gemini-2.5-flash'].filter(Boolean))),
+          timeoutMsPerModel: 15000,
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              verdicts: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    unitId: { type: Type.STRING },
+                    verdict: { type: Type.STRING },
+                    rationale: { type: Type.STRING },
+                  },
+                  required: ['unitId', 'verdict', 'rationale'],
+                },
+              },
+            },
+            required: ['verdicts'],
+          },
+        });
+        const parsed = safeJsonExtract<{ verdicts?: SemanticJudgmentVerdict[] } | null>(raw, null);
+        return Array.isArray(parsed?.verdicts) ? parsed!.verdicts : null;
+      }
+    };
+
+    let sliceVerdicts: SemanticJudgmentVerdict[] | null = null;
+    try {
+      sliceVerdicts = await tryProvider(provider, model);
+    } catch (_e1) {
+      sliceVerdicts = null;
+    }
+    if (!sliceVerdicts) {
+      try {
+        sliceVerdicts = await tryProvider(alternateProvider, alternateModel);
+      } catch (_e2) {
+        sliceVerdicts = null;
+      }
+    }
+
+    if (sliceVerdicts) {
+      for (const v of sliceVerdicts) {
+        if (!v || !v.unitId) continue;
+        const cleanVerdict: 'supported' | 'contradicted' | 'inconclusive' =
+          v.verdict === 'supported'
+            ? 'supported'
+            : v.verdict === 'contradicted'
+            ? 'contradicted'
+            : 'inconclusive';
+        allVerdicts.push({
+          unitId: v.unitId,
+          verdict: cleanVerdict,
+          rationale: String(v.rationale || '').trim(),
+        });
+      }
+    } else {
+      for (const c of slice) {
+        allVerdicts.push({
+          unitId: c.unitId,
+          verdict: 'inconclusive',
+          rationale: 'Juez semántico temporalmente no disponible; se conserva revisión pendiente.',
+        });
+      }
+    }
+  }
+
+  return allVerdicts;
+}
+
+/**
+ * Hybrid Semantic & Editorial Audit (`auditWithHybridSemantics`):
+ * 1. Runs fast deterministic propositional + editorial audit (`auditAndApproveBookManuscript`).
+ * 2. Invokes `judgeAmbiguousSemanticUnitsWithAI` ONLY when genuine `ambiguous` units remain.
+ * 3. Recomputes matrix statuses, coverage, and `passed` strictly from verified verdicts without auto-approving inconclusive or contradicted units.
+ */
+export async function auditWithHybridSemantics(params: {
+  manuscript: DemoManuscript;
+  answers: AnswerRecord[] | any[];
+  questions: QuestionRecord[] | any[];
+  provider: BookAiProvider;
+  model: string;
+  alternateProvider: BookAiProvider;
+  alternateModel: string;
+  repairAttemptsUsed?: number;
+  repairedUnitIds?: string[];
+  aiJudgeOverride?: SemanticJudgeFunction;
+}): Promise<{
+  manuscript: DemoManuscript;
+  report: DocumentaryAuditReport;
+  editorialAudit: EditorialQualityAuditReport;
+  inventory: DocumentaryInventory;
+}> {
+  const {
+    manuscript,
+    answers,
+    questions,
+    provider,
+    model,
+    alternateProvider,
+    alternateModel,
+    repairAttemptsUsed = 0,
+    repairedUnitIds = [],
+    aiJudgeOverride,
+  } = params;
+
+  const detResult = auditAndApproveBookManuscript({
+    manuscript,
+    answers,
+    questions,
+    repairAttemptsUsed,
+    repairedUnitIds,
+  });
+
+  const ambiguousIds = detResult.report.semanticAudit?.ambiguousUnitIds || [];
+  if (ambiguousIds.length === 0) {
+    return detResult;
+  }
+
+  const cases: SemanticJudgmentCaseInput[] = [];
+  for (const unitId of ambiguousIds) {
+    const unit = detResult.inventory.eligibleFactUnits.find((u) => u.unitId === unitId);
+    const trace = detResult.report.traceabilityMatrix.find((t) => t.unitId === unitId);
+    if (!unit || !trace) continue;
+    const ch = detResult.manuscript.chapters.find((c) => c.id === trace.chapterId);
+    const pIdx = typeof trace.paragraphIndex === 'number' ? trace.paragraphIndex : 0;
+    const paraText = ch?.paragraphs?.[pIdx] || trace.evidenceSnippet || '';
+    const nextPara = ch?.paragraphs?.[pIdx + 1] || '';
+    cases.push({
+      unitId,
+      originalTestimony: unit.cleanText,
+      candidateExcerpt: [paraText, nextPara].filter(Boolean).join(' ').trim(),
+      ambiguityReason: trace.ambiguityReason || 'Paráfrasis literaria o giro conversacional ambiguo.',
+    });
+  }
+
+  if (cases.length === 0) {
+    return detResult;
+  }
+
+  const judgeFn = aiJudgeOverride || judgeAmbiguousSemanticUnitsWithAI;
+  const verdicts = await judgeFn({
+    cases,
+    narrativeStyle: manuscript.narrativeStyle || 'first_person_literary',
+    provider,
+    model,
+    alternateProvider,
+    alternateModel,
+  });
+
+  const verdictMap = new Map(verdicts.map((v) => [v.unitId, v]));
+
+  // Reconcile verdicts strictly into a deep clone of the report
+  const updatedReport: DocumentaryAuditReport = structuredClone(detResult.report);
+  const missingSet = new Set(updatedReport.coverageAudit?.missingUnitIds || []);
+  const remainingAmbiguous: string[] = [];
+  let semanticContradictions = (updatedReport.veracityAudit?.semanticContradictionFlags || []).filter(
+    (flag) => {
+      const m = flag.match(/^\[(trace_[^\]]+)\]/);
+      if (!m) return true;
+      const v = verdictMap.get(m[1]);
+      return v?.verdict !== 'supported';
+    }
+  );
+
+  let integratedUnits = updatedReport.integratedUnits;
+
+  for (const entry of updatedReport.traceabilityMatrix) {
+    if (!ambiguousIds.includes(entry.unitId)) continue;
+    const judgeRes = verdictMap.get(entry.unitId);
+    if (!judgeRes) {
+      remainingAmbiguous.push(entry.unitId);
+      continue;
+    }
+
+    entry.aiJudgeVerdict = judgeRes.verdict;
+    if (judgeRes.verdict === 'supported') {
+      if (!entry.verified) {
+        integratedUnits++;
+      }
+      entry.verified = true;
+      entry.status = 'integrated';
+      entry.verificationStatus = 'supported';
+      entry.semanticIssues = [];
+      missingSet.delete(entry.unitId);
+      if (entry.chapterId && entry.chapterId !== 'none') {
+        entry.assignedParagraphIds = entry.paragraphId ? [entry.paragraphId] : [];
+      }
+    } else if (judgeRes.verdict === 'contradicted') {
+      if (entry.verified) {
+        integratedUnits = Math.max(0, integratedUnits - 1);
+      }
+      entry.verified = false;
+      entry.status = 'missing';
+      entry.verificationStatus = 'contradicted';
+      const issueMsg = `[${entry.unitId}] Juez semántico detectó contradicción: ${judgeRes.rationale}`;
+      entry.semanticIssues = [judgeRes.rationale || 'Contradicción semántica confirmada.'];
+      if (!semanticContradictions.some((f) => f.includes(`[${entry.unitId}]`))) {
+        semanticContradictions.push(issueMsg);
+      }
+      missingSet.add(entry.unitId);
+    } else {
+      if (entry.verified) {
+        integratedUnits = Math.max(0, integratedUnits - 1);
+      }
+      entry.verified = false;
+      entry.status = 'missing';
+      entry.verificationStatus = 'ambiguous';
+      missingSet.add(entry.unitId);
+      remainingAmbiguous.push(entry.unitId);
+    }
+  }
+
+  const totalSourceUnits = updatedReport.totalSourceUnits;
+  const updatedCoverage =
+    totalSourceUnits > 0 ? Math.floor((integratedUnits / totalSourceUnits) * 100) : updatedReport.coveragePercentage;
+  const remainingMissingIds = Array.from(missingSet);
+
+  // Rebuild blockingDefects coherently
+  const nextBlocking: string[] = [];
+  if (detResult.manuscript.chapters.length === 0) {
+    nextBlocking.push('El manuscrito no contiene capítulos válidos.');
+  }
+  if (answers.length > 0 && totalSourceUnits === 0) {
+    nextBlocking.push(
+      'La entrevista no contiene testimonios elegibles para publicar (todas las respuestas fueron omitidas o excluidas).'
+    );
+  }
+  if (updatedReport.structuralAudit && !detResult.report.structuralAudit?.oneQuestionPerChapterDetected) {
+    // keep structural defect if present
+  }
+  if (detResult.report.structuralAudit?.oneQuestionPerChapterDetected) {
+    nextBlocking.push(
+      'Fragmentación editorial inválida: se detectó estructura de una pregunta/respuesta por capítulo o títulos en formato de pregunta.'
+    );
+  }
+  if (remainingMissingIds.length > 0 || updatedCoverage < 100) {
+    nextBlocking.push(
+      `Cobertura documental incompleta (${updatedCoverage}%: ${integratedUnits}/${totalSourceUnits} unidades verificadas; faltan: ${remainingMissingIds.slice(0, 8).join(', ')}).`
+    );
+  }
+  if (remainingAmbiguous.length > 0) {
+    nextBlocking.push(
+      `Auditoría semántica inconclusa para ${remainingAmbiguous.length} unidad(es) ambigua(s): ${remainingAmbiguous.slice(0, 6).join(', ')}.`
+    );
+  }
+  if (!updatedReport.uncertaintiesPreserved && (updatedReport.veracityAudit?.uncertaintyViolations || []).length > 0) {
+    nextBlocking.push(...(updatedReport.veracityAudit?.uncertaintyViolations || []));
+  }
+  if (semanticContradictions.length > 0) {
+    nextBlocking.push(...semanticContradictions);
+  }
+  if ((updatedReport.veracityAudit?.inventedDataFlags || []).length > 0) {
+    nextBlocking.push(...(updatedReport.veracityAudit?.inventedDataFlags || []));
+  }
+  if ((updatedReport.veracityAudit?.leakedExcludedContentFlags || []).length > 0) {
+    nextBlocking.push(...(updatedReport.veracityAudit?.leakedExcludedContentFlags || []));
+  }
+  if ((updatedReport.veracityAudit?.coupleAttributionViolations || []).length > 0) {
+    nextBlocking.push(...(updatedReport.veracityAudit?.coupleAttributionViolations || []));
+  }
+  if (updatedReport.totalUploadedPhotos > 0 && updatedReport.totalPlacedPhotos < updatedReport.totalUploadedPhotos) {
+    nextBlocking.push(
+      `Fotografías sin ubicar en el manuscrito (${updatedReport.totalPlacedPhotos}/${updatedReport.totalUploadedPhotos}).`
+    );
+  }
+  if (!detResult.editorialAudit.passed) {
+    nextBlocking.push(...detResult.editorialAudit.blockingDefects);
+  }
+
+  const nextPassed = nextBlocking.length === 0;
+  updatedReport.integratedUnits = integratedUnits;
+  updatedReport.coveragePercentage = updatedCoverage;
+  updatedReport.passed = nextPassed;
+  updatedReport.approved = nextPassed;
+  updatedReport.status = nextPassed ? 'approved' : 'failed_audit';
+  updatedReport.blockingDefects = nextBlocking;
+  updatedReport.coverageAudit = {
+    passed: remainingMissingIds.length === 0 && (answers.length === 0 || totalSourceUnits > 0),
+    totalValidUnits: totalSourceUnits,
+    coveredUnitsCount: integratedUnits,
+    missingUnitIds: remainingMissingIds,
+    repairedUnitIds: updatedReport.coverageAudit?.repairedUnitIds || [],
+  };
+  if (updatedReport.veracityAudit) {
+    updatedReport.veracityAudit.semanticContradictionFlags = semanticContradictions;
+    updatedReport.veracityAudit.passed =
+      updatedReport.uncertaintiesPreserved &&
+      semanticContradictions.length === 0 &&
+      (updatedReport.veracityAudit.inventedDataFlags || []).length === 0 &&
+      (updatedReport.veracityAudit.leakedExcludedContentFlags || []).length === 0 &&
+      (updatedReport.veracityAudit.coupleAttributionViolations || []).length === 0;
+  }
+  if (updatedReport.semanticAudit) {
+    updatedReport.semanticAudit.contradictionsDetected = semanticContradictions;
+    updatedReport.semanticAudit.ambiguousUnitsCount = remainingAmbiguous.length;
+    updatedReport.semanticAudit.ambiguousUnitIds = remainingAmbiguous;
+    updatedReport.semanticAudit.passed =
+      semanticContradictions.length === 0 &&
+      (updatedReport.veracityAudit?.inventedDataFlags || []).length === 0 &&
+      (updatedReport.veracityAudit?.unsupportedAdditionFlags || []).length === 0 &&
+      remainingAmbiguous.length === 0;
+  }
+
+  const finalManu: DemoManuscript = {
+    ...detResult.manuscript,
+    status: nextPassed ? 'approved' : 'failed_audit',
+    generationStatus: nextPassed ? 'approved' : 'failed_audit',
+    auditReport: updatedReport,
+    documentaryAudit: updatedReport,
+  };
+
+  return {
+    manuscript: finalManu,
+    report: updatedReport,
+    editorialAudit: detResult.editorialAudit,
+    inventory: detResult.inventory,
+  };
+}
+
+/**
+ * Classifies a failed or incomplete manuscript generation into a granular internal reason code
+ * and human-readable diagnostic summary exclusively for administrators (Bitácora + ManuscriptsView).
+ */
+export function classifyBookFailureReasonCode(params: {
+  error?: any;
+  report?: DocumentaryAuditReport | null;
+  editorialAudit?: EditorialQualityAuditReport | null;
+  completedBatches?: number;
+  totalBatches?: number;
+  repairPassesAttempted?: number;
+}): { code: BookGenerationReasonCode; summary: string } {
+  const { error, report, editorialAudit, completedBatches, totalBatches, repairPassesAttempted = 0 } = params;
+
+  if (error) {
+    const msg = String(error?.message || error || '');
+    if (/Tiempo de espera agotado|timeout|aborted|ETIMEDOUT/i.test(msg)) {
+      if (typeof totalBatches === 'number' && typeof completedBatches === 'number' && completedBatches > 0 && completedBatches < totalBatches) {
+        return {
+          code: 'PARTIAL_BATCH_GENERATION',
+          summary: `Tiempo agotado tras completar ${completedBatches}/${totalBatches} lotes de redacción (${msg}).`,
+        };
+      }
+      return {
+        code: 'MODEL_TIMEOUT',
+        summary: `El proveedor de IA excedió el tiempo máximo de respuesta (${msg}).`,
+      };
+    }
+    if (/JSON|vacía o incompleta|parse|SyntaxError/i.test(msg)) {
+      return {
+        code: 'INVALID_MODEL_RESPONSE',
+        summary: `La respuesta del modelo no produjo capítulos JSON válidos (${msg}).`,
+      };
+    }
+    if (typeof totalBatches === 'number' && typeof completedBatches === 'number' && completedBatches > 0 && completedBatches < totalBatches) {
+      return {
+        code: 'PARTIAL_BATCH_GENERATION',
+        summary: `Generación parcial: completados ${completedBatches}/${totalBatches} lotes antes de error de proveedor (${msg}).`,
+      };
+    }
+    return {
+      code: 'PROVIDER_ERROR',
+      summary: `Fallo en proveedor principal y alterno (${msg}).`,
+    };
+  }
+
+  if (typeof totalBatches === 'number' && typeof completedBatches === 'number' && completedBatches < totalBatches) {
+    return {
+      code: 'PARTIAL_BATCH_GENERATION',
+      summary: `Solo se completaron ${completedBatches} de ${totalBatches} lotes de capítulos.`,
+    };
+  }
+
+  if (report) {
+    const leaked = report.veracityAudit?.leakedExcludedContentFlags || [];
+    if (leaked.length > 0) {
+      return {
+        code: 'PRIVACY_VALIDATION_FAILURE',
+        summary: `${leaked.length} fuga(s) de contenido excluido/confidencial: ${leaked[0]}`,
+      };
+    }
+    const semanticContradictions = report.veracityAudit?.semanticContradictionFlags || [];
+    const invented = report.veracityAudit?.inventedDataFlags || [];
+    const coupleAttr = report.veracityAudit?.coupleAttributionViolations || [];
+    const unplacedPhotos = report.photoAudit?.unplacedPhotoIds || [];
+
+    if (semanticContradictions.length > 0 || invented.length > 0 || coupleAttr.length > 0) {
+      const sample = semanticContradictions[0] || invented[0] || coupleAttr[0];
+      return {
+        code: repairPassesAttempted > 0 ? 'REPAIR_EXHAUSTED' : 'SEMANTIC_CONTRADICTION',
+        summary: `${repairPassesAttempted > 0 ? `Persiste tras ${repairPassesAttempted} ronda(s) de reparación: ` : ''}${semanticContradictions.length} contradicción(es), ${invented.length} dato(s) sin respaldo, ${coupleAttr.length} atribución(es). Ej.: ${sample}`,
+      };
+    }
+    if (unplacedPhotos.length > 0) {
+      return {
+        code: 'PHOTO_PLACEMENT_FAILURE',
+        summary: `${unplacedPhotos.length} fotografía(s) sin ubicación válida (${unplacedPhotos.slice(0, 4).join(', ')}).`,
+      };
+    }
+    const ambiguousCount = report.semanticAudit?.ambiguousUnitsCount || 0;
+    const missingIds = report.coverageAudit?.missingUnitIds || [];
+    if (ambiguousCount > 0 && missingIds.length <= ambiguousCount) {
+      return {
+        code: 'AUDIT_INCONCLUSIVE',
+        summary: `${ambiguousCount} unidad(es) ambigua(s) no pudieron confirmarse semánticamente (${(report.semanticAudit?.ambiguousUnitIds || []).slice(0, 4).join(', ')}).`,
+      };
+    }
+    if (missingIds.length > 0 || report.coveragePercentage < 100) {
+      return {
+        code: repairPassesAttempted > 0 ? 'REPAIR_EXHAUSTED' : 'DOCUMENTARY_COVERAGE_FAILURE',
+        summary: `Cobertura documental del ${report.coveragePercentage}% (${report.integratedUnits}/${report.totalSourceUnits} unidades; faltan: ${missingIds.slice(0, 5).join(', ')})${repairPassesAttempted > 0 ? ` tras ${repairPassesAttempted} ronda(s) de reparación` : ''}.`,
+      };
+    }
+  }
+
+  if (editorialAudit && !editorialAudit.passed) {
+    return {
+      code: repairPassesAttempted > 0 ? 'REPAIR_EXHAUSTED' : 'EDITORIAL_QUALITY_FAILURE',
+      summary: `${editorialAudit.blockingDefects.length} defecto(s) editorial(es): ${editorialAudit.blockingDefects[0] || 'Calidad editorial pendiente'}`,
+    };
+  }
+
+  return {
+    code: 'AUDIT_INCONCLUSIVE',
+    summary: 'La verificación integral no pudo aprobar el manuscrito automáticamente.',
+  };
+}
+
+/**
+ * Contextual AI-guided narrative repair (`repairChaptersContextuallyWithAI`):
+ * Sends ALL affected chapters in controlled multi-chapter batches (no 6-chapter truncation!),
+ * including all 16 audit defect categories, verifies post-repair quality via Hybrid Semantic
+ * + Editorial audits, and rejects regressions that break valid coverage.
+ */
+export async function repairChaptersContextuallyWithAI(params: {
+  manuscript: DemoManuscript;
+  tasks: ContextualRepairTask[];
+  activeLiteraryPrompt: string;
+  narrativeStyle: DemoNarrativeStyleId;
+  authors: string;
+  isCouple: boolean;
+  answers: AnswerRecord[];
+  questions: QuestionRecord[];
+  provider: BookAiProvider;
+  model: string;
+  alternateProvider: BookAiProvider;
+  alternateModel: string;
+  batchCallerOverride?: (batchPrompt: string, systemPrompt: string, batchTaskIds: string[]) => Promise<ParsedAiManuscriptBatchResponse | null>;
+  aiJudgeOverride?: SemanticJudgeFunction;
+  onRepairProgress?: (done: number, total: number) => void;
+}): Promise<{
+  improved: boolean;
+  repairedChaptersCount: number;
+  audited: {
+    manuscript: DemoManuscript;
+    report: DocumentaryAuditReport;
+    editorialAudit: EditorialQualityAuditReport;
+    inventory: DocumentaryInventory;
+  };
+} | null> {
+  const {
+    manuscript,
+    tasks,
+    activeLiteraryPrompt,
+    narrativeStyle,
+    authors,
+    isCouple,
+    answers,
+    questions,
+    provider,
+    model,
+    alternateProvider,
+    alternateModel,
+    batchCallerOverride,
+    aiJudgeOverride,
+    onRepairProgress,
+  } = params;
+
+  const autoTasks = (tasks || []).filter((t) => t.autoRepairable !== false);
+  if (autoTasks.length === 0) return null;
+
+  const beforeAudit = await auditWithHybridSemantics({
+    manuscript,
+    answers,
+    questions,
+    provider,
+    model,
+    alternateProvider,
+    alternateModel,
+    repairAttemptsUsed: manuscript.documentaryAudit?.repairAttemptsUsed || 0,
+    aiJudgeOverride,
+  });
+  const beforeScore = computeManuscriptDefectScore(beforeAudit.report, beforeAudit.editorialAudit);
+
+  const styleReminder =
+    narrativeStyle === 'third_person_biography'
+      ? `ESTILO C OBLIGATORIO: Reescribe el 100% de cada capítulo corregido en TERCERA PERSONA biográfica ("él", "ella", "${authors}"). CERO primera persona fuera de citas textuales.`
+      : narrativeStyle === 'first_person_simple'
+      ? `ESTILO A OBLIGATORIO: Reescribe en primera persona ("yo"/"nosotros") sencilla, natural y bien estructurada.`
+      : `ESTILO B OBLIGATORIO: Reescribe en primera persona literaria, emotiva y fluida, conservando todos los hechos.`;
+
+  const repairSystemPrompt = `${activeLiteraryPrompt}\n\n${styleReminder}\n\nEres el editor literario corrector de YouForever. Corrige ÚNICAMENTE los capítulos indicados integrando fluidamente cualquier recuerdo faltante, corrigiendo contradicciones de sentido (quién realizó la acción, negaciones, dudas), eliminando muletillas/exclusiones/repeticiones, corrigiendo títulos y conservando intactos todos los datos verdaderos.`;
+
+  // Process ALL affected chapters in batches of 4 without slicing off chapters >= 7!
+  const REPAIR_BATCH_SIZE = 4;
+  const repairedChaptersById = new Map<string, any>();
+  let repairedIntroCandidate: string | null = null;
+  let repairedChaptersCount = 0;
+
+  for (let bStart = 0; bStart < autoTasks.length; bStart += REPAIR_BATCH_SIZE) {
+    const batchTasks = autoTasks.slice(bStart, bStart + REPAIR_BATCH_SIZE);
+    const taskPayload = batchTasks.map((t) => {
+      const ch = manuscript.chapters.find((c) => c.id === t.chapterId);
+      return {
+        chapterId: t.chapterId,
+        chapterTitle: ch?.title || t.chapterTitle,
+        currentParagraphs: ch?.paragraphs || [],
+        categories: t.categories,
+        repairStrategy: t.repairStrategy,
+        missingTestimonialUnits: t.missingUnits.map((u) => ({
+          unitId: u.unitId,
+          speaker: u.participantName,
+          question: u.questionText,
+          testimony: u.cleanText,
+          uncertainties: u.uncertaintyExpressions,
+        })),
+        semanticContradictionsToCorrect: t.contradictionDetails,
+        styleLeaksToRewrite: t.styleLeakDetails,
+        excludedInformationToRemoveWithoutTouchingAuthorizedFacts: t.excludedLeakDetails,
+        unsupportedInventionsToRemove: [...t.inventedDetails, ...(t.unsupportedAdditionDetails || [])],
+        oralFillersToClean: t.oralFillerDetails,
+        duplicateEpisodesToConsolidate: t.duplicateEpisodeDetails || [],
+        titleQualityFixes: t.titleQualityDetails || [],
+        truncatedFragmentsToCompleteFromTestimony: t.truncatedFragmentDetails || [],
+        unbalancedMarkdownToFix: t.unbalancedMarkdownDetails || [],
+        uncertaintyExpressionsToPreserve: t.uncertaintyDetails || [],
+        coupleAttributionFixes: t.coupleAttributionDetails || [],
+      };
+    });
+
+    const repairUserPrompt = `Corrige los siguientes capítulos (${bStart + 1}-${Math.min(bStart + REPAIR_BATCH_SIZE, autoTasks.length)} de ${autoTasks.length}) manteniendo intactos todos los recuerdos que ya estaban correctamente narrados e integrando con prosa natural cada elemento pendiente:
+
+${JSON.stringify(taskPayload, null, 2)}
+
+Devuelve EXCLUSIVAMENTE un objeto JSON con:
+{
+  "title": "${manuscript.title.replace(/"/g, '\\"')}",
+  "subtitle": "${(manuscript.subtitle || '').replace(/"/g, '\\"')}",
+  "introduction": ${JSON.stringify(manuscript.introduction || '')},
+  "chapters": [
+    {
+      "id": "id_exacto_del_capitulo",
+      "partNumber": 1,
+      "dimensionKey": "raices_infancia",
+      "title": "Título limpio sin preguntas ni sufijos numéricos",
+      "paragraphs": ["párrafo cohesionado 1", "párrafo cohesionado 2"]
+    }
+  ]
+}`;
+
+    let repairedResponse: ParsedAiManuscriptBatchResponse | null = null;
+    if (batchCallerOverride) {
+      repairedResponse = await batchCallerOverride(
+        repairUserPrompt,
+        repairSystemPrompt,
+        batchTasks.map((t) => t.chapterId)
+      );
+    } else {
+      const invokeProvider = async (prov: BookAiProvider, mdl: string) => {
+        const timeoutMs = /^gpt-6|^gpt-5|^o1|^o3|^o4/i.test(mdl) ? 65000 : 45000;
+        if (prov === 'openai') {
+          const res = await callOpenAiBookModelBatch({
+            modelName: mdl,
+            systemInstructionText: repairSystemPrompt,
+            prompt: repairUserPrompt,
+            multimodalPhotos: [],
+            timeoutMs,
+            allowBackupModels: true,
+          });
+          return res.parsed;
+        }
+        const res = await callGeminiBookModelBatch({
+          modelName: mdl,
+          systemInstructionText: repairSystemPrompt,
+          prompt: repairUserPrompt,
+          multimodalPhotos: [],
+          timeoutMs,
+        });
+        return res.parsed;
+      };
+
+      try {
+        repairedResponse = await invokeProvider(provider, model);
+      } catch (_primaryRepairErr) {
+        try {
+          repairedResponse = await invokeProvider(alternateProvider, alternateModel);
+        } catch (_altRepairErr) {
+          repairedResponse = null;
+        }
+      }
+    }
+
+    if (repairedResponse && Array.isArray(repairedResponse.chapters)) {
+      if (!repairedIntroCandidate && repairedResponse.introduction) {
+        repairedIntroCandidate = repairedResponse.introduction;
+      }
+      for (const ch of repairedResponse.chapters) {
+        if (ch && ch.id && Array.isArray(ch.paragraphs) && ch.paragraphs.length > 0) {
+          repairedChaptersById.set(ch.id, ch);
+          repairedChaptersCount++;
+        }
+      }
+    }
+
+    onRepairProgress?.(
+      Math.min(bStart + REPAIR_BATCH_SIZE, autoTasks.length),
+      autoTasks.length
+    );
+  }
+
+  if (repairedChaptersById.size === 0) {
+    return null;
+  }
+
+  const nextChapters: DemoChapterManuscript[] = manuscript.chapters.map((origCh) => {
+    const patch = repairedChaptersById.get(origCh.id);
+    if (!patch || !Array.isArray(patch.paragraphs) || patch.paragraphs.length === 0) {
+      return origCh;
+    }
+    const cleanParas = patch.paragraphs
+      .map((p: string) => stripInlinePhotoMarkers(String(p || '').trim()))
+      .filter((p: string) => p.length > 0);
+    if (cleanParas.length === 0) return origCh;
+
+    const updatedParagraphIds = cleanParas.map((_: string, idx: number) => `${origCh.id}_p_${idx + 1}`);
+    const updatedPlacements = (origCh.photoPlacements || []).map((pl) => {
+      const clampedIdx = Math.min(Math.max(0, pl.paragraphIndex), cleanParas.length - 1);
+      return {
+        ...pl,
+        paragraphIndex: clampedIdx,
+        paragraphId: updatedParagraphIds[clampedIdx],
+      };
+    });
+
+    return {
+      ...origCh,
+      title: stripInlinePhotoMarkers(patch.title || origCh.title).trim() || origCh.title,
+      paragraphs: cleanParas,
+      paragraphIds: updatedParagraphIds,
+      photoPlacements: updatedPlacements.length > 0 ? updatedPlacements : origCh.photoPlacements,
+    };
+  });
+
+  const candidateManu: DemoManuscript = {
+    ...manuscript,
+    introduction: repairedIntroCandidate
+      ? ensureParagraphConformsToStyle({
+          paragraph: stripInlinePhotoMarkers(repairedIntroCandidate.trim()),
+          narrativeStyle,
+          speakerName: authors,
+          isCouple,
+        }) || manuscript.introduction
+      : manuscript.introduction,
+    chapters: nextChapters,
+  };
+
+  const afterAudit = await auditWithHybridSemantics({
+    manuscript: candidateManu,
+    answers,
+    questions,
+    provider,
+    model,
+    alternateProvider,
+    alternateModel,
+    repairAttemptsUsed: (manuscript.documentaryAudit?.repairAttemptsUsed || 0) + 1,
+    aiJudgeOverride,
+  });
+
+  const afterScore = computeManuscriptDefectScore(afterAudit.report, afterAudit.editorialAudit);
+
+  // Reject regressions: do not overwrite valid narrative prose if repairs broke coverage or added defects
+  const improved = afterScore < beforeScore || (afterAudit.report.passed && afterAudit.editorialAudit.passed);
+  if (!improved) {
+    return {
+      improved: false,
+      repairedChaptersCount: 0,
+      audited: {
+        manuscript: beforeAudit.manuscript,
+        report: beforeAudit.report,
+        editorialAudit: beforeAudit.editorialAudit,
+        inventory: beforeAudit.inventory,
+      },
+    };
+  }
+
+  return {
+    improved: true,
+    repairedChaptersCount,
+    audited: {
+      manuscript: afterAudit.manuscript,
+      report: afterAudit.report,
+      editorialAudit: afterAudit.editorialAudit,
+      inventory: afterAudit.inventory,
+    },
+  };
+}
+
 /**
  * Generates an editorial book manuscript (`DemoManuscript`) and chapter photo map from a participant's
  * completed interview answers and the mandatory Compilado Testimonial Fidedigno PDF in the selected narrative style (A, B, or C).
- * Includes Context & Style Caching, in-flight request deduplication, batch checkpointing, single prompt transmission,
- * chapter segment merging, and mandatory semantic audit + localized repair loop.
+ * Includes Context & Style Caching, in-flight request deduplication, persistent batch checkpointing,
+ * step-by-step progress hooks, hybrid semantic audit + unlimited batched repair loop, and granular admin reason classification.
  */
 export async function generateParticipantBookManuscriptWithAI(params: {
   interview: InterviewRecord;
@@ -1493,6 +2607,11 @@ export async function generateParticipantBookManuscriptWithAI(params: {
   geminiModel?: string;
   openaiModel?: string;
   bookStructureMode?: BookStructureMode;
+  onProgress?: (event: BookGenerationProgressEvent) => void;
+  initialBatchCheckpoints?: Record<string, BookBatchCheckpointPayload>;
+  onBatchCheckpoint?: (batchIdx: number, checkpoint: BookBatchCheckpointPayload) => void;
+  isCancelled?: () => boolean;
+  maxRepairPasses?: number;
 }): Promise<{
   manuscript: DemoManuscript;
   chapterPhotos: Record<string, DemoInMemoryPhoto | null>;
@@ -1504,6 +2623,10 @@ export async function generateParticipantBookManuscriptWithAI(params: {
   compilationPdfId?: string;
   compilationPdfSha256?: string;
   cachedContextUsed?: boolean;
+  internalReasonCode?: BookGenerationReasonCode;
+  diagnosticSummary?: string;
+  batchesCompleted?: number;
+  totalBatches?: number;
 }> {
   hydrateManuscriptCacheFromDisk();
 
@@ -1524,7 +2647,17 @@ export async function generateParticipantBookManuscriptWithAI(params: {
     geminiModel = 'gemini-3-flash-preview',
     openaiModel = 'gpt-4o',
     bookStructureMode = 'prompt_autonomous',
+    onProgress,
+    initialBatchCheckpoints,
+    onBatchCheckpoint,
+    isCancelled,
+    maxRepairPasses = 4,
   } = params;
+
+  onProgress?.({
+    phase: 'preparing_sources',
+    userMessage: 'Reuniendo y ordenando tus recuerdos y fotografías...',
+  });
 
   const primaryProvider: BookAiProvider = configuredProvider === 'openai' ? 'openai' : 'gemini';
   const primaryModel = primaryProvider === 'openai' ? openaiModel : geminiModel;
@@ -1607,7 +2740,7 @@ export async function generateParticipantBookManuscriptWithAI(params: {
   const scopeCacheKey = `${canonicalKey}::${fullCacheKey}`;
 
   if (!forceRefresh) {
-    // If an approved canonical manuscript was passed in lockedPreviewManuscript for this same style, verify and reuse it
+    // If an approved canonical manuscript was passed in lockedPreviewManuscript for this same style, verify BOTH documentary and editorial audits
     if (
       lockedPreviewManuscript &&
       lockedPreviewManuscript.narrativeStyle === narrativeStyle &&
@@ -1621,10 +2754,12 @@ export async function generateParticipantBookManuscriptWithAI(params: {
         answers,
         questions,
       });
-      if (auditedLocked.report.passed) {
+      if (auditedLocked.report.passed && auditedLocked.editorialAudit.passed) {
         return {
           manuscript: {
             ...auditedLocked.manuscript,
+            generationStatus: 'approved',
+            status: 'approved',
             narrativeStyle,
             canonicalCacheKey: canonicalKey,
           },
@@ -1640,7 +2775,7 @@ export async function generateParticipantBookManuscriptWithAI(params: {
       }
     }
 
-    // Both 'preview' and 'full' read from the single canonical manuscript cache entry
+    // Both 'preview' and 'full' read from the single canonical manuscript cache entry ONLY when verified approved
     const hit =
       manuscriptAiMemoryCache.get(canonicalKey) ||
       manuscriptAiMemoryCache.get(fullCacheKey) ||
@@ -1651,7 +2786,8 @@ export async function generateParticipantBookManuscriptWithAI(params: {
       Array.isArray(hit.manuscript.chapters) &&
       hit.manuscript.chapters.length > 0 &&
       hit.manuscript.generationStatus === 'approved' &&
-      hit.manuscript.documentaryAudit?.auditVersion === CANONICAL_AUDIT_RULES_VERSION
+      hit.manuscript.documentaryAudit?.auditVersion === CANONICAL_AUDIT_RULES_VERSION &&
+      hit.manuscript.editorialAudit?.passed === true
     ) {
       return {
         manuscript: {
@@ -1879,9 +3015,29 @@ export async function generateParticipantBookManuscriptWithAI(params: {
       manuscriptBatchCheckpoints.set(canonicalKey, new Map());
     }
     const batchCheckpointMap = manuscriptBatchCheckpoints.get(canonicalKey)!;
+    if (initialBatchCheckpoints && !forceRefresh) {
+      for (const [k, cp] of Object.entries(initialBatchCheckpoints)) {
+        const bIdxNum = Number(k);
+        if (!Number.isNaN(bIdxNum) && cp?.parsed && !batchCheckpointMap.has(bIdxNum)) {
+          batchCheckpointMap.set(bIdxNum, cp);
+        }
+      }
+    }
+
+    let completedBatchesCount = 0;
 
     try {
       for (let batchIdx = 0; batchIdx < chapterBatches.length; batchIdx++) {
+        if (isCancelled?.()) {
+          throw new Error('Generación cancelada por solicitud del usuario.');
+        }
+        onProgress?.({
+          phase: 'drafting_batches',
+          currentBatch: batchIdx + 1,
+          totalBatches: chapterBatches.length,
+          completedBatches: completedBatchesCount,
+          userMessage: `Escribiendo los capítulos de tu historia (parte ${batchIdx + 1} de ${chapterBatches.length})...`,
+        });
         const batchChapters = chapterBatches[batchIdx];
 
         // Filter multimodal photos to those relevant to this batch (avoiding re-sending unrelated image bytes on every batch)
@@ -1899,21 +3055,27 @@ export async function generateParticipantBookManuscriptWithAI(params: {
           batchPhotoIds.has(pm.photoId)
         );
 
+        const partialFramingNote = fallbackResult.editorialPlan.isPartialMemoir
+          ? `\n- ENCUADRE EDITORIAL DE ENTREVISTA PARCIAL (Etapas documentadas: ${(fallbackResult.editorialPlan.documentedStages || []).join(', ')}):
+  Presenta el subtítulo como "${fallbackResult.editorialPlan.partialMemoirSubtitle || 'Un libro parcial de memorias'}". NO inventes ni completes otras etapas de vida sin testimonios reales.`
+          : '';
+
         const structureInstructions = isAutonomousStructure
           ? `MODO DE ESTRUCTURA EDITORIAL ACTIVO (OPCIÓN 1 — OBEDIENCIA 100% AUTÓNOMA AL PROMPT LITERARIO ACTIVO):
 1. REGLA DE AGRUPACIÓN EN CAPÍTULOS:
    - UNA PREGUNTA RESPONDIDA NUNCA EQUIVALE A UN CAPÍTULO.
    - Redacta exactamente los capítulos planificados en este lote ("batchChapters"), conservando el "id" y "partNumber" de cada capítulo e integrando TODAS sus "unidadesTestimonialesOriginales" como párrafos narrativos continuos y cohesionados.
+   - Usa la respuesta escrita final como fuente prioritaria; nunca dupliques contenido por aparecer en audio y escrito.
    - Si varias respuestas o profundizaciones narran el mismo episodio, consolídalas sin repetir el episodio dos veces.
-   - Si el entrevistado expresa duda ("creo que", "no recuerdo bien", "tal vez", "aproximadamente"), conserva ese matiz de incertidumbre en la prosa y jamás inventes hechos, fechas ni diálogos no testimoniados.
+   - Si el entrevistado expresa duda ("creo que", "no recuerdo bien", "tal vez", "aproximadamente"), conserva ese matiz de incertidumbre en la prosa y jamás inventes hechos, fechas ni diálogos no testimoniados.${partialFramingNote}
 2. UBICACIÓN DOCUMENTAL EXACTA DE FOTOGRAFÍAS ("photoPlacements"):
    - Integra el contexto narrativo de "descripcionOriginal" dentro de la prosa del párrafo exacto donde se narra ese acontecimiento. NUNCA escribas "[FOTO:...]" dentro del párrafo.
    - En "photoPlacements" del capítulo, incluye un objeto por cada fotografía con "photoId", "paragraphIndex" (base 0) y "shortCaption" (máximo 85 caracteres).`
-          : `MODO DE ESTRUCTURA EDITORIAL ACTIVO (OPCIÓN 2 — 5 CAPÍTULOS FIJOS POR ETAPA DE VIDA):
+          : `MODO DE ESTRUCTURA EDITORIAL ACTIVO (OPCIÓN 2 — CAPÍTULOS POR ETAPAS DOCUMENTADAS):
 1. UNA PREGUNTA RESPONDIDA NUNCA EQUIVALE A UN CAPÍTULO: cada etapa agrupa todas sus respuestas y profundizaciones como párrafos narrativos continuos dentro del capítulo.
-2. Si el entrevistado expresa duda ("creo que", "no recuerdo bien", "tal vez", "aproximadamente"), conserva ese matiz de incertidumbre sin inventar hechos ni fechas.
+2. Conserva quién realizó la acción, negaciones y matices de incertidumbre sin inventar hechos ni fechas.${partialFramingNote}
 3. En "photoPlacements" del capítulo, incluye cada fotografía asociada con "photoId", "paragraphIndex" (base 0) y "shortCaption" (máximo 85 caracteres).
-4. Conserva exactamente el mismo "id", "partNumber" y "dimensionKey" de cada uno de los capítulos por etapa.`;
+4. Conserva exactamente el mismo "id", "partNumber" y "dimensionKey" de cada uno de los capítulos.`;
 
         // De-duplicated batch prompt: contains the global book outline + the exact structured testimony units for this batch
         const batchPrompt = `================================================================================
@@ -2007,10 +3169,12 @@ ${structureInstructions}`;
 
           if (batchResult?.parsed) {
             batchCheckpointMap.set(batchIdx, batchResult);
+            onBatchCheckpoint?.(batchIdx, batchResult);
           }
         }
 
         if (batchResult?.parsed) {
+          completedBatchesCount++;
           effectiveModel = batchResult.respondedModel || effectiveModel;
           if ((batchResult.cachedTokens || 0) > 0) {
             anyProviderCachedTokens = true;
@@ -2280,13 +3444,17 @@ ${structureInstructions}`;
         narrativeStyle,
         bookStructureMode,
         aiGenerated: true,
+        isPartialMemoir: fallbackResult.editorialPlan.isPartialMemoir,
+        documentedStages: fallbackResult.editorialPlan.documentedStages,
         title: (
           stripInlinePhotoMarkers(aiTitle || '').trim() || fallbackResult.manuscript.title
         ).trim(),
-        subtitle: (
-          stripInlinePhotoMarkers(aiSubtitle || '').trim() ||
-          fallbackResult.manuscript.subtitle
-        ).trim(),
+        subtitle: fallbackResult.editorialPlan.isPartialMemoir
+          ? fallbackResult.editorialPlan.partialMemoirSubtitle || 'Un libro parcial de memorias'
+          : (
+              stripInlinePhotoMarkers(aiSubtitle || '').trim() ||
+              fallbackResult.manuscript.subtitle
+            ).trim(),
         introduction: (
           stripInlinePhotoMarkers(aiIntroduction || '').trim() ||
           fallbackResult.manuscript.introduction
@@ -2301,15 +3469,98 @@ ${structureInstructions}`;
         canonicalCacheKey: canonicalKey,
       };
 
-      // Run mandatory server-side Documentary Audit & localized Repair Loop (up to 2 repair passes)
-      let auditedResult = auditAndApproveBookManuscript({
+      if (isCancelled?.()) {
+        throw new Error('Generación cancelada por solicitud del usuario.');
+      }
+
+      onProgress?.({
+        phase: 'auditing_semantics',
+        currentBatch: chapterBatches.length,
+        totalBatches: chapterBatches.length,
+        completedBatches: completedBatchesCount,
+        userMessage: 'Verificando que cada recuerdo, nombre y detalle esté fielmente conservado...',
+      });
+
+      // Run mandatory server-side Hybrid Dual Audit (Deterministic Propositional + Selective AI Judge + Editorial)
+      let auditedResult = await auditWithHybridSemantics({
         manuscript: rawCandidateManuscript,
         answers,
         questions,
+        provider: effectiveProvider,
+        model: effectiveModel,
+        alternateProvider,
+        alternateModel,
       });
 
-      if (!auditedResult.report.passed) {
-        const repaired = repairManuscriptOmissions({
+      let repairPassesUsed = 0;
+      for (let aiRepairPass = 1; aiRepairPass <= maxRepairPasses; aiRepairPass++) {
+        if (auditedResult.report.passed && auditedResult.editorialAudit.passed) break;
+        if (isCancelled?.()) {
+          throw new Error('Generación cancelada por solicitud del usuario.');
+        }
+
+        const tasks = buildContextualRepairTasks({
+          manuscript: auditedResult.manuscript,
+          report: auditedResult.report,
+          editorialAudit: auditedResult.editorialAudit,
+          inventory: auditedResult.inventory,
+          editorialPlan: fallbackResult.editorialPlan,
+        }).filter((t) => t.autoRepairable !== false);
+        if (tasks.length === 0) break;
+
+        repairPassesUsed = aiRepairPass;
+        onProgress?.({
+          phase: 'repairing_chapters',
+          currentBatch: chapterBatches.length,
+          totalBatches: chapterBatches.length,
+          completedBatches: completedBatchesCount,
+          repairPass: aiRepairPass,
+          repairedChapters: 0,
+          totalRepairChapters: tasks.length,
+          userMessage: `Puliendo y revisando ${tasks.length} capítulo(s) para asegurar fidelidad completa...`,
+        });
+
+        const aiRepaired = await repairChaptersContextuallyWithAI({
+          manuscript: auditedResult.manuscript,
+          tasks,
+          activeLiteraryPrompt,
+          narrativeStyle,
+          authors: fallbackResult.manuscript.authors,
+          isCouple,
+          answers,
+          questions,
+          provider: effectiveProvider,
+          model: effectiveModel,
+          alternateProvider,
+          alternateModel,
+          onRepairProgress: (done, total) => {
+            onProgress?.({
+              phase: 'repairing_chapters',
+              currentBatch: chapterBatches.length,
+              totalBatches: chapterBatches.length,
+              completedBatches: completedBatchesCount,
+              repairPass: aiRepairPass,
+              repairedChapters: done,
+              totalRepairChapters: total,
+              userMessage: `Puliendo capítulos (${done} de ${total} revisados)...`,
+            });
+          },
+        });
+        if (aiRepaired && aiRepaired.improved) {
+          auditedResult = {
+            ...auditedResult,
+            manuscript: aiRepaired.audited.manuscript,
+            report: aiRepaired.audited.report,
+            editorialAudit: aiRepaired.audited.editorialAudit,
+          };
+        } else {
+          break;
+        }
+      }
+
+      // Deterministic post-AI hygiene pass ONLY if small structural/editorial defects remain
+      if (!auditedResult.report.passed || !auditedResult.editorialAudit.passed) {
+        const hygieneRepaired = repairManuscriptOmissions({
           manuscript: auditedResult.manuscript,
           answers,
           questions,
@@ -2317,14 +3568,62 @@ ${structureInstructions}`;
           participantNames,
           maxAttempts: 2,
         });
-        auditedResult = {
-          manuscript: repaired.manuscript,
-          report: repaired.report,
-          inventory: auditedResult.inventory,
-        };
+        const hygieneScore = computeManuscriptDefectScore(
+          hygieneRepaired.report,
+          hygieneRepaired.editorialAudit
+        );
+        const preScore = computeManuscriptDefectScore(
+          auditedResult.report,
+          auditedResult.editorialAudit
+        );
+        if (
+          hygieneScore < preScore ||
+          (hygieneRepaired.report.passed && hygieneRepaired.editorialAudit.passed)
+        ) {
+          auditedResult = await auditWithHybridSemantics({
+            manuscript: hygieneRepaired.manuscript,
+            answers,
+            questions,
+            provider: effectiveProvider,
+            model: effectiveModel,
+            alternateProvider,
+            alternateModel,
+            repairAttemptsUsed: repairPassesUsed,
+          });
+        }
       }
 
-      const finalManuscript = auditedResult.manuscript;
+      onProgress?.({
+        phase: 'finalizing',
+        currentBatch: chapterBatches.length,
+        totalBatches: chapterBatches.length,
+        completedBatches: completedBatchesCount,
+        userMessage: 'Finalizando la edición de tu libro...',
+      });
+
+      const fullyVerified = auditedResult.report.passed && auditedResult.editorialAudit.passed;
+      const finalGenerationStatus = fullyVerified ? 'approved' : 'incomplete_draft';
+      const failureDiag = fullyVerified
+        ? null
+        : classifyBookFailureReasonCode({
+            report: auditedResult.report,
+            editorialAudit: auditedResult.editorialAudit,
+            completedBatches: completedBatchesCount,
+            totalBatches: chapterBatches.length,
+            repairPassesAttempted: repairPassesUsed,
+          });
+
+      const finalManuscript: DemoManuscript = {
+        ...auditedResult.manuscript,
+        aiGenerated: true,
+        isPartialMemoir: fallbackResult.editorialPlan.isPartialMemoir,
+        documentedStages: fallbackResult.editorialPlan.documentedStages,
+        generationStatus: finalGenerationStatus,
+        status: finalGenerationStatus,
+        incompleteDraftNotice: fullyVerified ? undefined : PLAIN_INCOMPLETE_DRAFT_USER_NOTICE,
+        internalReasonCode: failureDiag?.code,
+        diagnosticSummary: failureDiag?.summary,
+      };
 
       // Update chapterPhotos captions with the audited shortCaption when available, and map custom chapter IDs
       const updatedChapterPhotos: Record<string, DemoInMemoryPhoto | null> = {
@@ -2353,8 +3652,8 @@ ${structureInstructions}`;
         }
       }
 
-      // Store in Context & Style Cache ONLY if audit passed (generationStatus === 'approved')
-      if (finalManuscript.generationStatus === 'approved' && auditedResult.report.passed) {
+      // Store in Context & Style Cache ONLY if BOTH Documentary and Editorial audits passed
+      if (fullyVerified && finalManuscript.generationStatus === 'approved') {
         const cacheEntry = {
           cacheKey: canonicalKey,
           interviewId: interview.id,
@@ -2384,42 +3683,60 @@ ${structureInstructions}`;
         compilationPdfId: compilationPdfRecord?.pdfId,
         compilationPdfSha256: compilationPdfRecord?.sha256Hash,
         cachedContextUsed: anyProviderCachedTokens,
+        internalReasonCode: failureDiag?.code,
+        diagnosticSummary: failureDiag?.summary,
+        batchesCompleted: completedBatchesCount,
+        totalBatches: chapterBatches.length,
       };
     } catch (bothFailedErr: any) {
-      const fallbackNotice =
-        providerFallbackNotice ||
-        `Aviso: El proveedor configurado (${
-          primaryProvider === 'openai' ? 'OpenAI' : 'Gemini'
-        } · ${primaryModel}) y el proveedor alterno presentaron una interrupción temporal (${
-          bothFailedErr?.message || 'Error de red'
-        }). Se aplicó el motor de respaldo determinista conservando el 100% del Compilado Testimonial Fidedigno.`;
+      const failureDiag = classifyBookFailureReasonCode({
+        error: bothFailedErr,
+        completedBatches: completedBatchesCount,
+        totalBatches: chapterBatches.length,
+      });
+      console.warn(
+        `[BookAI] Incomplete draft returned (${failureDiag.code}): ${failureDiag.summary}`
+      );
 
-      const auditedFallback = repairManuscriptOmissions({
+      const auditedFallback = auditAndApproveBookManuscript({
         manuscript: {
           ...fallbackResult.manuscript,
           narrativeStyle,
           bookStructureMode,
           aiGenerated: false,
+          isPartialMemoir: fallbackResult.editorialPlan.isPartialMemoir,
+          documentedStages: fallbackResult.editorialPlan.documentedStages,
           canonicalCacheKey: canonicalKey,
         },
         answers,
         questions,
-        storyMode: interview.storyMode,
-        participantNames,
-        maxAttempts: 2,
       });
 
+      const incompleteDraftManuscript: DemoManuscript = {
+        ...auditedFallback.manuscript,
+        aiGenerated: false,
+        generationStatus: 'incomplete_draft',
+        status: 'incomplete_draft',
+        incompleteDraftNotice: PLAIN_INCOMPLETE_DRAFT_USER_NOTICE,
+        internalReasonCode: failureDiag.code,
+        diagnosticSummary: failureDiag.summary,
+      };
+
       return {
-        manuscript: auditedFallback.manuscript,
+        manuscript: incompleteDraftManuscript,
         chapterPhotos: fallbackResult.chapterPhotos,
         allPhotosById: fallbackResult.allPhotosById,
         scope,
         providerUsed: effectiveProvider,
         modelUsed: effectiveModel,
-        providerFallbackNotice: fallbackNotice,
+        providerFallbackNotice: PLAIN_INCOMPLETE_DRAFT_USER_NOTICE,
         compilationPdfId: compilationPdfRecord?.pdfId,
         compilationPdfSha256: compilationPdfRecord?.sha256Hash,
         cachedContextUsed: false,
+        internalReasonCode: failureDiag.code,
+        diagnosticSummary: failureDiag.summary,
+        batchesCompleted: completedBatchesCount,
+        totalBatches: chapterBatches.length,
       };
     }
   };

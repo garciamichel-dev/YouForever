@@ -1313,6 +1313,52 @@ export const ManuscriptsView: React.FC<ManuscriptsViewProps> = ({
                       <h1 className="font-serif text-2xl font-bold text-stone-900">
                         {selectedManuscript.title}
                       </h1>
+                      {selectedManuscript.isPartialMemoir && (
+                        <div className="mt-2 inline-flex items-center px-2.5 py-1 rounded-full bg-stone-100 text-stone-700 text-xs font-semibold">
+                          Un libro parcial de memorias
+                        </div>
+                      )}
+                      {selectedManuscript.status === 'incomplete_draft' && (
+                        <div className="mt-3 p-3.5 rounded-xl bg-amber-50 border border-amber-300 text-amber-950 flex flex-wrap items-start justify-between gap-3 text-xs">
+                          <div className="space-y-1 flex-1 min-w-[240px]">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="font-extrabold uppercase tracking-wide text-amber-900">
+                                BORRADOR INCOMPLETO — PENDIENTE DE REVISIÓN
+                              </span>
+                              {selectedManuscript.internalReasonCode && (
+                                <span
+                                  data-testid="admin-manuscript-reason-code"
+                                  className="px-2 py-0.5 rounded bg-amber-200/80 border border-amber-400 text-amber-950 font-mono text-[11px] font-bold"
+                                >
+                                  {selectedManuscript.internalReasonCode}
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-amber-800">
+                              {selectedManuscript.incompleteDraftNotice ||
+                                'Este borrador preliminar todavía tiene observaciones pendientes antes de aprobarse como manuscrito final.'}
+                            </p>
+                            {selectedManuscript.diagnosticSummary && (
+                              <p
+                                data-testid="admin-manuscript-diagnostic-summary"
+                                className="text-[11px] font-mono bg-white/80 border border-amber-200 rounded-lg px-2.5 py-1.5 text-amber-950 mt-1"
+                              >
+                                Diagnóstico interno: {selectedManuscript.diagnosticSummary}
+                              </p>
+                            )}
+                          </div>
+                          {filterInterviewId !== 'all' && (
+                            <button
+                              type="button"
+                              onClick={handleRecompileSelected}
+                              disabled={compiling}
+                              className="px-3 py-1.5 rounded-lg bg-amber-800 hover:bg-amber-900 text-white font-semibold disabled:opacity-50 shrink-0"
+                            >
+                              {compiling ? 'Regenerando...' : 'Reintentar generación'}
+                            </button>
+                          )}
+                        </div>
+                      )}
                       {selectedManuscript.summary && (
                         <p className="mt-2 text-sm text-stone-600 italic bg-amber-50/50 p-3 rounded-lg border border-amber-100">
                           «{selectedManuscript.summary}»

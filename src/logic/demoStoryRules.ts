@@ -88,19 +88,42 @@ export type ManuscriptGenerationStatus =
   | 'generated'
   | 'auditing'
   | 'needs_correction'
+  | 'incomplete_draft'
   | 'approved'
   | 'failed_ai'
   | 'failed_audit'
   | 'error';
 
-export const CANONICAL_AUDIT_RULES_VERSION = 'v3.0.0-canonical-audit-facts';
-export const BOOK_GENERATION_ENGINE_VERSION = 'v3.0.0-narrative-batch-engine';
+export const CANONICAL_AUDIT_RULES_VERSION = 'v4.1.0-propositional-hybrid-audit';
+export const BOOK_GENERATION_ENGINE_VERSION = 'v4.1.0-resumable-book-engine';
+
+export type BookGenerationReasonCode =
+  | 'PROVIDER_ERROR'
+  | 'MODEL_TIMEOUT'
+  | 'INVALID_MODEL_RESPONSE'
+  | 'PARTIAL_BATCH_GENERATION'
+  | 'DOCUMENTARY_COVERAGE_FAILURE'
+  | 'SEMANTIC_CONTRADICTION'
+  | 'EDITORIAL_QUALITY_FAILURE'
+  | 'PRIVACY_VALIDATION_FAILURE'
+  | 'PHOTO_PLACEMENT_FAILURE'
+  | 'REPAIR_EXHAUSTED'
+  | 'AUDIT_INCONCLUSIVE';
 
 export type DocumentaryExclusionReason =
   | 'none'
   | 'not_recalled'
   | 'prefer_not_to_answer'
   | 'excluded_by_interviewee';
+
+export type UnitVerificationStatus =
+  | 'supported'
+  | 'partially_supported'
+  | 'missing'
+  | 'contradicted'
+  | 'unsupported_addition'
+  | 'uncertain'
+  | 'ambiguous';
 
 export interface DocumentaryFactUnit {
   unitId: string;
@@ -172,6 +195,50 @@ export interface EditorialBookPlan {
   chapters: EditorialChapterPlanItem[];
   totalPlannedChapters: number;
   isOneQuestionPerChapterBlocked: boolean;
+  isPartialMemoir?: boolean;
+  documentedStages?: string[];
+  missingStages?: string[];
+  partialMemoirSubtitle?: string;
+  partialMemoirIntroNote?: string;
+}
+
+export interface EditorialQualityAuditReport {
+  passed: boolean;
+  auditedAt: string;
+  narrativeStyle: DemoNarrativeStyleId;
+  blockingDefects: string[];
+  warnings: string[];
+  styleConsistencyPassed: boolean;
+  firstPersonLeakFlags: string[];
+  oralFillerOrArtifactFlags: string[];
+  duplicateEpisodeFlags: string[];
+  titleQualityFlags: string[];
+  truncatedFragmentFlags: string[];
+  giantParagraphFlags: string[];
+  unbalancedMarkdownFlags: string[];
+}
+
+export interface AdaptivePhotoDimensions {
+  widthMm: number;
+  heightMm: number;
+  blockHeightMm: number;
+  orientation: 'landscape' | 'portrait' | 'square';
+  aspectRatio: number;
+  densityScale: number;
+}
+
+export interface PdfIntegrityReport {
+  passed: boolean;
+  totalPages: number;
+  coverRendered: boolean;
+  tocPresent: boolean;
+  tocEntryCount: number;
+  tocPageNumbersValid: boolean;
+  duplicatePageNumbers: number[];
+  brokenMarkersDetected: number;
+  photosExpected: number;
+  photosEmbedded: number;
+  errors: string[];
 }
 
 export interface TraceabilityMatrixEntry {
@@ -188,6 +255,10 @@ export interface TraceabilityMatrixEntry {
   assignedChapterNumber?: number;
   assignedParagraphIds?: string[];
   status?: 'integrated' | 'omitted_not_recalled' | 'omitted_prefer_not_to_answer' | 'excluded_by_interviewee' | 'missing';
+  verificationStatus?: UnitVerificationStatus;
+  semanticIssues?: string[];
+  ambiguityReason?: string;
+  aiJudgeVerdict?: 'supported' | 'contradicted' | 'inconclusive';
   exclusionReason?: DocumentaryExclusionReason;
   eventId?: string;
   lifeStage?: string;
@@ -213,6 +284,8 @@ export interface DocumentaryAuditReport {
   status?: ManuscriptGenerationStatus;
   approved?: boolean;
   passed: boolean;
+  internalReasonCode?: BookGenerationReasonCode;
+  diagnosticSummary?: string;
   totalSourceUnits: number;
   integratedUnits: number;
   omittedNotRecalledUnits: number;
@@ -244,7 +317,20 @@ export interface DocumentaryAuditReport {
     inventedDataFlags: string[];
     leakedExcludedContentFlags?: string[];
     coupleAttributionViolations?: string[];
+    semanticContradictionFlags?: string[];
+    unsupportedAdditionFlags?: string[];
   };
+  semanticAudit?: {
+    passed: boolean;
+    contradictionsDetected: string[];
+    unsupportedAdditions: string[];
+    uncertainUnitsCount: number;
+    ambiguousUnitsCount?: number;
+    ambiguousUnitIds?: string[];
+    directionAChecked: number;
+    directionBChecked: number;
+  };
+  editorialAudit?: EditorialQualityAuditReport;
   structuralAudit?: {
     passed: boolean;
     uniqueChapterIds: boolean;
@@ -325,8 +411,14 @@ export interface DemoManuscript {
   cacheKey?: string;
   canonicalCacheKey?: string;
   bookStructureMode?: 'prompt_autonomous' | 'fixed_five_stages';
+  isPartialMemoir?: boolean;
+  documentedStages?: string[];
+  incompleteDraftNotice?: string;
+  internalReasonCode?: BookGenerationReasonCode;
+  diagnosticSummary?: string;
   auditReport?: DocumentaryAuditReport;
   documentaryAudit?: DocumentaryAuditReport;
+  editorialAudit?: EditorialQualityAuditReport;
   includeTableOfContents?: boolean;
   includeEditorialCredits?: boolean;
   editorialCreditsText?: string;
@@ -1162,8 +1254,163 @@ export function estimatePhysicalTextWidthMm(
 }
 
 /**
+ * Balances inline `**bold**` and `*italic*` markdown markers across physical lines
+ * so splitting a long paragraph across two pages never produces orphan `**` or stripped formatting.
+ */
+export function balanceInlineMarkdownMarkersAcrossLines(lines: string[]): string[] {
+  if (!lines || lines.length === 0) return [];
+  const balanced: string[] = [];
+  let inBold = false;
+  let inItalic = false;
+
+  for (const rawLine of lines) {
+    let prefix = '';
+    if (inBold) prefix += '**';
+    if (inItalic) prefix += '*';
+
+    // Count marker toggles inside rawLine cleanly (check ** before single *)
+    let i = 0;
+    while (i < rawLine.length) {
+      if (rawLine[i] === '*' && rawLine[i + 1] === '*') {
+        inBold = !inBold;
+        i += 2;
+      } else if (rawLine[i] === '*') {
+        inItalic = !inItalic;
+        i += 1;
+      } else {
+        i += 1;
+      }
+    }
+
+    let suffix = '';
+    if (inItalic) suffix += '*';
+    if (inBold) suffix += '**';
+
+    balanced.push(`${prefix}${rawLine}${suffix}`);
+  }
+
+  return balanced;
+}
+
+/**
+ * Computes adaptive physical dimensions (in mm) for an editorial photograph based on:
+ * - Page format (`a5`, `6x9`, `carta`), usable printable width & available vertical height
+ * - Image natural orientation (`landscape`, `portrait`, `square`) and aspect ratio
+ * - Natural pixel resolution (caps display size for low-res images to avoid pixelation)
+ * - Photo density (total photos in book and in chapter) so dense albums remain harmonious.
+ */
+export function computeAdaptivePhotoDimensions(params: {
+  format: DemoBookFormatSpec;
+  usableWidthMm: number;
+  availableHeightMm: number;
+  naturalWidth?: number;
+  naturalHeight?: number;
+  photoCountInBook?: number;
+  photoCountInChapter?: number;
+  hasCaption?: boolean;
+}): AdaptivePhotoDimensions {
+  const {
+    format,
+    usableWidthMm,
+    availableHeightMm,
+    naturalWidth = 800,
+    naturalHeight = 600,
+    photoCountInBook = 1,
+    photoCountInChapter = 1,
+    hasCaption = false,
+  } = params;
+
+  const safeW = naturalWidth > 0 ? naturalWidth : 800;
+  const safeH = naturalHeight > 0 ? naturalHeight : 600;
+  const rawAr = safeW / safeH;
+  const aspectRatio = Math.max(0.45, Math.min(2.4, rawAr));
+  const orientation: AdaptivePhotoDimensions['orientation'] =
+    aspectRatio >= 1.15 ? 'landscape' : aspectRatio <= 0.85 ? 'portrait' : 'square';
+
+  // Format factor
+  const formatMaxBoxH =
+    format.id === 'carta' ? 56 : format.id === '6x9' ? 46 : 38;
+  const formatMinBoxH =
+    format.id === 'carta' ? 26 : format.id === '6x9' ? 23 : 20;
+
+  // Density scale: books with many photos compact slightly to maintain clean page rhythm
+  let densityScale = 1.0;
+  if (photoCountInBook >= 25 || photoCountInChapter >= 8) {
+    densityScale = 0.72;
+  } else if (photoCountInBook >= 12 || photoCountInChapter >= 5) {
+    densityScale = 0.84;
+  } else if (photoCountInBook <= 3 && photoCountInChapter <= 2) {
+    densityScale = 1.06;
+  }
+
+  // Resolution guard: prevent severe upscaling of low-resolution images
+  const minNaturalDim = Math.min(safeW, safeH);
+  const resScale =
+    minNaturalDim > 0 && minNaturalDim < 320
+      ? 0.68
+      : minNaturalDim > 0 && minNaturalDim < 520
+      ? 0.85
+      : 1.0;
+
+  const captionOverheadMm = hasCaption ? 4.8 : 0;
+  const paddingMm = 3.2;
+
+  const maxAllowedImgW =
+    orientation === 'portrait'
+      ? usableWidthMm * 0.56
+      : orientation === 'square'
+      ? usableWidthMm * 0.66
+      : usableWidthMm * 0.82;
+
+  const maxAllowedImgH = Math.min(
+    formatMaxBoxH * densityScale * resScale,
+    Math.max(formatMinBoxH * 0.85, availableHeightMm - captionOverheadMm - paddingMm)
+  );
+
+  // Target base height depending on orientation
+  const desiredH =
+    (orientation === 'portrait'
+      ? formatMaxBoxH * 0.96
+      : orientation === 'square'
+      ? formatMaxBoxH * 0.86
+      : formatMaxBoxH * 0.80) *
+    densityScale *
+    resScale;
+
+  let heightMm = Math.max(14, Math.min(maxAllowedImgH, desiredH));
+  let widthMm = heightMm * aspectRatio;
+
+  if (widthMm > maxAllowedImgW) {
+    widthMm = maxAllowedImgW;
+    heightMm = widthMm / aspectRatio;
+  }
+
+  // Enforce low-resolution physical ceiling (~150 DPI equivalent -> max mm proportional to px)
+  const resCapWMm = safeW >= 180 ? (safeW / 3.8) : 34;
+  const resCapHMm = safeH >= 180 ? (safeH / 3.8) : 28;
+  if (widthMm > resCapWMm) {
+    widthMm = Math.max(20, resCapWMm);
+    heightMm = widthMm / aspectRatio;
+  }
+  if (heightMm > resCapHMm) {
+    heightMm = Math.max(14, resCapHMm);
+    widthMm = heightMm * aspectRatio;
+  }
+
+  return {
+    widthMm: Number(widthMm.toFixed(2)),
+    heightMm: Number(heightMm.toFixed(2)),
+    blockHeightMm: Number((heightMm + paddingMm + captionOverheadMm).toFixed(2)),
+    orientation,
+    aspectRatio: Number(aspectRatio.toFixed(3)),
+    densityScale,
+  };
+}
+
+/**
  * Wraps a paragraph into physical lines (in mm) for the target printable width `maxWidthMm`,
- * accounting for drop-cap indentation on the first 2 lines when `useDropCap` is active.
+ * accounting for drop-cap indentation on the first 2 lines when `useDropCap` is active,
+ * and balancing inline markdown markers across line breaks.
  */
 export function wrapParagraphToPhysicalLines(params: {
   rawText: string;
@@ -1216,7 +1463,7 @@ export function wrapParagraphToPhysicalLines(params: {
     lines.push(currentWords.join(' '));
   }
 
-  return lines;
+  return balanceInlineMarkdownMarkersAcrossLines(lines);
 }
 
 /**
@@ -1243,6 +1490,7 @@ export function paginateSingleChapterByPhysicalMeasurement(params: {
   format: DemoBookFormatSpec;
   interiorStyle: DemoInteriorStyleSpec;
   startAsContinuation?: boolean;
+  totalBookPhotos?: number;
 }): {
   pages: ComposedChapterSectionBlock[];
   truncatedLinesCount: number;
@@ -1259,6 +1507,7 @@ export function paginateSingleChapterByPhysicalMeasurement(params: {
     format,
     interiorStyle,
     startAsContinuation = false,
+    totalBookPhotos,
   } = params;
 
   const W = format.widthMm;
@@ -1271,6 +1520,12 @@ export function paginateSingleChapterByPhysicalMeasurement(params: {
   const lineHeightMm = format.baseFontPt * 0.45;
   const paragraphGapMm = 3.0;
   const fontFamily = interiorStyle.pdfFontFamily;
+
+  let photoCountInChapter = 0;
+  for (const list of chapterPhotosByRelPara.values()) {
+    photoCountInChapter += list.length;
+  }
+  const effectiveBookPhotoCount = Math.max(photoCountInChapter, totalBookPhotos ?? photoCountInChapter);
 
   const chTitlePt = format.titleFontPt - 2.5;
   const titleLines = wrapParagraphToPhysicalLines({
@@ -1361,23 +1616,43 @@ export function paginateSingleChapterByPhysicalMeasurement(params: {
         cursorY += neededHeightMm + paragraphGapMm;
         remainingText = '';
 
-        // Place any photos anchored to this paragraph
+        // Place any photos anchored to this paragraph using adaptive physical sizing
         if (attachedPhotos.length > 0) {
           for (const ph of attachedPhotos) {
             const hasCap = Boolean(formatPhotoEditorialCaption(ph.caption || ''));
-            const minPhotoBlockMm = 26.0 + (hasCap ? 4.2 : 0);
-            const idealPhotoBlockMm = 36.0 + 3.2 + (hasCap ? 4.2 : 0);
+            const fullPagePhotoDims = computeAdaptivePhotoDimensions({
+              format,
+              usableWidthMm: contentW,
+              availableHeightMm: maxBottomY - (startY + continuationHeaderHeightMm),
+              naturalWidth: ph.width,
+              naturalHeight: ph.height,
+              photoCountInBook: effectiveBookPhotoCount,
+              photoCountInChapter,
+              hasCaption: hasCap,
+            });
+            const remainingPhotoAvail = Math.max(0, maxBottomY - cursorY);
+            const minReadablePhotoBlockMm = Math.min(fullPagePhotoDims.blockHeightMm, 22.0 + (hasCap ? 4.8 : 0));
 
-            if (cursorY + minPhotoBlockMm <= maxBottomY) {
+            if (remainingPhotoAvail >= minReadablePhotoBlockMm) {
+              const fitDims = computeAdaptivePhotoDimensions({
+                format,
+                usableWidthMm: contentW,
+                availableHeightMm: remainingPhotoAvail,
+                naturalWidth: ph.width,
+                naturalHeight: ph.height,
+                photoCountInBook: effectiveBookPhotoCount,
+                photoCountInChapter,
+                hasCaption: hasCap,
+              });
               const list = currentParaPhotos[localParaIdx] || [];
               list.push(ph);
               currentParaPhotos[localParaIdx] = list;
-              const drawnBoxH = Math.min(36, (H - cursorY - format.marginBottomMm) * 0.38);
-              cursorY += Math.max(minPhotoBlockMm, Math.min(idealPhotoBlockMm, drawnBoxH + 7.4));
+              cursorY += fitDims.blockHeightMm + 1.5;
             } else if (
               currentParas.length > 1 &&
               partSegmentIdx === 0 &&
-              neededHeightMm + idealPhotoBlockMm <= maxBottomY - (startY + continuationHeaderHeightMm)
+              neededHeightMm + fullPagePhotoDims.blockHeightMm <=
+                maxBottomY - (startY + continuationHeaderHeightMm)
             ) {
               // Move the owning paragraph + its photo together to the next continuation page so they stay united
               const movedPara = currentParas.pop()!;
@@ -1394,11 +1669,20 @@ export function paginateSingleChapterByPhysicalMeasurement(params: {
                 useDropCap: false,
               });
               cursorY += Math.max(1, movedLines.length) * lineHeightMm + paragraphGapMm;
+              const fitNextDims = computeAdaptivePhotoDimensions({
+                format,
+                usableWidthMm: contentW,
+                availableHeightMm: maxBottomY - cursorY,
+                naturalWidth: ph.width,
+                naturalHeight: ph.height,
+                photoCountInBook: effectiveBookPhotoCount,
+                photoCountInChapter,
+                hasCaption: hasCap,
+              });
               const list = currentParaPhotos[newLocalIdx] || [];
               list.push(ph);
               currentParaPhotos[newLocalIdx] = list;
-              const drawnBoxH = Math.min(36, (H - cursorY - format.marginBottomMm) * 0.38);
-              cursorY += Math.max(minPhotoBlockMm, Math.min(idealPhotoBlockMm, drawnBoxH + 7.4));
+              cursorY += fitNextDims.blockHeightMm + 1.5;
             } else {
               // Flush current page and place the photo at the top of the next continuation page
               flushCurrentPage();
@@ -1411,11 +1695,20 @@ export function paginateSingleChapterByPhysicalMeasurement(params: {
                 cursorY += lineHeightMm + paragraphGapMm;
               }
               const targetIdx = Math.max(0, currentParas.length - 1);
+              const fitTopDims = computeAdaptivePhotoDimensions({
+                format,
+                usableWidthMm: contentW,
+                availableHeightMm: maxBottomY - cursorY,
+                naturalWidth: ph.width,
+                naturalHeight: ph.height,
+                photoCountInBook: effectiveBookPhotoCount,
+                photoCountInChapter,
+                hasCaption: hasCap,
+              });
               const list = currentParaPhotos[targetIdx] || [];
               list.push(ph);
               currentParaPhotos[targetIdx] = list;
-              const drawnBoxH = Math.min(36, (H - cursorY - format.marginBottomMm) * 0.38);
-              cursorY += Math.max(minPhotoBlockMm, Math.min(idealPhotoBlockMm, drawnBoxH + 7.4));
+              cursorY += fitTopDims.blockHeightMm + 1.5;
             }
           }
         }
@@ -1666,6 +1959,12 @@ export function composeBookPages(params: {
   let totalTruncatedLines = 0;
   let totalArtificialBreaks = 0;
 
+  // Total photos in book helps density-aware sizing inside paginateSingleChapterByPhysicalMeasurement
+  const totalBookPhotoCount = Math.max(
+    Object.keys(photoByIdLookup).length,
+    validChapters.reduce((sum, ch) => sum + (ch.photoPlacements?.length || 0), 0)
+  );
+
   for (let i = 0; i < validChapters.length; i++) {
     const ch = validChapters[i];
     const chPhoto = chapterPhotos[ch.id] || null;
@@ -1777,6 +2076,7 @@ export function composeBookPages(params: {
       format,
       interiorStyle,
       startAsContinuation: lockedCount > 0,
+      totalBookPhotos: totalBookPhotoCount,
     });
 
     totalTruncatedLines += chapterPagination.truncatedLinesCount;
@@ -1881,8 +2181,8 @@ export function composeBookPages(params: {
   }
 
   // FULL BOOK MODE (`previewSampleOnly: false`):
-  // Two-pass calculation for Table of Contents (`tocEntries`) so chapter start page numbers
-  // match the final paginated PDF 100%.
+  // Two-pass calculation for Table of Contents (`tocEntries`) supporting multi-page TOC
+  // so chapter start page numbers in the index match the final paginated PDF 100%.
   const shouldIncludeToc = Boolean(
     includeTableOfContents ??
       editorialConfig.includeTableOfContents ??
@@ -1894,27 +2194,44 @@ export function composeBookPages(params: {
       manuscript.includeEditorialCredits
   );
 
-  const tocPagesCount = shouldIncludeToc ? 1 : 0;
-  const creditsPagesCount = shouldIncludeCredits ? 1 : 0;
-  const firstChapterPageNumber = 3 + tocPagesCount;
-
-  // Pass 1: Compute exact starting page number for each chapter
-  const tocEntries: TableOfContentsEntry[] = [];
-  const seenChapterInToc = new Set<string>();
+  // Estimate number of distinct chapters that will appear in the TOC
+  const distinctChaptersForToc: Array<{ chapterId: string; partNumber: number; title: string; groupIdx: number }> = [];
+  const seenTocChInit = new Set<string>();
   contentPageGroups.forEach((group, idx) => {
-    const physicalPageNum = firstChapterPageNumber + idx;
     for (const sec of group) {
-      if (!sec.isContinuation && !seenChapterInToc.has(sec.chapterId)) {
-        seenChapterInToc.add(sec.chapterId);
-        tocEntries.push({
+      if (!sec.isContinuation && !seenTocChInit.has(sec.chapterId)) {
+        seenTocChInit.add(sec.chapterId);
+        distinctChaptersForToc.push({
           chapterId: sec.chapterId,
           partNumber: sec.partNumber,
           title: sec.title,
-          startPageNumber: physicalPageNum,
+          groupIdx: idx,
         });
       }
     }
   });
+
+  const tocHeaderReserveMm = 26;
+  const tocAvailHeightMm = Math.max(
+    45,
+    format.heightMm - format.marginTopMm - format.marginBottomMm - tocHeaderReserveMm - 8
+  );
+  const tocEntryHeightMm = 9.2;
+  const tocCapacityPerPage = Math.max(8, Math.floor(tocAvailHeightMm / tocEntryHeightMm));
+
+  const tocPagesCount = shouldIncludeToc
+    ? Math.max(1, Math.ceil(distinctChaptersForToc.length / tocCapacityPerPage))
+    : 0;
+  const creditsPagesCount = shouldIncludeCredits ? 1 : 0;
+  const firstChapterPageNumber = 3 + tocPagesCount;
+
+  // Pass 1: Compute exact starting page number for each chapter accounting for all TOC pages
+  const tocEntries: TableOfContentsEntry[] = distinctChaptersForToc.map((item) => ({
+    chapterId: item.chapterId,
+    partNumber: item.partNumber,
+    title: item.title,
+    startPageNumber: firstChapterPageNumber + item.groupIdx,
+  }));
 
   // Pass 2: Assemble all physical pages with resolved page numbers and totalPages
   const totalPages = 2 + tocPagesCount + contentPageGroups.length + creditsPagesCount + 1;
@@ -1944,16 +2261,19 @@ export function composeBookPages(params: {
     showPageNumber: false,
   });
 
-  // Optional Page 3: Table of Contents (Índice general)
+  // Optional Pages 3..(3 + tocPagesCount - 1): Multi-page Table of Contents (Índice general)
   if (shouldIncludeToc) {
-    pages.push({
-      pageNumber: 3,
-      totalPages,
-      kind: 'table_of_contents',
-      title: 'Índice General',
-      tocEntries,
-      showPageNumber: true,
-    });
+    for (let tp = 0; tp < tocPagesCount; tp++) {
+      const slice = tocEntries.slice(tp * tocCapacityPerPage, (tp + 1) * tocCapacityPerPage);
+      pages.push({
+        pageNumber: 3 + tp,
+        totalPages,
+        kind: 'table_of_contents',
+        title: tp === 0 ? 'Índice General' : 'Índice General (cont.)',
+        tocEntries: slice,
+        showPageNumber: true,
+      });
+    }
   }
 
   // Chapter Content Pages
@@ -2899,8 +3219,12 @@ export function convertFirstPersonToThirdPersonSpanish(
     ['vivimos', 'vivieron'],
     ['salimos', 'salieron'],
     ['volvimos', 'volvieron'],
+    ['viajamos', 'viajaron'],
+    ['caminamos', 'caminaron'],
+    ['cantamos', 'cantaron'],
+    ['celebramos', 'celebraron'],
+    ['visitamos', 'visitaron'],
     // Present & Perfect
-    ['recuerdo', 'recuerda'],
     ['recordamos', 'recuerdan'],
     ['pienso', 'piensa'],
     ['pensamos', 'piensan'],
@@ -2985,6 +3309,24 @@ export function convertFirstPersonToThirdPersonSpanish(
       text = replaceWordPreservingCase(text, pattern, replacement);
     }
   }
+
+  // Context-aware conversion for homograph "recuerdo" (noun "el/su recuerdo" vs 1st-person verb "recuerdo que")
+  const nounDetBeforeRecuerdoRx =
+    /(?:^|\s|[«"'(¿¡,;:\-.])(?:el|un|este|ese|aquel|su|tu|del|al|cada|otro|ning[úu]n|alg[úu]n|cualquier|mismo|propio|primer|segundo|tercer|[úu]ltimo|hermoso|dulce|viejo|querido|mayor|menor|feliz|triste|gran|buen|mal|vivo|claro|lindo|bello|tierno|grato|eterno|inolvidable|fiel|lejano|[íi]ntimo|precioso|valioso|sagrado|nuevo|antiguo)\s+$/i;
+  const nounModAfterRecuerdoRx =
+    /^\s+(?:de|del|en|para|sobre|biogr[aá]fico|familiar|infantil|vivo|claro|imborrable|hermoso|dulce|eterno|n[uú]mero|n\.|#)\b/i;
+  text = text.replace(
+    /(?<![A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9])recuerdo(?![A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9])/gi,
+    (match, offset: number, fullStr: string) => {
+      const before = fullStr.slice(Math.max(0, offset - 40), offset);
+      const after = fullStr.slice(offset + match.length, offset + match.length + 32);
+      if (nounDetBeforeRecuerdoRx.test(before) || nounModAfterRecuerdoRx.test(after)) {
+        return match;
+      }
+      const isUpperFirst = match.charAt(0) === match.charAt(0).toUpperCase();
+      return isUpperFirst ? 'Recuerda' : 'recuerda';
+    }
+  );
 
   // Clean up spaces and avoid duplicate speakerName
   text = text
@@ -3507,7 +3849,8 @@ export function buildFaithfulFallbackManuscript(params: {
       .join(' ');
     const filteredParas = ensureUncertaintyPreservedInParagraphs(
       rawCombinedForUncertainty,
-      paragraphs.filter((p) => p.trim().length > 0)
+      paragraphs.filter((p) => p.trim().length > 0),
+      narrativeStyle
     );
 
     if (filteredParas.length > 0) {
@@ -3602,24 +3945,69 @@ export interface ParticipantBookVersionRecord {
 }
 
 /**
- * Extracts clean text from a participant's answer, falling back to audio transcription if needed.
+ * Resolves the canonical text of an answer prioritizing written text (`answerText`) over voice
+ * transcriptions, never concatenating a redundant audio transcript over an edited written answer.
+ */
+export function resolveCanonicalAnswerSource(ans: {
+  answerText?: string;
+  audio?: { transcription?: string } | null;
+  audioRecordings?: Array<{ transcription?: string }> | null;
+}): {
+  text: string;
+  source: 'written' | 'audio_transcription' | 'none';
+  hasWrittenText: boolean;
+  hasAudioTranscription: boolean;
+} {
+  const cleanWritten = (ans.answerText || '')
+    .trim()
+    .replace(/\[Nota de voz\]:\s*/gi, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+
+  let cleanAudio = '';
+  if (ans.audio?.transcription) {
+    cleanAudio = ans.audio.transcription.trim();
+  } else if (Array.isArray(ans.audioRecordings) && ans.audioRecordings.length > 0) {
+    cleanAudio = ans.audioRecordings
+      .map((r) => (r?.transcription || '').trim())
+      .filter((t) => t.length > 0)
+      .join(' ');
+  }
+  cleanAudio = cleanAudio.replace(/\[Nota de voz\]:\s*/gi, '').replace(/\s{2,}/g, ' ').trim();
+
+  if (cleanWritten.length > 0) {
+    return {
+      text: cleanWritten,
+      source: 'written',
+      hasWrittenText: true,
+      hasAudioTranscription: cleanAudio.length > 0,
+    };
+  }
+  if (cleanAudio.length > 0) {
+    return {
+      text: cleanAudio,
+      source: 'audio_transcription',
+      hasWrittenText: false,
+      hasAudioTranscription: true,
+    };
+  }
+  return {
+    text: '',
+    source: 'none',
+    hasWrittenText: false,
+    hasAudioTranscription: false,
+  };
+}
+
+/**
+ * Extracts clean text from a participant's answer, strictly prioritizing written text over audio transcription.
  */
 export function extractCleanParticipantAnswerText(ans: {
   answerText?: string;
   audio?: { transcription?: string } | null;
   audioRecordings?: Array<{ transcription?: string }> | null;
 }): string {
-  let raw = (ans.answerText || '').trim();
-  if (!raw && ans.audio?.transcription) {
-    raw = ans.audio.transcription.trim();
-  }
-  if (!raw && Array.isArray(ans.audioRecordings) && ans.audioRecordings.length > 0) {
-    raw = ans.audioRecordings
-      .map((r) => (r?.transcription || '').trim())
-      .filter((t) => t.length > 0)
-      .join(' ');
-  }
-  return raw.replace(/\[Nota de voz\]:\s*/gi, '').replace(/\s{2,}/g, ' ').trim();
+  return resolveCanonicalAnswerSource(ans).text;
 }
 
 function ensureEndingPunctuation(text: string): string {
@@ -3734,16 +4122,17 @@ export interface StructuredChapterTestimonyUnit {
 }
 
 const UNCERTAINTY_PATTERNS: RegExp[] = [
-  /\bno recuerdo bien\b/i,
-  /\bno me acuerdo bien\b/i,
-  /\bcreo que\b/i,
+  /\bno recuerd[oa]n? bien\b/i,
+  /\bno (?:me|se) acuerd[oa]n? bien\b/i,
+  /\bcre[eo]n? que\b/i,
   /\btal vez\b/i,
   /\bquiz[aá]s?\b/i,
   /\baproximadamente\b/i,
-  /\bme parece que\b/i,
+  /\b(?:me|le|les) parece que\b/i,
   /\bposiblemente\b/i,
   /\balrededor de\b/i,
-  /\bseg[uú]n recuerdo\b/i,
+  /\bseg[uú]n recuerd[oa]n?\b/i,
+  /\bseg[uú]n rememora\b/i,
 ];
 
 export function extractUncertaintyExpressions(text: string): string[] {
@@ -3764,7 +4153,8 @@ export function extractUncertaintyExpressions(text: string): string[] {
 
 export function ensureUncertaintyPreservedInParagraphs(
   sourceText: string,
-  paragraphs: string[]
+  paragraphs: string[],
+  narrativeStyle?: DemoNarrativeStyleId
 ): string[] {
   const uncertainties = extractUncertaintyExpressions(sourceText);
   if (uncertainties.length === 0 || paragraphs.length === 0) return paragraphs;
@@ -3774,15 +4164,31 @@ export function ensureUncertaintyPreservedInParagraphs(
     UNCERTAINTY_PATTERNS.some((rx) => rx.test(combinedOut));
   if (hasAnyUncertaintyInOutput) return paragraphs;
 
+  const isThirdPerson = narrativeStyle === 'third_person_biography';
   const firstUncertainty = uncertainties[0];
   const updated = [...paragraphs];
   const firstPara = updated[0].trim();
   if (firstPara.length > 0) {
     const lowerFirst = firstPara.charAt(0).toLowerCase() + firstPara.slice(1);
-    const prefix =
-      firstUncertainty === 'aproximadamente' || firstUncertainty === 'alrededor de'
-        ? 'Según recuerdo aproximadamente, '
-        : `${firstUncertainty.charAt(0).toUpperCase() + firstUncertainty.slice(1)}, `;
+    let prefix: string;
+    if (firstUncertainty === 'aproximadamente' || firstUncertainty === 'alrededor de') {
+      prefix = isThirdPerson
+        ? 'Según recuerda aproximadamente, '
+        : 'Según recuerdo aproximadamente, ';
+    } else if (isThirdPerson) {
+      const thirdPersonMap: Record<string, string> = {
+        'no recuerdo bien': 'No recuerda bien, ',
+        'no me acuerdo bien': 'No se acuerda bien, ',
+        'creo que': 'Cree que ',
+        'me parece que': 'Le parece que ',
+        'según recuerdo': 'Según recuerda, ',
+      };
+      prefix =
+        thirdPersonMap[firstUncertainty] ||
+        `${firstUncertainty.charAt(0).toUpperCase() + firstUncertainty.slice(1)}, `;
+    } else {
+      prefix = `${firstUncertainty.charAt(0).toUpperCase() + firstUncertainty.slice(1)}, `;
+    }
     updated[0] = `${prefix}${lowerFirst}`;
   }
   return updated;
@@ -3960,7 +4366,7 @@ export interface DocumentarySourceQuestionInput {
 }
 
 const EXPLICIT_EXCLUSION_DIRECTIVE_RX =
-  /\b(no incluir en el libro|no poner en el libro|excluir del libro|no publicar en el libro|omitir del libro|confidencial[:\s]*no incluir|no quiero que esto salga en el libro|prefiero que esto no aparezca en el libro)\b/i;
+  /\b(no incluir(?:\s+(?:esto|esta\s+(?:parte|historia|respuesta|anécdota)|ese\s+episodio|eso))?\s+en\s+(?:el|mi)\s+libro|no\s+incluyas\s+(?:esto|esta\s+parte|este\s+episodio|eso)(?:\s+en\s+(?:el|mi)\s+libro)?|no\s+poner(?:\s+(?:esto|esta\s+parte))?\s+en\s+(?:el|mi)\s+libro|no\s+pongas\s+(?:esto|esta\s+parte|eso)(?:\s+en\s+(?:el|mi)\s+libro)?|excluir\s+del\s+libro|no\s+publicar(?:\s+(?:esto|eso|esta\s+parte))?(?:\s+en\s+(?:el|mi)\s+libro)?|no\s+quiero\s+publicarlo|omitir(?:\s+(?:esto|esta\s+parte|solamente\s+[^.!?]+))?\s+(?:del\s+libro|en\s+el\s+libro)|quiero\s+que\s+se\s+omita\s+(?:solamente\s+)?[^.!?]+|confidencial[:\s]*(?:no\s+incluir|mantener\s+en\s+privado)|no\s+quiero\s+que\s+(?:esto|eso|esta\s+parte)\s+(?:salga|se\s+publique|aparezca)\s+en\s+(?:el|mi)\s+libro|prefiero\s+que\s+(?:esto|esta\s+parte|este\s+episodio)\s+no\s+aparezca(?:\s+en\s+(?:el|mi)\s+libro)?|no\s+menciones\s+(?:mi|el|la|los|las|esa|este|esto)\s+[^.!?]+|esto\s+te\s+lo\s+cuento[,\s]+pero\s+no\s+quiero\s+(?:que\s+salga|publicarlo)|(?:esa|esta)\s+parte\s+es\s+privada)\b/i;
 
 const BARE_NOT_RECALLED_RX =
   /^(no lo recuerdo|no recuerdo esta pregunta|no recuerdo nada de esto|sin recuerdo registrado)[.!]?$/i;
@@ -4194,6 +4600,9 @@ export function resolveAnswerExclusionReason(
   return 'none';
 }
 
+const EXCLUSION_PIVOT_CLAUSE_RX =
+  /(?:,\s*(?:pero|aunque)\s+|;\s*|\s*:\s*)(?=(?:no\s+incluyas|no\s+incluir|no\s+pongas|no\s+poner|no\s+quiero\s+(?:publicarlo|que\s+(?:salga|se\s+publique|aparezca))|prefiero\s+que\s+(?:esto|no)|no\s+menciones|quiero\s+que\s+se\s+omita|omitir|excluir|esa\s+parte\s+es\s+privada|confidencial)\b)/i;
+
 export function splitAnswerTextIntoIncludedAndExcludedSentences(rawText: string): {
   includedSentences: string[];
   excludedSentences: string[];
@@ -4211,6 +4620,19 @@ export function splitAnswerTextIntoIncludedAndExcludedSentences(rawText: string)
   const excludedSentences: string[] = [];
   for (const s of sentences) {
     if (EXPLICIT_EXCLUSION_DIRECTIVE_RX.test(s)) {
+      // Check if only a trailing/pivoted clause within a mixed sentence has the exclusion
+      // e.g. "Trabajé en Guadalajara en 1998, pero no menciones mi primer matrimonio."
+      const pivotParts = s.split(EXCLUSION_PIVOT_CLAUSE_RX);
+      if (pivotParts.length >= 2) {
+        const leading = (pivotParts[0] || '').trim();
+        const trailing = pivotParts.slice(1).join(' ').trim();
+        if (leading.length >= 12 && !EXPLICIT_EXCLUSION_DIRECTIVE_RX.test(leading)) {
+          includedSentences.push(/[.!?…]$/.test(leading) ? leading : `${leading}.`);
+          if (trailing) excludedSentences.push(trailing);
+          continue;
+        }
+      }
+      // Check if exclusion directive introduces a topic with a colon ("Esto te lo cuento, pero no quiero publicarlo: ...")
       excludedSentences.push(s);
     } else if (BARE_PREFER_NOT_TO_ANSWER_RX.test(s) || BARE_NOT_RECALLED_RX.test(s)) {
       // Do not include bare omission markers in narrative prose
@@ -4581,9 +5003,32 @@ export function buildDocumentaryInventory(params: {
     });
 
     // Group included sentences into atomic factual units:
-    // If an answer has multiple substantive sentences (each >= 4 significant words), each substantive
-    // sentence becomes a verifiable DocumentaryFactUnit (while short remarks attach to their neighbor).
+    // Substantive independent episodes (each >= 4 significant words AND not a purely dependent continuation)
+    // become distinct DocumentaryFactUnits, while dependent anaphoric / uncertainty / discourse-correction
+    // continuations bind to their parent proposition so pronouns and negations never lose context.
     const rawSentences = splitResult.includedSentences;
+    const isDependentContinuationSentence = (sent: string, sigWords: string[]): boolean => {
+      const trimmed = sent.trim();
+      if (!trimmed) return true;
+      if (/^[a-záéíóúüñ]/.test(trimmed)) return true;
+      const startsWithContinuationRx =
+        /^(?:y\s+|o\s+|pero\s+|aunque\s+|sin\s+embargo\b|no\s+obstante\b|por\s+eso\b|as[ií]\s+que\b|de\s+hecho\b|adem[aá]s\b|tambi[eé]n\b|tampoco\b|incluso\b|sobre\s+todo\b|no,\s+(?:pues|bueno|en\s+realidad|la\s+verdad|creo)\b|s[ií],\s+(?:pues|claro|creo)\b|(?:él|ella|ellos|ellas|eso|esto|aquello|ambos)\s+(?:también|siempre|nunca|era|fue|estaba|hacía)\b)/i;
+      const hasExplicitNamedEntityOrDate =
+        /\b(18\d{2}|19\d{2}|20\d{2})\b/.test(trimmed) ||
+        /\s[A-ZÁÉÍÓÚÑ][a-záéíóúñ]{2,}/.test(trimmed);
+      if (startsWithContinuationRx.test(trimmed) && sigWords.length < 7 && !hasExplicitNamedEntityOrDate) {
+        return true;
+      }
+      if (
+        sigWords.length < 6 &&
+        UNCERTAINTY_PATTERNS.some((rx) => rx.test(trimmed.toLowerCase())) &&
+        !hasExplicitNamedEntityOrDate
+      ) {
+        return true;
+      }
+      return false;
+    };
+
     const groupedFactSentences: string[] = [];
     for (const s of rawSentences) {
       const sigWords = tokenizeSignificantWords(s);
@@ -4593,7 +5038,8 @@ export function buildDocumentaryInventory(params: {
         const prevSigWords = tokenizeSignificantWords(
           groupedFactSentences[groupedFactSentences.length - 1]
         );
-        if (sigWords.length >= 4 && prevSigWords.length >= 4) {
+        const dependent = isDependentContinuationSentence(s, sigWords);
+        if (sigWords.length >= 4 && prevSigWords.length >= 4 && !dependent) {
           groupedFactSentences.push(s);
         } else {
           groupedFactSentences[groupedFactSentences.length - 1] =
@@ -4854,17 +5300,95 @@ const STAGE_EDITORIAL_ARC_DEFS: Array<{
       'El mensaje perdurable para las nuevas generaciones',
       'Sentido biográfico y reflexiones de vida',
       'Una herencia de memoria y afecto familiar',
+      'La luz de su ejemplo en el tiempo',
+      'Testimonio de vida y gratitud compartida',
     ],
   },
 ];
 
+// Additional rich non-numbered title variants when deep interviews yield >4 thematic subdivisions in a stage
+const EXTRA_THEMATIC_CHAPTER_TITLES_BY_STAGE: Record<
+  string,
+  { individual: string[]; couple: string[]; thirdPerson: string[] }
+> = {
+  infancia: {
+    individual: [
+      'Voces del patio, tradiciones y días felices',
+      'Las pequeñas rutinas que marcaron mi niñez',
+    ],
+    couple: [
+      'Tradiciones familiares de nuestros primeros años',
+      'El eco de las casas donde crecimos',
+    ],
+    thirdPerson: [
+      'Tradiciones del hogar y días de infancia',
+      'Las costumbres que acompañaron su niñez',
+    ],
+  },
+  juventud: {
+    individual: [
+      'Primeros viajes, retos y horizontes abiertos',
+      'El despertar de nuevas metas y afectos',
+    ],
+    couple: [
+      'Los sueños que impulsaron nuestra juventud',
+      'Horizontes compartidos en nuestros años jóvenes',
+    ],
+    thirdPerson: [
+      'Primeros desafíos y apertura hacia el mundo',
+      'Metas juveniles y consolidación de su vocación',
+    ],
+  },
+  adultez: {
+    individual: [
+      'Proyectos construidos y días de dedicación',
+      'Lazos que crecieron con el paso del tiempo',
+    ],
+    couple: [
+      'Complicidad cotidiana y proyectos realizados',
+      'Los pilares que fortalecieron nuestro hogar',
+    ],
+    thirdPerson: [
+      'Proyectos realizados y vínculos entrañables',
+      'Años de entrega y consolidación familiar',
+    ],
+  },
+  madurez: {
+    individual: [
+      'Serenidad ganada y miradas hacia el camino',
+      'Lecciones que permanecen en el corazón',
+    ],
+    couple: [
+      'La serenidad de mirar atrás en compañía',
+      'Enseñanzas compartidas a lo largo de los años',
+    ],
+    thirdPerson: [
+      'Serenidad alcanzada y perspectivas de vida',
+      'Aprendizajes profundos en la etapa de madurez',
+    ],
+  },
+  legado_general: {
+    individual: [
+      'Gratitud eterna y huella para mi familia',
+      'Pensamientos abiertos hacia el mañana',
+    ],
+    couple: [
+      'Huella viva de nuestro amor en la familia',
+      'Palabras de aliento para el porvenir',
+    ],
+    thirdPerson: [
+      'Gratitud perdurable y testimonio familiar',
+      'Un legado de afecto proyectado al futuro',
+    ],
+  },
+};
+
 /**
  * Builds a deterministic editorial chapter plan (`EditorialBookPlan`) prior to drafting.
  * - Guarantees that a single question/answer NEVER becomes its own isolated chapter when multiple answers exist.
- * - In `fixed_five_stages` mode: creates up to 5 chapters (one per non-empty canonical life stage).
- * - In `prompt_autonomous` mode: groups answers by life stage and subdivides stages that contain
- *   more than 12 main answer groups into coherent narrative chapters of ~6-12 main answers each
- *   (e.g., 46 answers -> 4 to 6 chapters; 230 answers -> 15 to 20 chapters).
+ * - Groups answers chronologically and thematically within each stage without artificial formulas or `(2)/(3)` numeric suffixes.
+ * - Detects single-stage or partial interviews (`isPartialMemoir: true`) and frames them honestly as
+ *   `"Un libro parcial de memorias"` without inventing unshared life stages.
  */
 export function buildEditorialChapterPlan(params: {
   interviewTitle?: string;
@@ -4947,7 +5471,64 @@ export function buildEditorialChapterPlan(params: {
     (a) => !isFollowUpEntry(a) && !a.isAdditionalMemory
   ).length;
 
+  const documentedStageSet = new Set<string>();
+  for (const a of eligibleAnswers) {
+    documentedStageSet.add(resolveAnswerStage(a));
+  }
+  const documentedStages = STAGE_EDITORIAL_ARC_DEFS.map((s) => s.stageKey).filter((k) =>
+    documentedStageSet.has(k)
+  );
+  const missingStages = STAGE_EDITORIAL_ARC_DEFS.map((s) => s.stageKey).filter(
+    (k) => !documentedStageSet.has(k)
+  );
+  const isPartialMemoir =
+    eligibleAnswers.length > 0 &&
+    (documentedStages.length === 1 ||
+      (documentedStages.length === 2 && missingStages.length >= 3));
+
+  const stageFriendlyLabel: Record<string, string> = {
+    infancia: 'la infancia',
+    juventud: 'la juventud',
+    adultez: 'la vida adulta',
+    madurez: 'la madurez',
+    legado_general: 'los recuerdos y el legado',
+  };
+  const partialMemoirSubtitle = isPartialMemoir ? 'Un libro parcial de memorias' : undefined;
+  const partialMemoirIntroNote = isPartialMemoir
+    ? `Este volumen reúne únicamente las etapas documentadas en la entrevista (${documentedStages
+        .map((s) => stageFriendlyLabel[s] || s)
+        .join(' y ')}), preservando con fidelidad lo compartido sin inventar capítulos de etapas no abordadas.`
+    : undefined;
+
   const plannedChapters: EditorialChapterPlanItem[] = [];
+  const usedTitlesIndividual = new Set<string>();
+  const usedTitlesCouple = new Set<string>();
+  const usedTitlesThird = new Set<string>();
+
+  const pickUniqueTitle = (
+    pool: string[],
+    usedSet: Set<string>,
+    idx: number,
+    fallbackDescriptors: string[]
+  ): string => {
+    for (let offset = 0; offset < pool.length; offset++) {
+      const candidate = pool[(idx + offset) % pool.length];
+      if (!usedSet.has(candidate.toLowerCase())) {
+        usedSet.add(candidate.toLowerCase());
+        return candidate;
+      }
+    }
+    const base = pool[idx % pool.length];
+    for (const desc of fallbackDescriptors) {
+      const candidate = `${base}: ${desc}`;
+      if (!usedSet.has(candidate.toLowerCase())) {
+        usedSet.add(candidate.toLowerCase());
+        return candidate;
+      }
+    }
+    usedSet.add(base.toLowerCase());
+    return base;
+  };
 
   for (const stDef of STAGE_EDITORIAL_ARC_DEFS) {
     const stageEligible = eligibleAnswers.filter(
@@ -4971,11 +5552,7 @@ export function buildEditorialChapterPlan(params: {
       (a) => Boolean(a.isAdditionalMemory) && !isFollowUpEntry(a)
     );
 
-    // Determine how many narrative chapters this stage should produce:
-    // - In 'fixed_five_stages': always 1 chapter per non-empty stage.
-    // - In 'prompt_autonomous':
-    //   * If stage has <= 12 main answers: 1 chapter for this stage (unless the entire interview has >= 18 main answers concentrated in this single stage, in which case split into chunks of ~6-8 main answers).
-    //   * If stage has > 12 main answers: subdivide into balanced chapters of ~7-13 main answers so 46 answers produce ~4-6 chapters and 230 answers produce ~16-20 chapters.
+    // Subdivide rich multi-theme stages chronologically & by topic density when prompt_autonomous is active
     let subChapterCount = 1;
     if (bookStructureMode === 'prompt_autonomous' && mainStageAnswers.length > 12) {
       const targetMainPerChapter = totalEligibleMainCount >= 100 ? 13 : 6;
@@ -4984,6 +5561,22 @@ export function buildEditorialChapterPlan(params: {
         Math.min(6, Math.ceil(mainStageAnswers.length / targetMainPerChapter))
       );
     }
+
+    const extraPool = EXTRA_THEMATIC_CHAPTER_TITLES_BY_STAGE[stDef.stageKey] || {
+      individual: [],
+      couple: [],
+      thirdPerson: [],
+    };
+    const allIndTitles = [...stDef.individualTitles, ...extraPool.individual];
+    const allCoupTitles = [...stDef.coupleTitles, ...extraPool.couple];
+    const allThirdTitles = [...stDef.thirdPersonTitles, ...extraPool.thirdPerson];
+    const descriptors = [
+      'primeros capítulos de vida',
+      'lazos familiares y cotidianos',
+      'senderos y aprendizajes',
+      'memorias más entrañables',
+      'páginas que permanecen',
+    ];
 
     if (subChapterCount === 1) {
       const assignedAnswerIds = stageEligible.map((a) => a.id);
@@ -4999,15 +5592,18 @@ export function buildEditorialChapterPlan(params: {
         (acc, a) => acc + extractCleanParticipantAnswerText(a).split(/\s+/).filter(Boolean).length,
         0
       );
+      const tInd = pickUniqueTitle(allIndTitles, usedTitlesIndividual, 0, descriptors);
+      const tCoup = pickUniqueTitle(allCoupTitles, usedTitlesCouple, 0, descriptors);
+      const tThird = pickUniqueTitle(allThirdTitles, usedTitlesThird, 0, descriptors);
       plannedChapters.push({
         chapterId: stDef.baseChapterId,
         partNumber: plannedChapters.length + 1,
         stageKey: stDef.stageKey,
         dimensionKey: stDef.dimensionKey,
-        thematicAxis: stDef.individualTitles[0],
-        suggestedTitleIndividual: stDef.individualTitles[0],
-        suggestedTitleCouple: stDef.coupleTitles[0],
-        suggestedTitleThirdPerson: stDef.thirdPersonTitles[0],
+        thematicAxis: tInd,
+        suggestedTitleIndividual: tInd,
+        suggestedTitleCouple: tCoup,
+        suggestedTitleThirdPerson: tThird,
         assignedAnswerIds,
         assignedQuestionIds,
         assignedFactUnitIds: assignedAnswerIds.map((id) => `trace_${id}`),
@@ -5030,7 +5626,6 @@ export function buildEditorialChapterPlan(params: {
           }
           return false;
         });
-        // Attach remaining orphan follow-ups and additional memories to the last sub-chapter of this stage
         const extraFollowUps =
           cIdx === subChapterCount - 1
             ? followUpStageAnswers.filter((f) => !consumedFollowUpIds.has(f.id))
@@ -5052,8 +5647,9 @@ export function buildEditorialChapterPlan(params: {
           (acc, a) => acc + extractCleanParticipantAnswerText(a).split(/\s+/).filter(Boolean).length,
           0
         );
-        const titleIdx = cIdx % stDef.individualTitles.length;
-        const RomanSuffix = cIdx >= stDef.individualTitles.length ? ` (${cIdx + 1})` : '';
+        const tInd = pickUniqueTitle(allIndTitles, usedTitlesIndividual, cIdx, descriptors);
+        const tCoup = pickUniqueTitle(allCoupTitles, usedTitlesCouple, cIdx, descriptors);
+        const tThird = pickUniqueTitle(allThirdTitles, usedTitlesThird, cIdx, descriptors);
         const chapterId =
           cIdx === 0 ? stDef.baseChapterId : `${stDef.baseChapterId}_${cIdx + 1}`;
         plannedChapters.push({
@@ -5061,10 +5657,10 @@ export function buildEditorialChapterPlan(params: {
           partNumber: plannedChapters.length + 1,
           stageKey: stDef.stageKey,
           dimensionKey: stDef.dimensionKey,
-          thematicAxis: `${stDef.individualTitles[titleIdx]}${RomanSuffix}`,
-          suggestedTitleIndividual: `${stDef.individualTitles[titleIdx]}${RomanSuffix}`,
-          suggestedTitleCouple: `${stDef.coupleTitles[titleIdx]}${RomanSuffix}`,
-          suggestedTitleThirdPerson: `${stDef.thirdPersonTitles[titleIdx]}${RomanSuffix}`,
+          thematicAxis: tInd,
+          suggestedTitleIndividual: tInd,
+          suggestedTitleCouple: tCoup,
+          suggestedTitleThirdPerson: tThird,
           assignedAnswerIds,
           assignedQuestionIds,
           assignedFactUnitIds: assignedAnswerIds.map((id) => `trace_${id}`),
@@ -5080,6 +5676,11 @@ export function buildEditorialChapterPlan(params: {
     chapters: plannedChapters,
     totalPlannedChapters: plannedChapters.length,
     isOneQuestionPerChapterBlocked: true,
+    isPartialMemoir,
+    documentedStages,
+    missingStages,
+    partialMemoirSubtitle,
+    partialMemoirIntroNote,
   };
 }
 
@@ -5358,7 +5959,7 @@ export function buildParticipantInitialManuscriptFromAnswers(params: {
     const combinedRawSource = [mainText, ...validFollowUps.map((vf) => vf.text)]
       .filter(Boolean)
       .join(' ');
-    out = ensureUncertaintyPreservedInParagraphs(combinedRawSource, out);
+    out = ensureUncertaintyPreservedInParagraphs(combinedRawSource, out, narrativeStyle);
 
     const sourceAnswerIds = Array.from(
       new Set([
@@ -5772,8 +6373,12 @@ export function buildParticipantInitialManuscriptFromAnswers(params: {
     });
   }
 
+  const partialSubtitleNote = editorialPlan.isPartialMemoir
+    ? editorialPlan.partialMemoirSubtitle || 'Un libro parcial de memorias'
+    : undefined;
+
   const styledIntroduction =
-    narrativeStyle === 'third_person_biography'
+    (narrativeStyle === 'third_person_biography'
       ? `Esta edición biográfica presenta la historia de vida, las vivencias y el legado de ${authors}, narrados en tercera persona a partir de sus testimonios auténticos.`
       : narrativeStyle === 'first_person_simple'
       ? isCouple
@@ -5781,7 +6386,10 @@ export function buildParticipantInitialManuscriptFromAnswers(params: {
         : `En las páginas de esta obra presento de manera ordenada, clara y directa las vivencias, recuerdos y aprendizajes que conforman mi historia de vida.`
       : isCouple
       ? `Esta edición reúne las vivencias, recuerdos y fotografías compartidas por ${authors}, conservando la calidez literaria y la emoción de nuestra voz para las generaciones presentes y futuras.`
-      : `Esta edición reúne las vivencias, recuerdos y fotografías de ${authors}, transformados en unas memorias personales cálidas y emotivas para las generaciones presentes y futuras.`;
+      : `Esta edición reúne las vivencias, recuerdos y fotografías de ${authors}, transformados en unas memorias personales cálidas y emotivas para las generaciones presentes y futuras.`) +
+    (editorialPlan.isPartialMemoir && editorialPlan.partialMemoirIntroNote
+      ? ` ${editorialPlan.partialMemoirIntroNote}`
+      : '');
 
   const sanitizedClosingInput = splitAnswerTextIntoIncludedAndExcludedSentences(
     closingDedicationText.trim()
@@ -5790,15 +6398,18 @@ export function buildParticipantInitialManuscriptFromAnswers(params: {
   const initialManuscript: DemoManuscript = {
     title: interviewTitle || (isCouple ? `Nuestra historia: ${authors}` : `La historia de ${authors}`),
     subtitle:
-      narrativeStyle === 'third_person_biography'
+      partialSubtitleNote ||
+      (narrativeStyle === 'third_person_biography'
         ? `Biografía narrativa y legado de ${authors}`
         : isCouple
         ? 'Libro biográfico de memorias compartidas'
-        : 'Libro autobiográfico y legado familiar',
+        : 'Libro autobiográfico y legado familiar'),
     authors,
     mode,
     narrativeStyle,
     bookStructureMode,
+    isPartialMemoir: Boolean(editorialPlan.isPartialMemoir),
+    documentedStages: editorialPlan.documentedStages,
     introduction: styledIntroduction,
     dedication: '',
     chapters,
@@ -6007,15 +6618,417 @@ function doesTokenMatchCorpusWords(targetToken: string, corpusWords: string[]): 
   return false;
 }
 
+// Semantic Antonym Pairs & Contradiction Detectors (Spanish)
+const SPANISH_ACTION_ANTONYM_PAIRS: Array<[string[], string[]]> = [
+  [['salvo', 'rescat', 'auxili', 'proteg'], ['empuj', 'abandon', 'hund', 'dano', 'lastim']],
+  [['acept', 'aprobo', 'admit', 'recib'], ['rechaz', 'nego', 'reprobo', 'expuls']],
+  [['llego', 'entro', 'regres', 'volvi'], ['huyo', 'abandono', 'escap']],
+  [['record', 'acord'], ['olvido']],
+  [['abrio', 'inaugur'], ['cerro', 'clausur']],
+  [['gano', 'triunf', 'vencio'], ['perdio', 'fracas']],
+  [['amo', 'quiso', 'adoro'], ['odio', 'detesto', 'desprecio']],
+  [['construy', 'fundo', 'levanto'], ['destruy', 'derrumbo', 'demolio']],
+  [['ayudo', 'apoyo', 'acompan', 'cuido'], ['abandono', 'desampar', 'perjudic']],
+  [['perdono', 'absolv'], ['culpo', 'conden', 'reprocho']],
+  [['casaron', 'caso', 'matrimonio'], ['divorci', 'separaron']],
+  [['agradec', 'reconoci'], ['reclamo', 'ignoro']],
+];
+
+const SPANISH_MODALITY_ATTEMPT_RX =
+  /\b(intento|intente|intentaron|trato\s+de|trate\s+de|trataron\s+de|estuvo\s+a\s+punto\s+de|estuve\s+a\s+punto\s+de|no\s+logro|no\s+logre|no\s+pudo)\b/i;
+
+const SPANISH_COERCION_MODALITY_RX =
+  /\b(me\s+obligo|le\s+obligo|nos\s+obligaron|me\s+forzo|tuve\s+que\s+hacerlo\s+a\s+la\s+fuerza|sin\s+quererlo|contra\s+mi\s+voluntad)\b/i;
+
+const SPANISH_VOLUNTARY_JOY_MODALITY_RX =
+  /\b(decidi\s+con\s+alegria|elegi\s+libremente|escogio\s+felizmente|con\s+total\s+libertad\s+y\s+alegria|gustosamente)\b/i;
+
+// Scoped modality attempt detector (evaluated on ASCII-normalized text so word boundaries match reliably):
+// ignores adverbial quantifiers ("casi siempre", "casi no", "casi todos") and capability negations ("no pude")
+// and focuses strictly on unconsummated/failed attempts.
+const SPANISH_PRECISE_ATTEMPT_RX =
+  /\b(intento|intente|intentaron|trato\s+de|trate\s+de|trataron\s+de|estuvo\s+a\s+punto\s+de|estuve\s+a\s+punto\s+de|no\s+logro|no\s+logre|no\s+lograron|sin\s+exito|fracaso|casi\s+(?!siempre\b|todos?\b|todas?\b|todo\b|nunca\b|nada\b|no\b|ni\b|diario\b|igual\b|list[oa]\b)[a-z]{4,})\b/i;
+
+const NON_PREDICATE_POLARITY_STOPWORDS = new Set([
+  'hacia',
+  'entre',
+  'sobre',
+  'desde',
+  'hasta',
+  'despues',
+  'antes',
+  'durante',
+  'forma',
+  'manera',
+  'momento',
+  'momentos',
+  'tiempo',
+  'parte',
+  'cosas',
+  'hecho',
+  'verdad',
+  'realidad',
+  'general',
+  'algunos',
+  'algunas',
+  'muchos',
+  'muchas',
+  'otros',
+  'otras',
+  'mismo',
+  'misma',
+  'siempre',
+  'nunca',
+  'aunque',
+  'porque',
+  'cuando',
+  'donde',
+  'quien',
+]);
+
+const NEGATION_CUES_RX = /\b(no|nunca|jamas|tampoco|sin|ningun|ninguna|ninguno|nadie)\b/;
+
+// Leading Spanish conversational discourse starters ("No, pues...", "No, la verdad...") and tag questions (", ¿no?")
+const LEADING_DISCOURSE_NO_RX =
+  /^\s*no\s*,\s*(?:pues|bueno|mira|fijate|en\s+realidad|la\s+verdad|claro|creo|veras|si|oiga)\b/i;
+const TRAILING_TAG_NO_RX = /,?\s*no\??\s*$/i;
+
+function normalizeAsciiPreserveClausePunctuation(text: string): string {
+  return (text || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s.,;:!?]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function splitSpanishClausesForAudit(text: string): string[] {
+  const normPunct = normalizeAsciiPreserveClausePunctuation(text);
+  if (!normPunct) return [];
+  return normPunct
+    .split(/\s*(?:[.!?;:]+|,\s*(?=(?:pero|aunque|sino|mas|sin\s+embargo|mientras|porque)\b))\s*/i)
+    .map((c) => c.trim())
+    .filter(Boolean);
+}
+
+function stripSpanishDiscourseNoiseForPolarity(clauseText: string): string {
+  return normalizePlainAscii(
+    clauseText
+      .replace(LEADING_DISCOURSE_NO_RX, '')
+      .replace(TRAILING_TAG_NO_RX, '')
+      .trim()
+  );
+}
+
+function selectAlignedTargetClauses(params: {
+  sourceText: string;
+  targetSentencesRaw: string[];
+}): {
+  alignedText: string;
+  alignedClausesNorm: string[];
+  hadAmbiguousEdge: boolean;
+} {
+  const { sourceText, targetSentencesRaw } = params;
+  const srcTokens = Array.from(new Set(tokenizeSignificantWords(sourceText)));
+  const srcNorm = normalizePlainAscii(sourceText);
+
+  if (targetSentencesRaw.length === 0) {
+    return { alignedText: '', alignedClausesNorm: [], hadAmbiguousEdge: false };
+  }
+  if (targetSentencesRaw.length === 1 || srcTokens.length === 0) {
+    const joined = targetSentencesRaw.join(' ');
+    return {
+      alignedText: joined,
+      alignedClausesNorm: splitSpanishClausesForAudit(joined),
+      hadAmbiguousEdge: false,
+    };
+  }
+
+  const scored = targetSentencesRaw.map((sent, idx) => {
+    const normS = normalizePlainAscii(sent);
+    const sWords = normS.split(/\s+/).filter(Boolean);
+    let hits = 0;
+    for (const tok of srcTokens) {
+      if (doesTokenMatchCorpusWords(tok, sWords)) {
+        hits += 1;
+      }
+    }
+    const overlapRatio = hits / srcTokens.length;
+    return { sent, normS, idx, hits, overlapRatio };
+  });
+
+  scored.sort((a, b) => b.overlapRatio - a.overlapRatio || b.hits - a.hits);
+
+  // Pick all sentences meaningfully aligned with this unit (at least >= 0.25 or >= 2 hits, and within range of top hit)
+  const topScore = scored[0]?.overlapRatio ?? 0;
+  const aligned = scored.filter(
+    (item, rank) =>
+      rank === 0 ||
+      (item.hits >= 2 && item.overlapRatio >= Math.max(0.24, topScore * 0.55))
+  );
+  // Restore natural reading order
+  aligned.sort((a, b) => a.idx - b.idx);
+
+  const alignedText = aligned.map((a) => a.sent).join(' ').trim();
+  const alignedClausesNorm = aligned.flatMap((a) => splitSpanishClausesForAudit(a.sent));
+  const hadAmbiguousEdge =
+    srcNorm.length > 0 && topScore >= 0.2 && topScore < 0.45 && scored.length > 1;
+
+  return { alignedText, alignedClausesNorm, hadAmbiguousEdge };
+}
+
+function detectSemanticContradictionsBetweenTexts(params: {
+  sourceText: string;
+  targetText: string;
+  targetSentencesRaw?: string[];
+  properNames: string[];
+}): { issues: string[]; ambiguousEdge: boolean } {
+  const { sourceText, targetText, targetSentencesRaw, properNames } = params;
+  const issues: string[] = [];
+  let ambiguousEdge = false;
+
+  const normSource = normalizePlainAscii(sourceText);
+  if (!normSource || !targetText.trim()) return { issues, ambiguousEdge };
+
+  // CRITICAL V4.1 FIX: Align the unit strictly to its matching sentence(s)/clause(s) within the target paragraph
+  // so unrelated sibling sentences inside multi-answer chapters never cause false negation/modality/antonym flags.
+  const sentencesInTarget =
+    targetSentencesRaw && targetSentencesRaw.length > 0
+      ? targetSentencesRaw
+      : targetText
+          .split(/(?<=[.!?…])\s+/)
+          .map((s) => s.trim())
+          .filter(Boolean);
+
+  const alignment = selectAlignedTargetClauses({
+    sourceText,
+    targetSentencesRaw: sentencesInTarget,
+  });
+  ambiguousEdge = alignment.hadAmbiguousEdge;
+
+  const alignedOrFullTargetRaw = alignment.alignedText || targetText;
+  const normTarget = normalizePlainAscii(alignedOrFullTargetRaw);
+  if (!normTarget) return { issues, ambiguousEdge };
+
+  const srcClauses = splitSpanishClausesForAudit(sourceText);
+  const tgtClauses =
+    alignment.alignedClausesNorm.length > 0
+      ? alignment.alignedClausesNorm
+      : splitSpanishClausesForAudit(alignedOrFullTargetRaw);
+  const srcFull = normSource;
+  const tgtFull = normTarget;
+
+  // 1. Clause-scoped Polarity / Negation flips on substantive predicates (noun/verb tokens >= 5 chars, excluding prepositions/filler nouns)
+  const significantActionOrSubjectTokens = tokenizeSignificantWords(sourceText).filter(
+    (t) => t.length >= 5 && !NON_PREDICATE_POLARITY_STOPWORDS.has(t)
+  );
+  const extractClausePredicatePolarity = (
+    rawClause: string,
+    stemPrefix: string
+  ): { polarity: 'affirmed' | 'negated' | 'absent'; usedDiscourseTag: boolean } => {
+    const hadDiscourseStarter = LEADING_DISCOURSE_NO_RX.test(rawClause);
+    const cleaned = stripSpanishDiscourseNoiseForPolarity(rawClause);
+    const words = cleaned.split(/\s+/).filter(Boolean);
+    const hitIdx = words.findIndex((w) => w.startsWith(stemPrefix));
+    if (hitIdx < 0) return { polarity: 'absent', usedDiscourseTag: hadDiscourseStarter };
+    const windowBefore = words.slice(Math.max(0, hitIdx - 4), hitIdx).join(' ');
+    // Exclude benign rhetorical or epistemic idioms across 1st/2nd/3rd person ("no recuerdo/recuerda", "no me/se acuerda", "no cabe duda")
+    if (
+      /\b(?:no\s+faltab[ao]n?|no\s+le\s+falt[ao]|no\s+cabe\s+duda|no\s+solo(?:\s+eso)?|no\s+recuerd[ao]n?|no\s+recordab[ao]n?|no\s+(?:me|te|se|nos)\s+acuerd[ao]n?|no\s+(?:me|te|se|nos)\s+acordab[ao]n?|no\s+s[ae]|no\s+sab[ei]a?n?|no\s+entiend[eo]n?|no\s+entend[ei]a?n?|no\s+import[ae]|no\s+importab[ao]n?)\b/.test(
+        windowBefore
+      )
+    ) {
+      return { polarity: 'affirmed', usedDiscourseTag: true };
+    }
+    if (NEGATION_CUES_RX.test(windowBefore)) {
+      return { polarity: 'negated', usedDiscourseTag: hadDiscourseStarter };
+    }
+    return { polarity: 'affirmed', usedDiscourseTag: hadDiscourseStarter };
+  };
+
+  for (const tok of significantActionOrSubjectTokens.slice(0, 12)) {
+    const stem = tok.slice(0, 5);
+    let srcHasAffirmed = false;
+    let srcHasNegated = false;
+    let srcDiscourse = false;
+    for (const sc of srcClauses) {
+      const res = extractClausePredicatePolarity(sc, stem);
+      if (res.polarity === 'affirmed') srcHasAffirmed = true;
+      if (res.polarity === 'negated') srcHasNegated = true;
+      if (res.usedDiscourseTag) srcDiscourse = true;
+    }
+    let tgtHasAffirmed = false;
+    let tgtHasNegated = false;
+    let tgtDiscourse = false;
+    for (const tc of tgtClauses) {
+      const res = extractClausePredicatePolarity(tc, stem);
+      if (res.polarity === 'affirmed') tgtHasAffirmed = true;
+      if (res.polarity === 'negated') tgtHasNegated = true;
+      if (res.usedDiscourseTag) tgtDiscourse = true;
+    }
+
+    const pureSrcNegated = srcHasNegated && !srcHasAffirmed;
+    const pureSrcAffirmed = srcHasAffirmed && !srcHasNegated;
+    if (
+      (pureSrcNegated && tgtHasAffirmed && !tgtHasNegated) ||
+      (pureSrcAffirmed && tgtHasNegated && !tgtHasAffirmed)
+    ) {
+      if (srcDiscourse || tgtDiscourse) {
+        // Conversational negation vs paraphrase edge -> flag as ambiguous for hybrid AI judge if available
+        ambiguousEdge = true;
+      }
+      issues.push(
+        `Inversión de polaridad/negación detectada alrededor de "${tok}" (${pureSrcNegated ? 'negated' : 'affirmed'} en testimonio vs. ${pureSrcNegated ? 'affirmed' : 'negated'} en manuscrito).`
+      );
+      break;
+    }
+  }
+
+  // 2. Agency / Subject-Object Role Reversal evaluated strictly on the aligned target text
+  const passiveToFirstPersonRx =
+    /\bme\s+(enseno|ensenaba|acompano|acompanaba|cuido|cuidaba|llevo|llevaba|ayudo|ayudaba|salvo|regalo|escribio|protegio|visito)\b/;
+  const activeByFirstPersonRx =
+    /\b(?:yo\s+)?(?:le\s+)?(ensene|ensenaba|acompano|acompani|acompane|cuide|cuidaba|lleve|llevaba|ayude|ayudaba|salve|regale|escribi|protegi|visite)(?:\s+a)?\b/;
+  const srcPassiveM = srcFull.match(passiveToFirstPersonRx);
+  const tgtActiveM = tgtFull.match(activeByFirstPersonRx);
+  if (srcPassiveM && tgtActiveM) {
+    const srcStem = srcPassiveM[1].slice(0, 4);
+    const tgtStem = tgtActiveM[1].slice(0, 4);
+    if (srcStem === tgtStem && !tgtFull.match(passiveToFirstPersonRx)) {
+      issues.push(
+        `Inversión de agencia (quién realizó la acción): el testimonio indica "me ${srcPassiveM[1]}" pero el manuscrito invierte el rol hacia "${tgtActiveM[0]}".`
+      );
+    }
+  }
+  for (const rel of properNames) {
+    const normRel = normalizePlainAscii(rel);
+    if (normRel.length < 3) continue;
+    const relActsOnMe = new RegExp(`\\b${normRel}\\s+me\\s+[a-z]{4,}`);
+    const iActOnRel = new RegExp(`\\b(?:a\\s+mi\\s+|a\\s+)${normRel}\\b`);
+    if (relActsOnMe.test(srcFull) && iActOnRel.test(tgtFull) && !relActsOnMe.test(tgtFull)) {
+      issues.push(
+        `Inversión de sujeto/objeto con "${rel}": el testimonio expresa acción recibida desde ${rel}, no realizada hacia ${rel}.`
+      );
+      break;
+    }
+  }
+
+  // 3. Modality / Attempt / Coercion shifts evaluated on ASCII-normalized aligned sentence/clause
+  const normalizedAlignedTarget = normalizePlainAscii(alignment.alignedText || targetText);
+  const srcAttempt = SPANISH_PRECISE_ATTEMPT_RX.test(srcFull);
+  const tgtAttempt = SPANISH_PRECISE_ATTEMPT_RX.test(normalizedAlignedTarget);
+  if (srcAttempt !== tgtAttempt) {
+    issues.push(
+      srcAttempt
+        ? 'Cambio crítico de modalidad: el testimonio describe un intento o acción inconclusa ("intentó / casi / no logró") presentada como hecho consumado.'
+        : 'Cambio crítico de modalidad: el testimonio afirma un hecho consumado, pero el manuscrito lo altera a un intento o acción inconclusa ("intentó / casi / no logró").'
+    );
+  }
+  const srcCoercion = SPANISH_COERCION_MODALITY_RX.test(srcFull);
+  const tgtCoercion = SPANISH_COERCION_MODALITY_RX.test(tgtFull);
+  if (
+    (srcCoercion && SPANISH_VOLUNTARY_JOY_MODALITY_RX.test(tgtFull)) ||
+    srcCoercion !== tgtCoercion
+  ) {
+    issues.push(
+      'Cambio crítico de modalidad emocional/voluntaria: discrepancia de obligación o coerción ("obligó / forzó") entre testimonio y manuscrito.'
+    );
+  }
+
+  // 4. Antonym verb pairs evaluated strictly between aligned source and aligned target clauses
+  const srcWords = srcFull.split(/\s+/);
+  const tgtWords = tgtFull.split(/\s+/);
+  for (const [groupA, groupB] of SPANISH_ACTION_ANTONYM_PAIRS) {
+    const srcHasA = groupA.some((st) => srcWords.some((w) => w.startsWith(st)));
+    const srcHasB = groupB.some((st) => srcWords.some((w) => w.startsWith(st)));
+    const tgtHasA = groupA.some((st) => tgtWords.some((w) => w.startsWith(st)));
+    const tgtHasB = groupB.some((st) => tgtWords.some((w) => w.startsWith(st)));
+    if ((srcHasA && !srcHasB && tgtHasB && !tgtHasA) || (srcHasB && !srcHasA && tgtHasA && !tgtHasB)) {
+      issues.push(
+        `Contradicción semántica por acción opuesta detectada entre testimonio y manuscrito.`
+      );
+      break;
+    }
+  }
+
+  return { issues, ambiguousEdge };
+}
+
+interface PreIndexedChapterParagraph {
+  raw: string;
+  norm: string;
+  words: string[];
+  wordSet: Set<string>;
+  sentencesRaw: string[];
+  windowNextWords: string[];
+  windowNextWordSet: Set<string>;
+}
+
+interface PreIndexedChapterAudit {
+  ch: DemoChapterManuscript;
+  cIdx: number;
+  answerIdSet: Set<string>;
+  paragraphs: PreIndexedChapterParagraph[];
+}
+
+function buildChapterAuditIndex(chapters: DemoChapterManuscript[]): PreIndexedChapterAudit[] {
+  return chapters.map((ch, cIdx) => {
+    const rawParas = ch.paragraphs || [];
+    const normList = rawParas.map((p) => {
+      const norm = normalizePlainAscii(p);
+      const words = norm.split(/\s+/).filter(Boolean);
+      const sentencesRaw = (p || '')
+        .split(/(?<=[.!?…])\s+/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      return { raw: p, norm, words, wordSet: new Set(words), sentencesRaw };
+    });
+    const paragraphs: PreIndexedChapterParagraph[] = normList.map((cur, pIdx) => {
+      const next = normList[pIdx + 1];
+      const windowNextWords = next ? [...cur.words, ...next.words] : cur.words;
+      return {
+        raw: cur.raw,
+        norm: cur.norm,
+        words: cur.words,
+        wordSet: cur.wordSet,
+        sentencesRaw: cur.sentencesRaw,
+        windowNextWords,
+        windowNextWordSet: new Set(windowNextWords),
+      };
+    });
+    return {
+      ch,
+      cIdx,
+      answerIdSet: new Set(ch.sourceAnswerIds || []),
+      paragraphs,
+    };
+  });
+}
+
+function doesTokenMatchIndexedWords(
+  token: string,
+  words: string[],
+  wordSet: Set<string>
+): boolean {
+  if (!token) return false;
+  if (wordSet.has(token)) return true;
+  return doesTokenMatchCorpusWords(token, words);
+}
+
 /**
- * Performs real semantic and facet verification of an atomic `DocumentaryFactUnit` against
- * the manuscript's normalized chapters and paragraphs.
+ * Performs real bidirectional semantic and facet verification of an atomic `DocumentaryFactUnit` against
+ * the manuscript's normalized chapters and paragraphs, using clause-level alignment and optional pre-indexing.
  */
 export function verifyDocumentaryUnitInManuscript(params: {
   unit: DocumentaryFactUnit;
   chapters: DemoChapterManuscript[];
+  preIndexedChapters?: PreIndexedChapterAudit[];
 }): {
   verified: boolean;
+  verificationStatus: UnitVerificationStatus;
+  semanticIssues: string[];
+  ambiguityReason?: string;
   semanticMatchScore: number;
   chapterIndex: number;
   paragraphIndex: number;
@@ -6026,10 +7039,12 @@ export function verifyDocumentaryUnitInManuscript(params: {
   missingTokens: string[];
   missingFacets: string[];
 } {
-  const { unit, chapters } = params;
+  const { unit, chapters, preIndexedChapters } = params;
   if (chapters.length === 0) {
     return {
       verified: false,
+      verificationStatus: 'missing',
+      semanticIssues: ['Manuscrito vacío'],
       semanticMatchScore: 0,
       chapterIndex: -1,
       paragraphIndex: -1,
@@ -6042,7 +7057,8 @@ export function verifyDocumentaryUnitInManuscript(params: {
     };
   }
 
-  // Evaluate each chapter & paragraph to find the best semantic match
+  const indexedAll = preIndexedChapters || buildChapterAuditIndex(chapters);
+
   let bestChapterIdx = 0;
   let bestParaIdx = 0;
   let bestParaScore = -1;
@@ -6054,55 +7070,63 @@ export function verifyDocumentaryUnitInManuscript(params: {
           .split(/\s+/)
           .filter((w) => w.length >= 3);
 
-  const chapterOrder = chapters
-    .map((ch, cIdx) => ({
-      ch,
-      cIdx,
-      hasExplicitAnswerLink:
-        Array.isArray(ch.sourceAnswerIds) && ch.sourceAnswerIds.includes(unit.answerId),
-    }))
-    .sort((a, b) => (a.hasExplicitAnswerLink === b.hasExplicitAnswerLink ? 0 : a.hasExplicitAnswerLink ? -1 : 1));
+  const chapterOrder = [...indexedAll].sort((a, b) => {
+    const aLinked = a.answerIdSet.has(unit.answerId);
+    const bLinked = b.answerIdSet.has(unit.answerId);
+    return aLinked === bLinked ? 0 : aLinked ? -1 : 1;
+  });
 
-  for (const { ch, cIdx, hasExplicitAnswerLink } of chapterOrder) {
+  for (const item of chapterOrder) {
     let foundStrongMatchInLinkedChapter = false;
-    const paras = ch.paragraphs || [];
+    const hasExplicitAnswerLink = item.answerIdSet.has(unit.answerId);
+    const paras = item.paragraphs;
     for (let pIdx = 0; pIdx < paras.length; pIdx++) {
-      const para = paras[pIdx];
-      const nextPara = paras[pIdx + 1] || '';
-      const paraWords = normalizePlainAscii(para).split(/\s+/).filter(Boolean);
-      const windowWords = normalizePlainAscii(`${para} ${nextPara}`).split(/\s+/).filter(Boolean);
-      let matchedCount = 0;
+      const pEntry = paras[pIdx];
+      let matchedDirect = 0;
+      let matchedWithWindow = 0;
       for (const tok of unitRequiredTokens) {
-        if (doesTokenMatchCorpusWords(tok, paraWords)) {
-          matchedCount++;
-        } else if (doesTokenMatchCorpusWords(tok, windowWords)) {
-          matchedCount += 0.85;
+        if (doesTokenMatchIndexedWords(tok, pEntry.words, pEntry.wordSet)) {
+          matchedDirect++;
+          matchedWithWindow++;
+        } else if (doesTokenMatchIndexedWords(tok, pEntry.windowNextWords, pEntry.windowNextWordSet)) {
+          // Only award partial window credit when the current paragraph itself already matches part of the unit,
+          // so paragraph pIdx-1 never steals placement from paragraph pIdx!
+          matchedWithWindow += 0.45;
         }
       }
-      const ratio =
-        unitRequiredTokens.length > 0 ? matchedCount / unitRequiredTokens.length : 0;
+      const directRatio =
+        unitRequiredTokens.length > 0 ? matchedDirect / unitRequiredTokens.length : 0;
+      const blendedRatio =
+        unitRequiredTokens.length > 0
+          ? matchedDirect > 0
+            ? matchedWithWindow / unitRequiredTokens.length
+            : 0
+          : 0;
       let yearBonus = 0;
+      let allYearsInPara = true;
       if (unit.yearsOrNumbers.length > 0) {
-        const allYearsInPara = unit.yearsOrNumbers.every((yn) =>
-          doesTokenMatchCorpusWords(yn, paraWords)
+        allYearsInPara = unit.yearsOrNumbers.every((yn) =>
+          doesTokenMatchIndexedWords(yn, pEntry.words, pEntry.wordSet)
         );
         const allYearsInWindow = unit.yearsOrNumbers.every((yn) =>
-          doesTokenMatchCorpusWords(yn, windowWords)
+          doesTokenMatchIndexedWords(yn, pEntry.windowNextWords, pEntry.windowNextWordSet)
         );
         if (allYearsInPara) yearBonus = 0.35;
-        else if (allYearsInWindow) yearBonus = 0.2;
+        else if (matchedDirect > 0 && allYearsInWindow) yearBonus = 0.2;
         else yearBonus = -0.35;
       }
-      const score = ratio + yearBonus + (hasExplicitAnswerLink ? 0.08 : 0);
+      // Heavily favor direct match in pEntry.words over cross-paragraph spillovers
+      const score =
+        directRatio * 0.7 + blendedRatio * 0.3 + yearBonus + (hasExplicitAnswerLink ? 0.08 : 0);
       if (score > bestParaScore) {
         bestParaScore = score;
-        bestChapterIdx = cIdx;
+        bestChapterIdx = item.cIdx;
         bestParaIdx = pIdx;
       }
       if (
         hasExplicitAnswerLink &&
-        ratio >= 0.85 &&
-        (unit.yearsOrNumbers.length === 0 || yearBonus >= 0.35)
+        directRatio >= 0.9 &&
+        (unit.yearsOrNumbers.length === 0 || allYearsInPara)
       ) {
         foundStrongMatchInLinkedChapter = true;
         break;
@@ -6114,23 +7138,28 @@ export function verifyDocumentaryUnitInManuscript(params: {
   }
 
   const targetCh = chapters[bestChapterIdx] || chapters[0];
-  const targetPara = targetCh.paragraphs[bestParaIdx] || targetCh.paragraphs[0] || '';
-  const neighborPara = targetCh.paragraphs[bestParaIdx + 1] || '';
-  const paraWords = normalizePlainAscii(targetPara).split(/\s+/).filter(Boolean);
-  // Allow a 2-paragraph window only when a long single memory was split across two consecutive paragraphs
-  const paraWindowWords = normalizePlainAscii(`${targetPara} ${neighborPara}`)
-    .split(/\s+/)
-    .filter(Boolean);
+  const targetIndexedPara = indexedAll[bestChapterIdx]?.paragraphs[bestParaIdx];
+  const nextIndexedPara = indexedAll[bestChapterIdx]?.paragraphs[bestParaIdx + 1];
+  const targetPara = targetIndexedPara?.raw || targetCh.paragraphs[0] || '';
+  const neighborPara = nextIndexedPara?.raw || '';
+  const paraWords = targetIndexedPara?.words || normalizePlainAscii(targetPara).split(/\s+/).filter(Boolean);
+  const paraWordSet = targetIndexedPara?.wordSet || new Set(paraWords);
+  const paraWindowWords =
+    targetIndexedPara?.windowNextWords ||
+    normalizePlainAscii(`${targetPara} ${neighborPara}`.trim()).split(/\s+/).filter(Boolean);
+  const paraWindowWordSet = targetIndexedPara?.windowNextWordSet || new Set(paraWindowWords);
 
   // Measure token coverage against the matched paragraph (and immediate split continuation)
   const matchedTokens: string[] = [];
   const missingTokens: string[] = [];
   for (const tok of unitRequiredTokens) {
     if (
-      doesTokenMatchCorpusWords(tok, paraWords) ||
-      (doesTokenMatchCorpusWords(tok, paraWindowWords) &&
+      doesTokenMatchIndexedWords(tok, paraWords, paraWordSet) ||
+      (doesTokenMatchIndexedWords(tok, paraWindowWords, paraWindowWordSet) &&
         (unit.yearsOrNumbers.length === 0 ||
-          unit.yearsOrNumbers.every((yn) => doesTokenMatchCorpusWords(yn, paraWindowWords))))
+          unit.yearsOrNumbers.every((yn) =>
+            doesTokenMatchIndexedWords(yn, paraWindowWords, paraWindowWordSet)
+          )))
     ) {
       matchedTokens.push(tok);
     } else {
@@ -6145,12 +7174,12 @@ export function verifyDocumentaryUnitInManuscript(params: {
       ? 1
       : 0;
 
-  // Verify critical facets (years/numbers, properNames/people, places, emotions) in the matched paragraph window
+  // Verify critical facets (years/numbers, properNames/people, places, emotions)
   const missingFacets: string[] = [];
 
   if (unit.yearsOrNumbers.length > 0) {
     const missingYears = unit.yearsOrNumbers.filter(
-      (yn) => !doesTokenMatchCorpusWords(yn, paraWords)
+      (yn) => !doesTokenMatchIndexedWords(yn, paraWindowWords, paraWindowWordSet)
     );
     if (missingYears.length > 0) {
       missingFacets.push(`yearsOrNumbers:${missingYears.join(',')}`);
@@ -6159,7 +7188,7 @@ export function verifyDocumentaryUnitInManuscript(params: {
 
   if (unit.properNames.length > 0) {
     const matchedPeople = unit.properNames.filter((pn) =>
-      doesTokenMatchCorpusWords(pn, paraWindowWords)
+      doesTokenMatchIndexedWords(pn, paraWindowWords, paraWindowWordSet)
     );
     const minRequiredPeople =
       unit.properNames.length <= 2
@@ -6167,7 +7196,7 @@ export function verifyDocumentaryUnitInManuscript(params: {
         : Math.ceil(unit.properNames.length * 0.75);
     if (matchedPeople.length < minRequiredPeople) {
       const missingP = unit.properNames.filter(
-        (pn) => !doesTokenMatchCorpusWords(pn, paraWindowWords)
+        (pn) => !doesTokenMatchIndexedWords(pn, paraWindowWords, paraWindowWordSet)
       );
       missingFacets.push(`properNames:${missingP.join(',')}`);
     }
@@ -6175,13 +7204,13 @@ export function verifyDocumentaryUnitInManuscript(params: {
 
   if (unit.places.length > 0) {
     const matchedPlaces = unit.places.filter((pl) =>
-      doesTokenMatchCorpusWords(pl, paraWindowWords)
+      doesTokenMatchIndexedWords(pl, paraWindowWords, paraWindowWordSet)
     );
     const minRequiredPlaces =
       unit.places.length <= 2 ? unit.places.length : Math.ceil(unit.places.length * 0.75);
     if (matchedPlaces.length < minRequiredPlaces) {
       const missingPl = unit.places.filter(
-        (pl) => !doesTokenMatchCorpusWords(pl, paraWindowWords)
+        (pl) => !doesTokenMatchIndexedWords(pl, paraWindowWords, paraWindowWordSet)
       );
       missingFacets.push(`places:${missingPl.join(',')}`);
     }
@@ -6189,18 +7218,31 @@ export function verifyDocumentaryUnitInManuscript(params: {
 
   if (unit.emotions.length > 0) {
     const hasEmotionInPara =
-      unit.emotions.some((em) => doesTokenMatchCorpusWords(em, paraWindowWords)) ||
+      unit.emotions.some((em) => doesTokenMatchIndexedWords(em, paraWindowWords, paraWindowWordSet)) ||
       SPANISH_EMOTION_STEMS.some((stem) => paraWindowWords.some((cw) => cw.startsWith(stem)));
     if (!hasEmotionInPara) {
       missingFacets.push(`emotions:${unit.emotions.join(',')}`);
     }
   }
 
-  // Minimum semantic match score threshold:
-  // - For rich multi-detail units (>= 7 significant tokens), require >= 0.65 token overlap AND 0 missing facets
-  // - For shorter units (1-6 significant tokens), require >= 0.50 token overlap AND 0 missing facets
+  // Deep Semantic Integrity Check (Clause-aligned Direction A -> Target)
+  const windowSentences = [
+    ...(targetIndexedPara?.sentencesRaw || []),
+    ...((nextIndexedPara && semanticMatchScore < 0.75 ? nextIndexedPara.sentencesRaw : []) || []),
+  ];
+  const contradictionResult =
+    semanticMatchScore >= 0.25
+      ? detectSemanticContradictionsBetweenTexts({
+          sourceText: unit.cleanText,
+          targetText: neighborPara ? `${targetPara} ${neighborPara}`.trim() : targetPara,
+          targetSentencesRaw: windowSentences.length > 0 ? windowSentences : undefined,
+          properNames: unit.properNames,
+        })
+      : { issues: [], ambiguousEdge: false };
+
+  const semanticIssues = contradictionResult.issues;
   const minRequiredScore = unitRequiredTokens.length >= 7 ? 0.65 : 0.5;
-  const verified =
+  const lexicalAndFacetsPassed =
     unitRequiredTokens.length === 0
       ? Boolean(
           unit.photoIds.length > 0 &&
@@ -6208,11 +7250,43 @@ export function verifyDocumentaryUnitInManuscript(params: {
         )
       : semanticMatchScore >= minRequiredScore && missingFacets.length === 0;
 
+  const hasContradiction = semanticIssues.length > 0;
+  // Detect borderline paraphrase ambiguity eligible for hybrid AI semantic judge:
+  // Either complex literary paraphrase (moderate overlap >= 0.34, all explicit dates/names/places preserved, zero contradictions)
+  // OR a conversational discourse polarity edge where deterministic rules requested AI confirmation.
+  const isParaphraseAmbiguous =
+    !lexicalAndFacetsPassed &&
+    !hasContradiction &&
+    missingFacets.length === 0 &&
+    semanticMatchScore >= 0.34;
+  const isAmbiguous = isParaphraseAmbiguous || (hasContradiction && contradictionResult.ambiguousEdge);
+
+  const verified = lexicalAndFacetsPassed && !hasContradiction;
+
+  const verificationStatus: UnitVerificationStatus = isAmbiguous
+    ? 'ambiguous'
+    : hasContradiction
+    ? 'contradicted'
+    : verified
+    ? 'supported'
+    : semanticMatchScore >= 0.3
+    ? 'partially_supported'
+    : 'missing';
+
+  const ambiguityReason = isParaphraseAmbiguous
+    ? `Posible paráfrasis literaria compleja (coincidencia léxica ${(semanticMatchScore * 100).toFixed(0)}% sin facetas ausentes).`
+    : hasContradiction && contradictionResult.ambiguousEdge
+    ? `Posible giro conversacional de negación o discurso (${semanticIssues[0] || ''}).`
+    : undefined;
+
   const paragraphId =
     targetCh.paragraphIds?.[bestParaIdx] || `${targetCh.id}_p_${bestParaIdx + 1}`;
 
   return {
     verified,
+    verificationStatus,
+    semanticIssues,
+    ambiguityReason,
     semanticMatchScore,
     chapterIndex: bestChapterIdx,
     paragraphIndex: bestParaIdx,
@@ -6226,8 +7300,11 @@ export function verifyDocumentaryUnitInManuscript(params: {
 }
 
 /**
- * Verifies that the manuscript does not invent dates/years, ages, proper names, or direct dialogues
- * absent from the documentary inventory, and that excluded content did not leak into any book section.
+ * Bidirectional veracity & exclusion audit:
+ * - Direction B (Book -> Testimony): verifies claims, dates, ages, dialogues, proper names, and places in the manuscript
+ *   against the source documentary inventory (`inventedDataFlags`, `unsupportedAdditionFlags`).
+ * - Scoped Exclusion Check: verifies neither directives nor excluded episodes/entities leaked without false positives on authorized text.
+ * - Shared Couple Attribution Check.
  */
 function runVeracityAndExclusionAudit(params: {
   manuscript: DemoManuscript;
@@ -6236,12 +7313,14 @@ function runVeracityAndExclusionAudit(params: {
   participantNames: string[];
 }): {
   inventedDataFlags: string[];
+  unsupportedAdditionFlags: string[];
   uncertaintyViolations: string[];
   leakedExcludedContentFlags: string[];
   coupleAttributionViolations: string[];
 } {
   const { manuscript, chapters, inventory, participantNames } = params;
   const inventedDataFlags: string[] = [];
+  const unsupportedAdditionFlags: string[] = [];
   const uncertaintyViolations: string[] = [];
   const leakedExcludedContentFlags: string[] = [];
   const coupleAttributionViolations: string[] = [];
@@ -6249,6 +7328,7 @@ function runVeracityAndExclusionAudit(params: {
   if (inventory.totalRawAnswers === 0) {
     return {
       inventedDataFlags,
+      unsupportedAdditionFlags,
       uncertaintyViolations,
       leakedExcludedContentFlags,
       coupleAttributionViolations,
@@ -6259,8 +7339,11 @@ function runVeracityAndExclusionAudit(params: {
   const allSourceRawCombined = inventory.eligibleFactUnits
     .map((u) => `${u.rawText} ${u.questionText}`)
     .join(' ');
+  const corpusAllEligibleWords = normalizePlainAscii(allSourceRawCombined)
+    .split(/\s+/)
+    .filter(Boolean);
 
-  // 1. Check each chapter paragraph for invented 4-digit years, invented explicit ages, or fabricated dialogues
+  // 1. Direction B (Book -> Testimony): Check each chapter paragraph for unsupported dates, ages, dialogues, names, or unsourced claims
   for (const ch of chapters) {
     for (let pIdx = 0; pIdx < (ch.paragraphs || []).length; pIdx++) {
       const para = ch.paragraphs[pIdx] || '';
@@ -6270,9 +7353,9 @@ function runVeracityAndExclusionAudit(params: {
       const yearsInPara = para.match(/\b(18\d{2}|19\d{2}|20\d{2})\b/g) || [];
       for (const yr of yearsInPara) {
         if (!validYearsSet.has(yr)) {
-          inventedDataFlags.push(
-            `Año o fecha no presente en el testimonio original (${yr}) en capítulo "${ch.title}" (párrafo ${pIdx + 1}).`
-          );
+          const msg = `Año o fecha no presente en el testimonio original (${yr}) en capítulo "${ch.title}" (párrafo ${pIdx + 1}).`;
+          inventedDataFlags.push(msg);
+          unsupportedAdditionFlags.push(msg);
         }
       }
 
@@ -6288,13 +7371,13 @@ function runVeracityAndExclusionAudit(params: {
             Array.from(validYearsSet).concat(inventory.corpusValidProperNames)
           )
         ) {
-          inventedDataFlags.push(
-            `Cifra de años no respaldada por el testimonio (${numStr} años) en capítulo "${ch.title}" (párrafo ${pIdx + 1}).`
-          );
+          const msg = `Cifra de años no respaldada por el testimonio (${numStr} años) en capítulo "${ch.title}" (párrafo ${pIdx + 1}).`;
+          inventedDataFlags.push(msg);
+          unsupportedAdditionFlags.push(msg);
         }
       }
 
-      // 1c. Fabricated direct dialogues ("..." or —...—) that were not in the source corpus
+      // 1c. Fabricated direct dialogues ("..." or «...») that were not in the source corpus
       const quoteMatches = para.match(/(?:«([^»]{18,})»|"([^"]{18,})")/g) || [];
       for (const qm of quoteMatches) {
         const innerQuote = qm.slice(1, -1).trim();
@@ -6308,9 +7391,9 @@ function runVeracityAndExclusionAudit(params: {
           matchedQuoteTokens.length / quoteTokens.length < 0.6 &&
           !allSourceRawCombined.toLowerCase().includes(innerQuote.slice(0, 20).toLowerCase())
         ) {
-          inventedDataFlags.push(
-            `Diálogo textual inventado no presente en el testimonio (${qm.slice(0, 50)}...) en capítulo "${ch.title}".`
-          );
+          const msg = `Diálogo textual inventado no presente en el testimonio (${qm.slice(0, 50)}...) en capítulo "${ch.title}".`;
+          inventedDataFlags.push(msg);
+          unsupportedAdditionFlags.push(msg);
         }
       }
 
@@ -6326,9 +7409,30 @@ function runVeracityAndExclusionAudit(params: {
           properCandidate.length >= 3 &&
           !inventory.corpusValidProperNames.includes(properCandidate)
         ) {
-          inventedDataFlags.push(
-            `Nombre propio no respaldado por el testimonio ("${parts[parts.length - 1]}") en capítulo "${ch.title}".`
+          const msg = `Nombre propio no respaldado por el testimonio ("${parts[parts.length - 1]}") en capítulo "${ch.title}".`;
+          inventedDataFlags.push(msg);
+          unsupportedAdditionFlags.push(msg);
+        }
+      }
+
+      // 1e. Unsupported narrative sentences in Book -> Testimony reverse verification
+      // If a substantial narrative sentence (>= 6 significant tokens) has 0 overlap with the entire eligible corpus
+      // and isn't a harmless editorial bridge, flag as unsupported factual addition.
+      const bookSentences = para
+        .split(/(?<=[.!?…])\s+/)
+        .map((s) => s.trim())
+        .filter((s) => s.length >= 45);
+      for (const bSent of bookSentences) {
+        const sig = tokenizeSignificantWords(bSent);
+        if (sig.length >= 6) {
+          const supportedHits = sig.filter((tok) =>
+            doesTokenMatchCorpusWords(tok, corpusAllEligibleWords)
           );
+          if (supportedHits.length === 0) {
+            unsupportedAdditionFlags.push(
+              `Afirmación narrativa sin respaldo en los testimonios ("${bSent.slice(0, 75)}...") en capítulo "${ch.title}".`
+            );
+          }
         }
       }
     }
@@ -6348,10 +7452,10 @@ function runVeracityAndExclusionAudit(params: {
   ].join(' ');
   const normBookSurfaceWords = normalizePlainAscii(allBookSurfaceText).split(/\s+/).filter(Boolean);
 
-  // Also check if literal exclusion directives ("no incluir en el libro") leaked into the book
+  // Also check if literal exclusion directives ("no incluir en el libro", "no menciones...", etc.) leaked into the book
   if (EXPLICIT_EXCLUSION_DIRECTIVE_RX.test(allBookSurfaceText)) {
     leakedExcludedContentFlags.push(
-      'Directiva de exclusión explícita ("no incluir en el libro") filtrada en el texto visible del manuscrito.'
+      'Directiva de exclusión explícita filtrada en el texto visible del manuscrito.'
     );
   }
 
@@ -6422,6 +7526,7 @@ function runVeracityAndExclusionAudit(params: {
 
   return {
     inventedDataFlags,
+    unsupportedAdditionFlags,
     uncertaintyViolations,
     leakedExcludedContentFlags,
     coupleAttributionViolations,
@@ -6429,14 +7534,205 @@ function runVeracityAndExclusionAudit(params: {
 }
 
 /**
- * Runs the mandatory server/client documentary audit over a DemoManuscript:
+ * Second mandatory audit: Editorial & Literary Quality Audit (`auditBookEditorialQuality`).
+ * Checks spelling/oral-filler/transcription leaks, narrative perspective consistency (100% Style C 3rd-person),
+ * duplicate episodes across paragraphs, question-like or numbered chapter titles, broken markdown, and giant paragraphs.
+ */
+export function auditBookEditorialQuality(params: {
+  manuscript: DemoManuscript;
+}): EditorialQualityAuditReport {
+  const { manuscript } = params;
+  const style: DemoNarrativeStyleId = manuscript.narrativeStyle || 'first_person_literary';
+  const chapters = manuscript.chapters || [];
+
+  const firstPersonLeakFlags: string[] = [];
+  const oralFillerOrArtifactFlags: string[] = [];
+  const duplicateEpisodeFlags: string[] = [];
+  const titleQualityFlags: string[] = [];
+  const truncatedFragmentFlags: string[] = [];
+  const giantParagraphFlags: string[] = [];
+  const unbalancedMarkdownFlags: string[] = [];
+  const warnings: string[] = [];
+
+  // Strong 1st-person markers outside quotation marks when Style C is active
+  const firstPersonMarkerRx =
+    /(?<![A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9])(yo|mi|mis|mío|mía|míos|mías|conmigo|nosotros|nosotras|nuestro|nuestra|nuestros|nuestras|nací|crecí|viví|aprendí|conocí|salí|volví|sentí|decidí|descubrí|compartí|recibí|elegí|construí|tuve|estuve|hice|pude|supe|quise|fui|empecé|comencé|terminé|trabajé|estudié|llegué|jugué|logré|pasé|encontré|formé|cuidé|disfruté|amé|tengo|soy|estoy|voy|quiero|pienso|siento|considero|agradezco|vivíamos|teníamos|éramos|estábamos|jugábamos|íbamos|tuvimos|fuimos|hicimos)(?![A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9])/i;
+
+  const findFirstPersonLeakOutsideQuotes = (rawText: string): string | null => {
+    const outsideQuotes = rawText.replace(/«[^»]*»|"[^"]*"/g, ' ');
+    const directMatch = outsideQuotes.match(firstPersonMarkerRx);
+    if (directMatch) return directMatch[1];
+
+    // Disambiguate homograph "recuerdo" (valid noun "el recuerdo biográfico" vs 1st-person verb "recuerdo que")
+    const nounDeterminerBeforeRx =
+      /(?:^|\s|[«"'(¿¡,;:\-.])(?:el|un|este|ese|aquel|su|tu|del|al|cada|otro|ning[úu]n|alg[úu]n|cualquier|mismo|propio|primer|segundo|tercer|[úu]ltimo|hermoso|dulce|viejo|querido|mayor|menor|feliz|triste|gran|buen|mal|vivo|claro|lindo|bello|tierno|grato|eterno|inolvidable|fiel|lejano|[íi]ntimo|precioso|valioso|sagrado|nuevo|antiguo)\s+$/i;
+    const nounModifierAfterRx =
+      /^\s+(?:de|del|en|para|sobre|biogr[aá]fico|familiar|infantil|vivo|claro|imborrable|hermoso|dulce|eterno|n[uú]mero|n\.|#)\b/i;
+    const verbCueBeforeRx =
+      /(?:^|[.!?;,:\n]\s*|(?:yo|a[uú]n|todav[ií]a|siempre|solo|s[oó]lo|nunca|jam[aá]s|ya|tambi[eé]n|no|lo)\s+)$/i;
+    const verbComplementAfterRx =
+      /^\s+(?:que|cuando|cu[aá]ndo|c[oó]mo|como|haber|eso|esto|aquello|a\s+|la\s+|las\s+|los\s+|el\s+|un\s+|una\s+|con\s+claridad|bien\b|mucho\b|poco\b)/i;
+
+    for (const m of outsideQuotes.matchAll(/(?<![A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9])recuerdo(?![A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9])/gi)) {
+      const idx = m.index ?? -1;
+      if (idx < 0) continue;
+      const before = outsideQuotes.slice(Math.max(0, idx - 40), idx);
+      const after = outsideQuotes.slice(idx + m[0].length, idx + m[0].length + 32);
+      if (nounDeterminerBeforeRx.test(before) || nounModifierAfterRx.test(after)) {
+        continue;
+      }
+      if (verbComplementAfterRx.test(after) || (verbCueBeforeRx.test(before) && !/^\s+(?:de|del|sobre)\b/i.test(after))) {
+        return m[0];
+      }
+    }
+    return null;
+  };
+
+  const oralFillerArtifactRx =
+    /(?:\[Nota de voz\]|\[FOTO\s*:|\behh+\b|\bemm+\b|\bmmm+\b|(?:\s|^)o\s+sea(?:\s|,)|^\s*(?:pregunta|respuesta)\s*\d*\s*:|^\s*N\/A\s*$)/i;
+
+  const seenTitleNorm = new Set<string>();
+  const seenParagraphSamples: Array<{ chTitle: string; pIdx: number; text: string }> = [];
+
+  for (let cIdx = 0; cIdx < chapters.length; cIdx++) {
+    const ch = chapters[cIdx];
+    const cleanTitle = (ch.title || '').trim();
+
+    if (!cleanTitle) {
+      titleQualityFlags.push(`El capítulo ${cIdx + 1} no tiene título.`);
+    } else {
+      if (/^¿.+\?$/.test(cleanTitle) || /^(pregunta|respuesta)\s+\d+/i.test(cleanTitle)) {
+        titleQualityFlags.push(`Título en formato de pregunta o formulario: "${cleanTitle}".`);
+      }
+      if (/\(\d+\)\s*$/.test(cleanTitle)) {
+        titleQualityFlags.push(`Título con sufijo numérico artificial: "${cleanTitle}".`);
+      }
+      const normT = cleanTitle.toLowerCase();
+      if (seenTitleNorm.has(normT)) {
+        titleQualityFlags.push(`Título de capítulo duplicado: "${cleanTitle}".`);
+      }
+      seenTitleNorm.add(normT);
+    }
+
+    const paras = ch.paragraphs || [];
+    for (let pIdx = 0; pIdx < paras.length; pIdx++) {
+      const para = (paras[pIdx] || '').trim();
+      if (!para) continue;
+
+      // Check oral fillers / interview artifacts
+      if (oralFillerArtifactRx.test(para)) {
+        oralFillerOrArtifactFlags.push(
+          `Muletilla o artefacto de transcripción detectado en "${cleanTitle}" (párrafo ${pIdx + 1}).`
+        );
+      }
+
+      // Check 1st-person perspective leaks in Style C (strip direct quotes before testing)
+      if (style === 'third_person_biography') {
+        const leakedMarker = findFirstPersonLeakOutsideQuotes(para);
+        if (leakedMarker) {
+          firstPersonLeakFlags.push(
+            `Voz en primera persona ("${leakedMarker}") filtrada en biografía en tercera persona dentro de "${cleanTitle}" (párrafo ${pIdx + 1}).`
+          );
+        }
+      }
+
+      // Check truncated fragments ending abruptly or unbalanced bold/italic markers
+      // Ignores valid accented pronouns ("para mí", "por él", "en sí") and complete sentences ending with punctuation after nouns.
+      if (
+        !/(?:m[ií]|s[ií]|[eé]l)[.!?]?$/i.test(para) &&
+        /(?:^|\s)(?:y|o|de|en|con|por|para|que|mi|su)\s*$/i.test(para.replace(/\.\.\.$/, '')) &&
+        para.length < 180
+      ) {
+        truncatedFragmentFlags.push(
+          `Oración posiblemente truncada ("...${para.slice(-28)}") en "${cleanTitle}" (párrafo ${pIdx + 1}).`
+        );
+      }
+      const boldTokenCount = (para.match(/\*\*/g) || []).length;
+      const singleStarCount = (para.replace(/\*\*/g, '').match(/\*/g) || []).length;
+      if (boldTokenCount % 2 !== 0 || singleStarCount % 2 !== 0) {
+        unbalancedMarkdownFlags.push(
+          `Marcadores de énfasis (* o **) sin cerrar en "${cleanTitle}" (párrafo ${pIdx + 1}).`
+        );
+      }
+
+      // Giant unbroken walls of text (> 1450 chars)
+      if (para.length > 1450) {
+        giantParagraphFlags.push(
+          `Párrafo excesivamente largo (${para.length} caracteres) en "${cleanTitle}" (párrafo ${pIdx + 1}).`
+        );
+      }
+
+      // Duplicate episodes across paragraphs (semantic/literal overlap >= 100% of shorter paragraph)
+      const dupPrior = seenParagraphSamples.find(
+        (prev) =>
+          para.length >= 45 &&
+          prev.text.length >= 45 &&
+          areTestimoniesRedundantSameEpisode(prev.text, para)
+      );
+      if (dupPrior) {
+        duplicateEpisodeFlags.push(
+          `Episodio repetido entre "${dupPrior.chTitle}" (párrafo ${dupPrior.pIdx + 1}) y "${cleanTitle}" (párrafo ${pIdx + 1}).`
+        );
+      } else {
+        seenParagraphSamples.push({ chTitle: cleanTitle, pIdx, text: para });
+      }
+    }
+  }
+
+  // Also check introduction and closingMessage for Style C perspective leaks or oral fillers
+  if (style === 'third_person_biography') {
+    for (const [label, txt] of [
+      ['Introducción', manuscript.introduction || ''],
+      ['Cierre', manuscript.closingMessage || ''],
+    ] as const) {
+      const leakedMarker = findFirstPersonLeakOutsideQuotes(txt);
+      if (leakedMarker) {
+        firstPersonLeakFlags.push(
+          `Voz en primera persona ("${leakedMarker}") en ${label} de biografía en tercera persona.`
+        );
+      }
+    }
+  }
+
+  if (giantParagraphFlags.length > 0) {
+    warnings.push(...giantParagraphFlags);
+  }
+
+  const blockingDefects = [
+    ...firstPersonLeakFlags,
+    ...oralFillerOrArtifactFlags,
+    ...duplicateEpisodeFlags,
+    ...titleQualityFlags,
+    ...truncatedFragmentFlags,
+    ...unbalancedMarkdownFlags,
+  ];
+
+  const styleConsistencyPassed = firstPersonLeakFlags.length === 0;
+
+  return {
+    passed: blockingDefects.length === 0,
+    auditedAt: new Date().toISOString(),
+    narrativeStyle: style,
+    blockingDefects,
+    warnings,
+    styleConsistencyPassed,
+    firstPersonLeakFlags,
+    oralFillerOrArtifactFlags,
+    duplicateEpisodeFlags,
+    titleQualityFlags,
+    truncatedFragmentFlags,
+    giantParagraphFlags,
+    unbalancedMarkdownFlags,
+  };
+}
+
+/**
+ * Runs the mandatory server/client documentary + editorial audit over a DemoManuscript:
  * - Decomposes all source answers, deepening follow-ups, additional memories, audio transcriptions,
  *   and photo contexts into atomic `DocumentaryFactUnit`s via `buildDocumentaryInventory`.
- * - Verifies real semantic & facet coverage of every eligible unit against actual chapter paragraphs
- *   (fixing the former `totalSourceUnits = integratedUnits` defect).
- * - Verifies veracity (no invented dates/ages/names/dialogues), uncertainty preservation,
- *   exclusion compliance (`not_recalled`, `prefer_not_to_answer`, `excluded_by_interviewee`),
- *   couple attribution, structural chapter grouping (never 1 question per chapter), and 100% photo placement.
+ * - Performs bidirectional semantic verification (Testimony -> Book and Book -> Testimony),
+ *   checking negation, agency flips, modality shifts, and antonyms alongside facets.
+ * - Executes `auditBookEditorialQuality` as the second quality gate.
  */
 export function auditAndApproveBookManuscript(params: {
   manuscript: DemoManuscript;
@@ -6444,9 +7740,11 @@ export function auditAndApproveBookManuscript(params: {
   questions?: DocumentarySourceQuestionInput[];
   repairAttemptsUsed?: number;
   repairedUnitIds?: string[];
+  includeEditorialAudit?: boolean;
 }): {
   manuscript: DemoManuscript;
   report: DocumentaryAuditReport;
+  editorialAudit: EditorialQualityAuditReport;
   inventory: DocumentaryInventory;
 } {
   const {
@@ -6455,6 +7753,7 @@ export function auditAndApproveBookManuscript(params: {
     questions = [],
     repairAttemptsUsed = 0,
     repairedUnitIds = [],
+    includeEditorialAudit = true,
   } = params;
   const qMap = new Map(questions.map((q) => [q.id, q]));
   const blockingDefects: string[] = [];
@@ -6682,7 +7981,7 @@ export function auditAndApproveBookManuscript(params: {
     }
   }
 
-  // 3. Build Traceability Matrix & Perform Real Semantic Fact Verification and Uncertainty Audit
+  // 3. Build Traceability Matrix & Perform Bidirectional Semantic Fact Verification and Uncertainty Audit
   const traceabilityMatrix: TraceabilityMatrixEntry[] = [];
   let integratedUnits = 0;
   let omittedNotRecalledUnits = 0;
@@ -6690,7 +7989,13 @@ export function auditAndApproveBookManuscript(params: {
   let excludedByIntervieweeUnits = 0;
   let uncertaintiesPreserved = true;
   const missingUnitIds: string[] = [];
+  const ambiguousUnitIds: string[] = [];
   const uncertaintyViolations: string[] = [];
+  const semanticContradictionFlags: string[] = [];
+  let uncertainUnitsCount = 0;
+
+  // Pre-index normalized chapters/paragraphs once for fast O(N) lookups across hundreds of fact units
+  const preIndexedChapters = buildChapterAuditIndex(normalizedChapters);
 
   for (const unit of inventory.excludedFactUnits) {
     if (unit.exclusionReason === 'not_recalled') omittedNotRecalledUnits++;
@@ -6721,6 +8026,7 @@ export function auditAndApproveBookManuscript(params: {
           : unit.exclusionReason === 'prefer_not_to_answer'
           ? 'omitted_prefer_not_to_answer'
           : 'omitted_not_recalled',
+      verificationStatus: 'supported',
       exclusionReason: unit.exclusionReason,
       verified: true,
     });
@@ -6730,7 +8036,18 @@ export function auditAndApproveBookManuscript(params: {
     const verification = verifyDocumentaryUnitInManuscript({
       unit,
       chapters: normalizedChapters,
+      preIndexedChapters,
     });
+
+    if (verification.verificationStatus === 'ambiguous') {
+      ambiguousUnitIds.push(unit.unitId);
+    }
+
+    if (verification.semanticIssues.length > 0) {
+      semanticContradictionFlags.push(
+        ...verification.semanticIssues.map((iss) => `[${unit.unitId}] ${iss}`)
+      );
+    }
 
     const assignedCh =
       verification.chapterIndex >= 0
@@ -6739,6 +8056,7 @@ export function auditAndApproveBookManuscript(params: {
 
     // Check uncertainty preservation in the assigned chapter without silently hiding a failure
     if (unit.uncertaintyExpressions.length > 0 && assignedCh) {
+      uncertainUnitsCount++;
       const chTextLower = (assignedCh.paragraphs || []).join(' ').toLowerCase();
       const hasUncertainty =
         unit.uncertaintyExpressions.some((u) => chTextLower.includes(u)) ||
@@ -6790,6 +8108,9 @@ export function auditAndApproveBookManuscript(params: {
         missingTokens: verification.missingTokens,
         missingFacets: verification.missingFacets,
         status: 'integrated',
+        verificationStatus: verification.verificationStatus,
+        semanticIssues: verification.semanticIssues,
+        ambiguityReason: verification.ambiguityReason,
         exclusionReason: 'none',
         verified: true,
       });
@@ -6817,18 +8138,30 @@ export function auditAndApproveBookManuscript(params: {
         missingTokens: verification.missingTokens,
         missingFacets: verification.missingFacets,
         status: 'missing',
+        verificationStatus: verification.verificationStatus,
+        semanticIssues: verification.semanticIssues,
+        ambiguityReason: verification.ambiguityReason,
         exclusionReason: 'none',
         verified: false,
       });
     }
   }
 
-  // 4. Veracity, Anti-Invention, Excluded Content Leak, and Couple Attribution Audit
+  // 4. Veracity, Direction B Reverse Claim Audit, Excluded Content Leak, and Couple Attribution Audit
   const veracityCheck = runVeracityAndExclusionAudit({
     manuscript,
     chapters: normalizedChapters,
     inventory,
     participantNames,
+  });
+
+  // 5. Second Mandatory Gate: Editorial & Literary Quality Audit
+  const normalizedManuscriptDraft: DemoManuscript = {
+    ...manuscript,
+    chapters: normalizedChapters,
+  };
+  const editorialAudit = auditBookEditorialQuality({
+    manuscript: normalizedManuscriptDraft,
   });
 
   const totalSourceUnits = inventory.eligibleFactUnits.length;
@@ -6866,6 +8199,9 @@ export function auditAndApproveBookManuscript(params: {
   if (!uncertaintiesPreserved || uncertaintyViolations.length > 0) {
     blockingDefects.push(...uncertaintyViolations);
   }
+  if (semanticContradictionFlags.length > 0) {
+    blockingDefects.push(...semanticContradictionFlags);
+  }
   if (veracityCheck.inventedDataFlags.length > 0) {
     blockingDefects.push(...veracityCheck.inventedDataFlags);
   }
@@ -6879,6 +8215,9 @@ export function auditAndApproveBookManuscript(params: {
     blockingDefects.push(
       `Fotografías sin ubicar en el manuscrito (${totalPlacedPhotos}/${totalUploadedPhotos}).`
     );
+  }
+  if (includeEditorialAudit && !editorialAudit.passed) {
+    blockingDefects.push(...editorialAudit.blockingDefects);
   }
 
   const passed = blockingDefects.length === 0;
@@ -6917,6 +8256,7 @@ export function auditAndApproveBookManuscript(params: {
     veracityAudit: {
       passed:
         uncertaintiesPreserved &&
+        semanticContradictionFlags.length === 0 &&
         veracityCheck.inventedDataFlags.length === 0 &&
         veracityCheck.leakedExcludedContentFlags.length === 0 &&
         veracityCheck.coupleAttributionViolations.length === 0,
@@ -6925,7 +8265,24 @@ export function auditAndApproveBookManuscript(params: {
       inventedDataFlags: veracityCheck.inventedDataFlags,
       leakedExcludedContentFlags: veracityCheck.leakedExcludedContentFlags,
       coupleAttributionViolations: veracityCheck.coupleAttributionViolations,
+      semanticContradictionFlags,
+      unsupportedAdditionFlags: veracityCheck.unsupportedAdditionFlags,
     },
+    semanticAudit: {
+      passed:
+        semanticContradictionFlags.length === 0 &&
+        veracityCheck.inventedDataFlags.length === 0 &&
+        veracityCheck.unsupportedAdditionFlags.length === 0 &&
+        ambiguousUnitIds.length === 0,
+      contradictionsDetected: semanticContradictionFlags,
+      unsupportedAdditions: veracityCheck.unsupportedAdditionFlags,
+      uncertainUnitsCount,
+      ambiguousUnitsCount: ambiguousUnitIds.length,
+      ambiguousUnitIds,
+      directionAChecked: inventory.eligibleFactUnits.length,
+      directionBChecked: normalizedChapters.reduce((sum, ch) => sum + ch.paragraphs.length, 0),
+    },
+    editorialAudit,
     structuralAudit: {
       passed:
         !duplicateChapterIdsDetected &&
@@ -6950,27 +8307,443 @@ export function auditAndApproveBookManuscript(params: {
 
   return {
     manuscript: {
-      ...manuscript,
-      chapters: normalizedChapters,
+      ...normalizedManuscriptDraft,
       status: passed ? 'approved' : 'failed_audit',
       generationStatus: passed ? 'approved' : 'failed_audit',
       auditReport: report,
       documentaryAudit: report,
+      editorialAudit,
     },
     report,
+    editorialAudit,
     inventory,
   };
 }
 
+export type ContextualRepairCategory =
+  | 'missing_unit'
+  | 'semantic_contradiction'
+  | 'style_perspective_leak'
+  | 'excluded_content_leak'
+  | 'invented_data'
+  | 'unsupported_addition'
+  | 'oral_filler_artifact'
+  | 'duplicate_episode'
+  | 'title_quality'
+  | 'truncated_fragment'
+  | 'unbalanced_markdown'
+  | 'giant_paragraph'
+  | 'one_question_per_chapter'
+  | 'couple_attribution'
+  | 'uncertainty_omission'
+  | 'photo_placement';
+
+export interface ContextualRepairTask {
+  id: string;
+  category: ContextualRepairCategory;
+  categories: ContextualRepairCategory[];
+  severity: 'blocking' | 'warning';
+  autoRepairable: boolean;
+  evidenceSource: string[];
+  location: {
+    chapterId: string;
+    chapterTitle: string;
+    paragraphIndices?: number[];
+  };
+  repairStrategy: string;
+  status: 'pending' | 'repaired' | 'rejected_regression' | 'unrepairable';
+  reverificationResult?: {
+    checked: boolean;
+    passed: boolean;
+    remainingIssues: string[];
+  };
+  chapterId: string;
+  chapterTitle: string;
+  missingUnits: DocumentaryFactUnit[];
+  contradictionDetails: string[];
+  styleLeakDetails: string[];
+  excludedLeakDetails: string[];
+  inventedDetails: string[];
+  unsupportedAdditionDetails: string[];
+  oralFillerDetails: string[];
+  duplicateEpisodeDetails: string[];
+  titleQualityDetails: string[];
+  truncatedFragmentDetails: string[];
+  unbalancedMarkdownDetails: string[];
+  giantParagraphDetails: string[];
+  coupleAttributionDetails: string[];
+  uncertaintyDetails: string[];
+  photoPlacementDetails: string[];
+  structuralRegroupRequired?: boolean;
+}
+
 /**
- * Automatic localized documentary repair loop (`repairManuscriptOmissions`).
+ * Generates comprehensive, structured per-chapter repair tasks covering all 16 Documentary,
+ * Editorial, Structural, Veracity, Privacy, and Photo audit categories so AI-guided and
+ * deterministic contextual repair can fix every affected chapter without truncation.
+ */
+export function buildContextualRepairTasks(params: {
+  manuscript: DemoManuscript;
+  report: DocumentaryAuditReport;
+  editorialAudit: EditorialQualityAuditReport;
+  inventory: DocumentaryInventory;
+  editorialPlan: EditorialBookPlan;
+}): ContextualRepairTask[] {
+  const { manuscript, report, editorialAudit, inventory, editorialPlan } = params;
+  const chapters = manuscript.chapters || [];
+  if (chapters.length === 0) return [];
+
+  const tasksMap = new Map<string, ContextualRepairTask>();
+
+  const findChapterByFlagText = (flag: string): DemoChapterManuscript | undefined => {
+    const quoted = Array.from(flag.matchAll(/"([^"]+)"/g)).map((m) => m[1]);
+    for (const q of quoted) {
+      const exact = chapters.find((c) => c.title.trim() === q.trim());
+      if (exact) return exact;
+    }
+    return chapters.find((c) => flag.includes(`"${c.title}"`));
+  };
+
+  const extractParaIndexFromFlag = (flag: string): number | null => {
+    const m = flag.match(/p[aá]rrafo\s+(\d+)/i);
+    return m ? Math.max(0, Number(m[1]) - 1) : null;
+  };
+
+  const ensureTask = (
+    ch: DemoChapterManuscript,
+    primaryCategory: ContextualRepairCategory,
+    strategyHint: string,
+    severity: 'blocking' | 'warning' = 'blocking'
+  ): ContextualRepairTask => {
+    let task = tasksMap.get(ch.id);
+    if (!task) {
+      task = {
+        id: `repair_${ch.id}`,
+        category: primaryCategory,
+        categories: [primaryCategory],
+        severity,
+        autoRepairable: true,
+        evidenceSource: [],
+        location: {
+          chapterId: ch.id,
+          chapterTitle: ch.title,
+          paragraphIndices: [],
+        },
+        repairStrategy: strategyHint,
+        status: 'pending',
+        chapterId: ch.id,
+        chapterTitle: ch.title,
+        missingUnits: [],
+        contradictionDetails: [],
+        styleLeakDetails: [],
+        excludedLeakDetails: [],
+        inventedDetails: [],
+        unsupportedAdditionDetails: [],
+        oralFillerDetails: [],
+        duplicateEpisodeDetails: [],
+        titleQualityDetails: [],
+        truncatedFragmentDetails: [],
+        unbalancedMarkdownDetails: [],
+        giantParagraphDetails: [],
+        coupleAttributionDetails: [],
+        uncertaintyDetails: [],
+        photoPlacementDetails: [],
+      };
+      tasksMap.set(ch.id, task);
+    } else {
+      if (!task.categories.includes(primaryCategory)) {
+        task.categories.push(primaryCategory);
+      }
+      if (severity === 'blocking') {
+        task.severity = 'blocking';
+      }
+    }
+    return task;
+  };
+
+  const recordEvidence = (task: ContextualRepairTask, flag: string) => {
+    if (flag && !task.evidenceSource.includes(flag)) {
+      task.evidenceSource.push(flag);
+    }
+    const pIdx = extractParaIndexFromFlag(flag);
+    if (pIdx !== null && !task.location.paragraphIndices?.includes(pIdx)) {
+      task.location.paragraphIndices = [...(task.location.paragraphIndices || []), pIdx];
+    }
+  };
+
+  const resolveChapterForUnit = (unit: DocumentaryFactUnit): DemoChapterManuscript => {
+    const trace = (report.traceabilityMatrix || []).find((m) => m.unitId === unit.unitId);
+    if (trace?.assignedChapterId && trace.assignedChapterId !== 'none') {
+      const tracedCh = chapters.find((c) => c.id === trace.assignedChapterId);
+      if (tracedCh) return tracedCh;
+    }
+    const directCh = chapters.find((c) => (c.sourceAnswerIds || []).includes(unit.answerId));
+    if (directCh) return directCh;
+    const planItem =
+      editorialPlan.chapters.find((pc) => pc.assignedAnswerIds.includes(unit.answerId)) ||
+      editorialPlan.chapters.find((pc) => pc.stageKey === unit.lifeStage) ||
+      editorialPlan.chapters[0];
+    return (
+      (planItem
+        ? chapters.find(
+            (c) => c.id === planItem.chapterId || c.dimensionKey === planItem.dimensionKey
+          )
+        : undefined) || chapters[0]
+    );
+  };
+
+  // 1 & 2. Missing Units & Semantic Contradictions (plus unresolved ambiguous units)
+  const missingOrContradictedIds = new Set(report.coverageAudit?.missingUnitIds || []);
+  for (const entry of report.traceabilityMatrix || []) {
+    if (entry.verificationStatus === 'contradicted' || entry.verificationStatus === 'ambiguous') {
+      missingOrContradictedIds.add(entry.unitId);
+    }
+  }
+
+  for (const unitId of missingOrContradictedIds) {
+    const unit = inventory.eligibleFactUnits.find((u) => u.unitId === unitId);
+    if (!unit) continue;
+    const targetCh = resolveChapterForUnit(unit);
+    const trace = (report.traceabilityMatrix || []).find((m) => m.unitId === unitId);
+    if (trace?.verificationStatus === 'contradicted' && trace.semanticIssues?.length) {
+      const t = ensureTask(
+        targetCh,
+        'semantic_contradiction',
+        'Corregir discrepancia semántica preservando el sentido literal del testimonio original.'
+      );
+      t.contradictionDetails.push(...trace.semanticIssues);
+      if (!t.missingUnits.some((u) => u.unitId === unit.unitId)) {
+        t.missingUnits.push(unit);
+      }
+      recordEvidence(t, `[${unit.unitId}] ${trace.semanticIssues[0]}`);
+    } else {
+      const t = ensureTask(
+        targetCh,
+        'missing_unit',
+        'Integrar hechos omitidos de forma fluida en el estilo narrativo activo sin alterar otros recuerdos.'
+      );
+      if (!t.missingUnits.some((u) => u.unitId === unit.unitId)) {
+        t.missingUnits.push(unit);
+      }
+      recordEvidence(t, `Unidad omitida ${unit.unitId}: ${unit.cleanText.slice(0, 90)}`);
+    }
+  }
+
+  // 3. Perspective leaks (Style C 1st-person)
+  for (const flag of editorialAudit.firstPersonLeakFlags || []) {
+    const targetCh = findChapterByFlagText(flag) || chapters[0];
+    const t = ensureTask(
+      targetCh,
+      'style_perspective_leak',
+      'Reescribir íntegramente en tercera persona narrativa conservando citas textuales entre comillas.'
+    );
+    t.styleLeakDetails.push(flag);
+    recordEvidence(t, flag);
+  }
+
+  // 4. Oral fillers and transcription artifacts
+  for (const flag of editorialAudit.oralFillerOrArtifactFlags || []) {
+    const targetCh = findChapterByFlagText(flag) || chapters[0];
+    const t = ensureTask(
+      targetCh,
+      'oral_filler_artifact',
+      'Eliminar muletillas y artefactos técnicos manteniendo intactos los hechos narrados.'
+    );
+    t.oralFillerDetails.push(flag);
+    recordEvidence(t, flag);
+  }
+
+  // 5. Invented / unsupported numerical or named entity additions
+  for (const flag of report.veracityAudit?.inventedDataFlags || []) {
+    const targetCh = findChapterByFlagText(flag) || chapters[0];
+    const t = ensureTask(
+      targetCh,
+      'invented_data',
+      'Eliminar años, edades, diálogos o nombres propios no respaldados por los testimonios.'
+    );
+    t.inventedDetails.push(flag);
+    recordEvidence(t, flag);
+  }
+
+  // 6. Unsupported narrative additions (Direction B)
+  for (const flag of report.veracityAudit?.unsupportedAdditionFlags || []) {
+    if ((report.veracityAudit?.inventedDataFlags || []).includes(flag)) continue;
+    const targetCh = findChapterByFlagText(flag) || chapters[0];
+    const t = ensureTask(
+      targetCh,
+      'unsupported_addition',
+      'Sustituir afirmaciones sin respaldo documental por transiciones breves o hechos fidedignos del testimonio.'
+    );
+    t.unsupportedAdditionDetails.push(flag);
+    recordEvidence(t, flag);
+  }
+
+  // 7. Excluded content leaks (route to matching chapters where excluded terms appear)
+  for (const flag of report.veracityAudit?.leakedExcludedContentFlags || []) {
+    const leakedTermsMatch = flag.match(/t[eé]rminos detectados:\s*([^)]+)\)/i);
+    const leakedTerms = leakedTermsMatch
+      ? leakedTermsMatch[1].split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
+      : [];
+    const matchingChapters =
+      leakedTerms.length > 0
+        ? chapters.filter((c) => {
+            const cText = normalizePlainAscii(
+              `${c.title} ${c.pullQuote || ''} ${(c.paragraphs || []).join(' ')}`
+            );
+            return leakedTerms.some((term) => cText.includes(term));
+          })
+        : [];
+    const targets = matchingChapters.length > 0 ? matchingChapters : [chapters[0]];
+    for (const targetCh of targets) {
+      const t = ensureTask(
+        targetCh,
+        'excluded_content_leak',
+        'Suprimir cualquier episodio o directiva explícitamente excluida por el entrevistado.'
+      );
+      t.excludedLeakDetails.push(flag);
+      recordEvidence(t, flag);
+    }
+  }
+
+  // 8. Duplicate episodes
+  for (const flag of editorialAudit.duplicateEpisodeFlags || []) {
+    const quotedTitles = Array.from(flag.matchAll(/"([^"]+)"/g)).map((m) => m[1]);
+    const secondTitle = quotedTitles[1] || quotedTitles[0];
+    const targetCh =
+      (secondTitle ? chapters.find((c) => c.title.trim() === secondTitle.trim()) : undefined) ||
+      findChapterByFlagText(flag) ||
+      chapters[0];
+    const t = ensureTask(
+      targetCh,
+      'duplicate_episode',
+      'Consolidar o eliminar repeticiones narrativas conservando los detalles únicos.'
+    );
+    t.duplicateEpisodeDetails.push(flag);
+    recordEvidence(t, flag);
+  }
+
+  // 9. Title quality defects
+  for (const flag of editorialAudit.titleQualityFlags || []) {
+    const targetCh = findChapterByFlagText(flag) || chapters[0];
+    const t = ensureTask(
+      targetCh,
+      'title_quality',
+      'Asignar un título literario evocador no interrogativo ni duplicado.'
+    );
+    t.titleQualityDetails.push(flag);
+    recordEvidence(t, flag);
+  }
+
+  // 10. Truncated fragments
+  for (const flag of editorialAudit.truncatedFragmentFlags || []) {
+    const targetCh = findChapterByFlagText(flag) || chapters[0];
+    const t = ensureTask(
+      targetCh,
+      'truncated_fragment',
+      'Completar o limpiar fragmentos inconclusos respetando estrictamente los hechos originales.'
+    );
+    t.truncatedFragmentDetails.push(flag);
+    recordEvidence(t, flag);
+  }
+
+  // 11. Unbalanced markdown markers
+  for (const flag of editorialAudit.unbalancedMarkdownFlags || []) {
+    const targetCh = findChapterByFlagText(flag) || chapters[0];
+    const t = ensureTask(
+      targetCh,
+      'unbalanced_markdown',
+      'Balancear o limpiar marcadores tipográficos (* o **) sin cerrar.'
+    );
+    t.unbalancedMarkdownDetails.push(flag);
+    recordEvidence(t, flag);
+  }
+
+  // 12. Giant paragraphs (warning level)
+  for (const flag of editorialAudit.giantParagraphFlags || []) {
+    const targetCh = findChapterByFlagText(flag) || chapters[0];
+    const t = ensureTask(
+      targetCh,
+      'giant_paragraph',
+      'Dividir párrafos extensos en pausas naturales de lectura.',
+      'warning'
+    );
+    t.giantParagraphDetails.push(flag);
+    recordEvidence(t, flag);
+  }
+
+  // 13. Uncertainty omissions
+  for (const flag of report.veracityAudit?.uncertaintyViolations || []) {
+    const unitIdMatch = flag.match(/unidad\s+(trace_[^\s.]+)/i);
+    const unit = unitIdMatch
+      ? inventory.eligibleFactUnits.find((u) => u.unitId === unitIdMatch[1])
+      : undefined;
+    const targetCh = unit ? resolveChapterForUnit(unit) : chapters[0];
+    const t = ensureTask(
+      targetCh,
+      'uncertainty_omission',
+      'Restaurar expresiones de duda e incertidumbre originales ("creo que", "no recuerdo bien").'
+    );
+    t.uncertaintyDetails.push(flag);
+    if (unit && !t.missingUnits.some((u) => u.unitId === unit.unitId)) {
+      t.missingUnits.push(unit);
+    }
+    recordEvidence(t, flag);
+  }
+
+  // 14. Couple attribution violations
+  for (const flag of report.veracityAudit?.coupleAttributionViolations || []) {
+    const unitIdMatch = flag.match(/(trace_[^\s]+)/i);
+    const unit = unitIdMatch
+      ? inventory.eligibleFactUnits.find((u) => u.unitId === unitIdMatch[1])
+      : undefined;
+    const targetCh = unit ? resolveChapterForUnit(unit) : chapters[0];
+    const t = ensureTask(
+      targetCh,
+      'couple_attribution',
+      'Corregir atribución del protagonista correcto en historia compartida.'
+    );
+    t.coupleAttributionDetails.push(flag);
+    if (unit && !t.missingUnits.some((u) => u.unitId === unit.unitId)) {
+      t.missingUnits.push(unit);
+    }
+    recordEvidence(t, flag);
+  }
+
+  // 15. One-question-per-chapter structural fragmentation
+  if (report.structuralAudit?.oneQuestionPerChapterDetected) {
+    const targetCh = chapters[0];
+    const t = ensureTask(
+      targetCh,
+      'one_question_per_chapter',
+      'Reagrupar respuestas por capítulos temáticos/etapas siguiendo el plan editorial.'
+    );
+    t.structuralRegroupRequired = true;
+    recordEvidence(t, 'Fragmentación de una pregunta por capítulo detectada.');
+  }
+
+  // 16. Photo placement defects
+  for (const unplacedId of report.photoAudit?.unplacedPhotoIds || []) {
+    const targetCh = chapters[0];
+    const t = ensureTask(
+      targetCh,
+      'photo_placement',
+      'Reubicar fotografía pendiente en su capítulo y párrafo narrativo correspondiente.'
+    );
+    t.photoPlacementDetails.push(`Fotografía sin ubicar: ${unplacedId}`);
+    recordEvidence(t, unplacedId);
+  }
+
+  return Array.from(tasksMap.values());
+}
+
+/**
+ * Automatic localized documentary & editorial repair loop (`repairManuscriptOmissions`).
  * When `auditAndApproveBookManuscript` detects missing documentary fact units, stripped uncertainties,
- * leaked excluded content, invented details, or 1-question-per-chapter fragmentation:
+ * leaked excluded content, invented details, perspective leaks, or 1-question-per-chapter fragmentation:
  * - Never appends a raw Q&A dump at the end of the book.
- * - Never creates 1 chapter per missing memory.
- * - Integrates each omitted memory or missing detail into its corresponding planned narrative chapter
- *   using the manuscript's active `narrativeStyle` and re-runs `auditAndApproveBookManuscript`
- *   (bounded to `maxAttempts`, default 2).
+ * - Deduplicates repeated episodes and cleans oral fillers / perspective leaks.
+ * - Integrates omitted facts into their planned chapter in the manuscript's active `narrativeStyle`
+ *   and re-runs BOTH Documentary and Editorial audits (bounded to `maxAttempts`, default 2).
  */
 export function repairManuscriptOmissions(params: {
   manuscript: DemoManuscript;
@@ -6982,6 +8755,7 @@ export function repairManuscriptOmissions(params: {
 }): {
   manuscript: DemoManuscript;
   report: DocumentaryAuditReport;
+  editorialAudit: EditorialQualityAuditReport;
   inventory: DocumentaryInventory;
   repairAttemptsUsed: number;
   repairedUnitIds: string[];
@@ -7014,6 +8788,7 @@ export function repairManuscriptOmissions(params: {
     return {
       manuscript: currentAudit.manuscript,
       report: currentAudit.report,
+      editorialAudit: currentAudit.editorialAudit,
       inventory: currentAudit.inventory,
       repairAttemptsUsed: 0,
       repairedUnitIds: [],
@@ -7025,6 +8800,7 @@ export function repairManuscriptOmissions(params: {
     return {
       manuscript: currentAudit.manuscript,
       report: currentAudit.report,
+      editorialAudit: currentAudit.editorialAudit,
       inventory: currentAudit.inventory,
       repairAttemptsUsed: 0,
       repairedUnitIds: [],
@@ -7113,50 +8889,69 @@ export function repairManuscriptOmissions(params: {
       if (regroupedChapters.length > 0) {
         workingManuscript.chapters = regroupedChapters;
       } else {
-        // Fallback to clean editorial chapter plan titles on existing chapters
         workingManuscript.chapters = workingManuscript.chapters.map((ch, idx) => {
           const fallbackPlan = editorialPlan.chapters[idx % Math.max(1, editorialPlan.chapters.length)];
           const cleanTitle =
-            /^¿.+\?$/.test(ch.title.trim()) || /^(pregunta|respuesta)\s+\d+/i.test(ch.title.trim())
+            /^¿.+\?$/.test(ch.title.trim()) ||
+            /^(pregunta|respuesta)\s+\d+/i.test(ch.title.trim()) ||
+            /\(\d+\)\s*$/.test(ch.title.trim())
               ? narrativeStyle === 'third_person_biography'
-                ? fallbackPlan?.suggestedTitleThirdPerson || `Capítulo ${idx + 1}`
+                ? fallbackPlan?.suggestedTitleThirdPerson || ch.title
                 : isCouple
-                ? fallbackPlan?.suggestedTitleCouple || `Capítulo ${idx + 1}`
-                : fallbackPlan?.suggestedTitleIndividual || `Capítulo ${idx + 1}`
+                ? fallbackPlan?.suggestedTitleCouple || ch.title
+                : fallbackPlan?.suggestedTitleIndividual || ch.title
               : ch.title;
           return { ...ch, title: cleanTitle };
         });
       }
     }
 
-    // Step B: Strip any leaked excluded sentences or tokens from chapters, intro, closing, and pullQuotes
+    // Step B: Scoped cleanup of leaked excluded sentences & directives without touching unrelated authorized text
     if ((currentAudit.report.leakedExcludedContentFlags || []).length > 0) {
       const eligibleWordsSet = new Set(
         currentAudit.inventory.eligibleFactUnits.flatMap((u) =>
           normalizePlainAscii(u.cleanText).split(/\s+/).filter(Boolean)
         )
       );
-      const bannedExcludedTokens = new Set(
-        currentAudit.inventory.excludedFactUnits
-          .filter(
-            (u) =>
-              u.exclusionReason === 'excluded_by_interviewee' ||
-              u.exclusionReason === 'prefer_not_to_answer'
-          )
-          .flatMap((u) => u.keyTokens.filter((t) => !eligibleWordsSet.has(t)))
-      );
+      const excludedUnitsWithTokens = currentAudit.inventory.excludedFactUnits
+        .filter(
+          (u) =>
+            u.exclusionReason === 'excluded_by_interviewee' ||
+            u.exclusionReason === 'prefer_not_to_answer'
+        )
+        .map((u) => ({
+          unitId: u.unitId,
+          uniqueTokens: u.keyTokens.filter((t) => !eligibleWordsSet.has(t)),
+        }))
+        .filter((x) => x.uniqueTokens.length > 0);
 
       const sanitizeSurfaceParagraph = (text: string): string => {
         const sentences = (text || '')
           .split(/(?<=[.!?…])\s+/)
           .map((s) => s.trim())
           .filter(Boolean);
-        const kept = sentences.filter((s) => {
-          if (EXPLICIT_EXCLUSION_DIRECTIVE_RX.test(s)) return false;
+        const kept: string[] = [];
+        for (const s of sentences) {
+          if (EXPLICIT_EXCLUSION_DIRECTIVE_RX.test(s)) {
+            const pivotParts = s.split(EXCLUSION_PIVOT_CLAUSE_RX);
+            if (
+              pivotParts.length >= 2 &&
+              pivotParts[0].trim().length >= 12 &&
+              !EXPLICIT_EXCLUSION_DIRECTIVE_RX.test(pivotParts[0])
+            ) {
+              kept.push(/[.!?…]$/.test(pivotParts[0].trim()) ? pivotParts[0].trim() : `${pivotParts[0].trim()}.`);
+            }
+            continue;
+          }
           const words = normalizePlainAscii(s).split(/\s+/).filter(Boolean);
-          const bannedHits = words.filter((w) => bannedExcludedTokens.has(w));
-          return bannedHits.length === 0;
-        });
+          const leaksExcludedUnit = excludedUnitsWithTokens.some((ex) => {
+            const hits = ex.uniqueTokens.filter((t) => words.includes(t));
+            return ex.uniqueTokens.length === 1 ? hits.length === 1 : hits.length >= 2;
+          });
+          if (!leaksExcludedUnit) {
+            kept.push(s);
+          }
+        }
         return kept.join(' ').trim();
       };
 
@@ -7173,7 +8968,7 @@ export function repairManuscriptOmissions(params: {
       }
     }
 
-    // Step C: Sanitize sentences containing invented years, numbers, dialogues, or proper names
+    // Step C: Sanitize sentences containing invented years or unsupported explicit ages
     if ((currentAudit.report.veracityAudit?.inventedDataFlags || []).length > 0) {
       const validYearsSet = new Set(currentAudit.inventory.corpusValidYearsAndNumbers);
       for (const ch of workingManuscript.chapters) {
@@ -7208,7 +9003,7 @@ export function repairManuscriptOmissions(params: {
       }
     }
 
-    // Step D: Locally integrate each missing DocumentaryFactUnit into its planned chapter
+    // Step D: Locally integrate each missing or contradicted DocumentaryFactUnit cleanly into its planned chapter
     const missingIds = currentAudit.report.coverageAudit?.missingUnitIds || [];
     for (let mIdx = 0; mIdx < missingIds.length; mIdx++) {
       const missingId = missingIds[mIdx];
@@ -7230,10 +9025,10 @@ export function repairManuscriptOmissions(params: {
 
       const styledWithUncertainty = ensureUncertaintyPreservedInParagraphs(
         missingUnit.cleanText,
-        [styledText]
+        [styledText],
+        narrativeStyle
       )[0];
 
-      // Locate target chapter from editorialPlan or stage/dimensionKey
       const plannedChItem =
         editorialPlan.chapters.find((pc) => pc.assignedAnswerIds.includes(missingUnit.answerId)) ||
         editorialPlan.chapters.find((pc) => pc.stageKey === missingUnit.lifeStage) ||
@@ -7281,8 +9076,12 @@ export function repairManuscriptOmissions(params: {
       }
 
       if (targetCh) {
-        // Check if there is already a partial paragraph for this unit's answer in targetCh
         let mergedIntoExisting = false;
+        const traceEntry = (currentAudit.report.traceabilityMatrix || []).find(
+          (t) => t.unitId === missingUnit.unitId
+        );
+        const wasContradicted = traceEntry?.verificationStatus === 'contradicted';
+
         for (let pIdx = 0; pIdx < targetCh.paragraphs.length; pIdx++) {
           const paraWords = normalizePlainAscii(targetCh.paragraphs[pIdx])
             .split(/\s+/)
@@ -7291,10 +9090,12 @@ export function repairManuscriptOmissions(params: {
             doesTokenMatchCorpusWords(t, paraWords)
           );
           if (missingUnit.keyTokens.length >= 3 && overlap.length >= 2) {
-            targetCh.paragraphs[pIdx] = consolidateComplementarySentences(
-              targetCh.paragraphs[pIdx],
-              styledWithUncertainty
-            );
+            targetCh.paragraphs[pIdx] = wasContradicted
+              ? styledWithUncertainty
+              : consolidateComplementarySentences(
+                  targetCh.paragraphs[pIdx],
+                  styledWithUncertainty
+                );
             mergedIntoExisting = true;
             break;
           }
@@ -7322,7 +9123,35 @@ export function repairManuscriptOmissions(params: {
       }
     }
 
-    // Step E: Repair any remaining uncertainty violations in assigned chapters
+    // Step E: Editorial hygiene — clean Style C 1st-person leaks, oral fillers, deduplicate episodes, and split giant paragraphs
+    const seenCleanParaSamples: string[] = [];
+    for (const ch of workingManuscript.chapters) {
+      const cleanedParas: string[] = [];
+      for (const p of ch.paragraphs || []) {
+        const styleFixed = ensureParagraphConformsToStyle({
+          paragraph: p,
+          narrativeStyle,
+          speakerName: participantNames[0] || workingManuscript.authors || 'Protagonista',
+          isCouple,
+        });
+        if (!styleFixed) continue;
+        const isDup = seenCleanParaSamples.some(
+          (prev) =>
+            styleFixed.length >= 45 &&
+            prev.length >= 45 &&
+            areTestimoniesRedundantSameEpisode(prev, styleFixed)
+        );
+        if (isDup) continue;
+        seenCleanParaSamples.push(styleFixed);
+        for (const piece of splitLongParagraphAtSentences(styleFixed, 1100)) {
+          cleanedParas.push(piece);
+        }
+      }
+      ch.paragraphs = cleanedParas;
+      ch.paragraphIds = cleanedParas.map((_, idx) => `${ch.id}_p_${idx + 1}`);
+    }
+
+    // Step F: Repair any remaining uncertainty violations in assigned chapters
     for (const unit of currentAudit.inventory.eligibleFactUnits) {
       if (unit.uncertaintyExpressions.length === 0) continue;
       const targetCh =
@@ -7332,7 +9161,8 @@ export function repairManuscriptOmissions(params: {
       if (targetCh && targetCh.paragraphs.length > 0) {
         targetCh.paragraphs = ensureUncertaintyPreservedInParagraphs(
           unit.cleanText,
-          targetCh.paragraphs
+          targetCh.paragraphs,
+          narrativeStyle
         );
       }
     }
@@ -7349,6 +9179,7 @@ export function repairManuscriptOmissions(params: {
   return {
     manuscript: currentAudit.manuscript,
     report: currentAudit.report,
+    editorialAudit: currentAudit.editorialAudit,
     inventory: currentAudit.inventory,
     repairAttemptsUsed: attemptsUsed,
     repairedUnitIds: allRepairedUnitIds,

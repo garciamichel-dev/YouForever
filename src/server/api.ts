@@ -34,6 +34,11 @@ import {
 } from './emailService.ts';
 import { buildUserManualPdfBuffer } from './manualPdfBuilder.ts';
 import { normalizeCanonicalPublicOrigin } from '../logic/freeRegistration.ts';
+import {
+  bookJobManager,
+  sanitizeBookResultForParticipant,
+  toParticipantBookJobView,
+} from './bookJobManager.ts';
 
 export const apiRouter: Router = express.Router();
 apiRouter.use(express.json({ limit: '100mb' }));
@@ -1548,6 +1553,85 @@ apiRouter.post('/participant/finish', async (req: Request, res: Response) => {
   }
 });
 
+// Participant Book Studio: Start or resume background manuscript generation job
+apiRouter.post('/participant/book/jobs/start', async (req: Request, res: Response) => {
+  try {
+    const {
+      token,
+      narrativeStyle,
+      scope,
+      forceRefresh,
+      lockedPreviewManuscript,
+      lockedPreviewGroups,
+    } = req.body || {};
+    if (!token) {
+      res.status(400).json({ success: false, error: 'Tu código o enlace de acceso es requerido.' });
+      return;
+    }
+    const job = storage.startOrResumeParticipantBookJob({
+      plainToken: String(token),
+      narrativeStyle: narrativeStyle || 'first_person_literary',
+      scope: scope === 'preview' ? 'preview' : 'full',
+      forceRefresh: Boolean(forceRefresh),
+      lockedPreviewManuscript: lockedPreviewManuscript || null,
+      lockedPreviewGroups: lockedPreviewGroups || null,
+    });
+    res.json({ success: true, data: toParticipantBookJobView(job) });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
+// Participant Book Studio: Poll background manuscript generation job progress/result
+apiRouter.get('/participant/book/jobs/status', async (req: Request, res: Response) => {
+  try {
+    const token = typeof req.query.token === 'string' ? req.query.token : '';
+    const jobId = typeof req.query.jobId === 'string' ? req.query.jobId : undefined;
+    const narrativeStyle =
+      typeof req.query.narrativeStyle === 'string'
+        ? (req.query.narrativeStyle as any)
+        : undefined;
+    const scope =
+      req.query.scope === 'preview'
+        ? 'preview'
+        : req.query.scope === 'full'
+        ? 'full'
+        : undefined;
+
+    if (!token) {
+      res.status(400).json({ success: false, error: 'Tu código o enlace de acceso es requerido.' });
+      return;
+    }
+    const job = storage.getParticipantBookJobStatus({
+      plainToken: token,
+      jobId,
+      narrativeStyle,
+      scope,
+    });
+    res.json({ success: true, data: job ? toParticipantBookJobView(job) : null });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
+// Participant Book Studio: Cancel active background book generation job
+apiRouter.post('/participant/book/jobs/cancel', async (req: Request, res: Response) => {
+  try {
+    const { token, jobId } = req.body || {};
+    if (!token || !jobId) {
+      res.status(400).json({ success: false, error: 'Se requiere tu acceso y el identificador del avance.' });
+      return;
+    }
+    const job = storage.cancelParticipantBookJob({
+      plainToken: String(token),
+      jobId: String(jobId),
+    });
+    res.json({ success: true, data: job ? toParticipantBookJobView(job) : null });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
 // Participant Book Studio: Generate AI manuscript in chosen narrative style (A, B, or C)
 apiRouter.post('/participant/book/generate-manuscript', async (req: Request, res: Response) => {
   try {
@@ -1560,18 +1644,28 @@ apiRouter.post('/participant/book/generate-manuscript', async (req: Request, res
       lockedPreviewGroups,
     } = req.body;
     if (!token) {
-      res.status(400).json({ success: false, error: 'Token de invitación requerido.' });
+      res.status(400).json({ success: false, error: 'Tu código o enlace de acceso es requerido.' });
       return;
     }
-    const result = await storage.generateParticipantBookManuscript({
-      plainToken: token,
+    const job = storage.startOrResumeParticipantBookJob({
+      plainToken: String(token),
       narrativeStyle: narrativeStyle || 'first_person_literary',
       scope: scope === 'preview' ? 'preview' : 'full',
       forceRefresh: Boolean(forceRefresh),
       lockedPreviewManuscript: lockedPreviewManuscript || null,
       lockedPreviewGroups: lockedPreviewGroups || null,
     });
-    res.json({ success: true, data: result });
+    const settled = await bookJobManager.waitForJob(job.jobId);
+    if (!settled || settled.status === 'failed' || !settled.result) {
+      res.status(400).json({
+        success: false,
+        error:
+          settled?.error ||
+          'No pudimos reunir todos tus recuerdos en este momento. Por favor intenta nuevamente.',
+      });
+      return;
+    }
+    res.json({ success: true, data: sanitizeBookResultForParticipant(settled.result) });
   } catch (err: unknown) {
     res.status(400).json({ success: false, error: (err as Error).message });
   }

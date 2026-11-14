@@ -65,6 +65,7 @@ import {
   validateCompilationPdfRecord,
 } from '../logic/miEsenciaRules.ts';
 import {
+  BookGenerationReasonCode,
   ComposedChapterSectionBlock,
   DemoEditorialConfig,
   DemoInMemoryPhoto,
@@ -112,7 +113,14 @@ import {
   generateParticipantBookManuscriptWithAI,
   analyzeAndTranscribeAudioWithGemini,
   AudioQualityStatus,
+  BookBatchCheckpointPayload,
+  BookGenerationProgressEvent,
+  classifyBookFailureReasonCode,
 } from './geminiService.ts';
+import {
+  bookJobManager,
+  BookGenerationJobRecord,
+} from './bookJobManager.ts';
 
 try {
   setLogLevel('error');
@@ -144,7 +152,13 @@ export interface ManuscriptRecord {
   title: string;
   summary: string;
   content: string;
-  status: 'draft' | 'approved' | 'exported';
+  status: 'draft' | 'approved' | 'exported' | 'incomplete_draft';
+  isPartialMemoir?: boolean;
+  incompleteDraftNotice?: string;
+  internalReasonCode?: BookGenerationReasonCode;
+  diagnosticSummary?: string;
+  documentaryAudit?: any;
+  editorialAudit?: any;
   generatedAt: string;
   generatedBy: string;
 }
@@ -5021,6 +5035,11 @@ class StorageManager {
     lockedPreviewManuscript?: DemoManuscript | null;
     lockedPreviewGroups?: ComposedChapterSectionBlock[][] | null;
     forceRefresh?: boolean;
+    onProgress?: (event: BookGenerationProgressEvent) => void;
+    initialBatchCheckpoints?: Record<string, BookBatchCheckpointPayload>;
+    onBatchCheckpoint?: (batchIdx: number, checkpoint: BookBatchCheckpointPayload) => void;
+    isCancelled?: () => boolean;
+    maxRepairPasses?: number;
   }): Promise<{
     manuscript: DemoManuscript;
     chapterPhotos: Record<string, DemoInMemoryPhoto | null>;
@@ -5034,6 +5053,10 @@ class StorageManager {
     compilationPdfSha256?: string;
     cachedContextUsed?: boolean;
     activePromptVersionId?: string;
+    internalReasonCode?: BookGenerationReasonCode;
+    diagnosticSummary?: string;
+    batchesCompleted?: number;
+    totalBatches?: number;
   }> {
     const { interview } = this.resolveToken(params.plainToken);
     if (!interview.userDeclaredComplete) {
@@ -5086,7 +5109,7 @@ class StorageManager {
     if (!pdfValidation.valid || !compilationPdfRecord) {
       throw new Error(
         pdfValidation.reason ||
-          'No se pudo generar o verificar el PDF fuente del Compilado Testimonial Fidedigno. No se puede generar el libro sin el compilado válido; por favor reintenta la operación.'
+          'No se pudieron verificar tus recuerdos originales completos para preparar el libro. Por favor intenta nuevamente.'
       );
     }
 
@@ -5135,7 +5158,17 @@ class StorageManager {
       geminiModel,
       openaiModel,
       bookStructureMode,
+      onProgress: params.onProgress,
+      initialBatchCheckpoints: params.initialBatchCheckpoints,
+      onBatchCheckpoint: params.onBatchCheckpoint,
+      isCancelled: params.isCancelled,
+      maxRepairPasses: params.maxRepairPasses,
     });
+
+    const reasonCode =
+      result.internalReasonCode || result.manuscript?.internalReasonCode || null;
+    const diagnosticSummary =
+      result.diagnosticSummary || result.manuscript?.diagnosticSummary || null;
 
     await this.addAuditLog(
       'GENERATE_BOOK_MANUSCRIPT_FROM_COMPILATION_PDF',
@@ -5153,6 +5186,12 @@ class StorageManager {
         compilationPdfSha256: compilationPdfRecord.sha256Hash,
         activePromptVersionId: activeStylePromptConfig?.activeVersionId || 'default',
         cachedContextUsed: Boolean(result.cachedContextUsed),
+        generationStatus: result.manuscript?.generationStatus || result.manuscript?.status || 'generated',
+        coveragePercentage: result.manuscript?.documentaryAudit?.coveragePercentage ?? null,
+        batchesCompleted: result.batchesCompleted ?? null,
+        totalBatches: result.totalBatches ?? null,
+        internalReasonCode: reasonCode,
+        diagnosticSummary,
       }
     );
 
@@ -5181,7 +5220,104 @@ class StorageManager {
       compilationPdfSha256: result.compilationPdfSha256,
       cachedContextUsed: result.cachedContextUsed,
       activePromptVersionId: activeStylePromptConfig?.activeVersionId || 'default',
+      internalReasonCode: reasonCode || undefined,
+      diagnosticSummary: diagnosticSummary || undefined,
+      batchesCompleted: result.batchesCompleted,
+      totalBatches: result.totalBatches,
     };
+  }
+
+  public startOrResumeParticipantBookJob(params: {
+    plainToken: string;
+    narrativeStyle: DemoNarrativeStyleId;
+    scope?: 'preview' | 'full';
+    forceRefresh?: boolean;
+    lockedPreviewManuscript?: DemoManuscript | null;
+    lockedPreviewGroups?: ComposedChapterSectionBlock[][] | null;
+  }): BookGenerationJobRecord {
+    const { interview, participant } = this.resolveToken(params.plainToken);
+    if (!interview.userDeclaredComplete) {
+      throw new Error(
+        'Primero debes confirmar el cierre de tu historia para abrir el estudio de maquetación.'
+      );
+    }
+
+    const selectedStyle: DemoNarrativeStyleId = params.narrativeStyle || 'first_person_literary';
+    const scope: 'preview' | 'full' = params.scope === 'preview' ? 'preview' : 'full';
+
+    return bookJobManager.startOrResumeJob({
+      interviewId: interview.id,
+      participantId: participant.id,
+      narrativeStyle: selectedStyle,
+      scope,
+      forceRefresh: Boolean(params.forceRefresh),
+      executor: async (hooks) => {
+        return this.generateParticipantBookManuscript({
+          plainToken: params.plainToken,
+          narrativeStyle: selectedStyle,
+          scope,
+          forceRefresh: Boolean(params.forceRefresh),
+          lockedPreviewManuscript: params.lockedPreviewManuscript || null,
+          lockedPreviewGroups: params.lockedPreviewGroups || null,
+          onProgress: hooks.onProgress,
+          initialBatchCheckpoints: hooks.initialBatchCheckpoints,
+          onBatchCheckpoint: hooks.onBatchCheckpoint,
+          isCancelled: hooks.isCancelled,
+        });
+      },
+      onJobSettled: async (job) => {
+        if (job.status === 'failed' && job.internalReasonCode) {
+          await this.addAuditLog(
+            'BOOK_GENERATION_JOB_FAILED',
+            'interview',
+            interview.id,
+            participant.name || interview.title,
+            {
+              jobId: job.jobId,
+              narrativeStyle: job.narrativeStyle,
+              scope: job.scope,
+              completedBatches: job.completedBatches,
+              totalBatches: job.totalBatches,
+              internalReasonCode: job.internalReasonCode,
+              diagnosticSummary: job.diagnosticSummary || null,
+            }
+          );
+        }
+      },
+    });
+  }
+
+  public getParticipantBookJobStatus(params: {
+    plainToken: string;
+    jobId?: string;
+    narrativeStyle?: DemoNarrativeStyleId;
+    scope?: 'preview' | 'full';
+  }): BookGenerationJobRecord | null {
+    const { interview } = this.resolveToken(params.plainToken);
+    if (params.jobId) {
+      const job = bookJobManager.getJob(params.jobId);
+      if (!job || job.interviewId !== interview.id) {
+        return null;
+      }
+      return job;
+    }
+    return bookJobManager.findLatestJobForInterview({
+      interviewId: interview.id,
+      narrativeStyle: params.narrativeStyle,
+      scope: params.scope,
+    });
+  }
+
+  public cancelParticipantBookJob(params: {
+    plainToken: string;
+    jobId: string;
+  }): BookGenerationJobRecord | null {
+    const { interview } = this.resolveToken(params.plainToken);
+    const existing = bookJobManager.getJob(params.jobId);
+    if (!existing || existing.interviewId !== interview.id) {
+      throw new Error('La preparación solicitada no pertenece a esta entrevista.');
+    }
+    return bookJobManager.cancelJob(params.jobId);
   }
 
   private inFlightBookSaves: Set<string> = new Set();
@@ -5231,13 +5367,17 @@ class StorageManager {
       }
 
       if (
+        params.manuscript.generationStatus === 'incomplete_draft' ||
+        params.manuscript.status === 'incomplete_draft' ||
         params.manuscript.generationStatus === 'failed_ai' ||
         params.manuscript.generationStatus === 'failed_audit' ||
+        params.manuscript.generationStatus === 'error' ||
+        params.manuscript.aiGenerated === false ||
         !Array.isArray(params.manuscript.chapters) ||
         params.manuscript.chapters.length === 0
       ) {
         throw new Error(
-          'No se puede guardar un libro incompleto o con auditoría documental fallida. Por favor regenera el manuscrito.'
+          'Este manuscrito es un borrador incompleto y aún requiere revisión. Por favor vuelve a generar tu libro antes de guardarlo como versión definitiva.'
         );
       }
 
@@ -5247,33 +5387,38 @@ class StorageManager {
       );
       const isCouple = interview.storyMode === 'compartida' && participants.length >= 2;
 
-      // Strip any client-side forged approval status and perform mandatory server-side audit
+      // Strip any client-side forged approval status and perform mandatory server-side Dual Audit (Documentary + Editorial)
       const candidateForServerAudit: DemoManuscript = {
         ...params.manuscript,
         generationStatus: 'generated',
       };
 
-      let auditedForSave = auditAndApproveBookManuscript({
+      const auditedForSave = auditAndApproveBookManuscript({
         manuscript: candidateForServerAudit,
         answers,
         questions: questionsList,
       });
 
-      if (!auditedForSave.report.passed) {
-        auditedForSave = repairManuscriptOmissions({
-          manuscript: auditedForSave.manuscript,
-          answers,
-          questions: questionsList,
-          storyMode: isCouple ? 'compartida' : 'individual',
-          participantNames:
-            participants.length > 0 ? participants.map((p) => p.name) : [participant.name],
-          maxAttempts: 2,
+      if (!auditedForSave.report.passed || !auditedForSave.editorialAudit.passed) {
+        const blockDiag = classifyBookFailureReasonCode({
+          report: auditedForSave.report,
+          editorialAudit: auditedForSave.editorialAudit,
+          repairPassesAttempted: auditedForSave.report.repairAttemptsUsed || 0,
         });
-      }
-
-      if (!auditedForSave.report.passed) {
+        await this.addAuditLog(
+          'SAVE_BOOK_VERSION_BLOCKED',
+          'interview',
+          interview.id,
+          participant.name || interview.title,
+          {
+            narrativeStyle: params.narrativeStyle,
+            internalReasonCode: blockDiag.code,
+            diagnosticSummary: blockDiag.summary,
+            coveragePercentage: auditedForSave.report.coveragePercentage,
+          }
+        );
         throw new Error(
-          `El manuscrito no superó la auditoría documental obligatoria: ${auditedForSave.report.blockingDefects.join(' ')}`
+          'Tu manuscrito todavía tiene detalles pendientes de revisión para quedar completo. Por favor presiona nuevamente el botón para volver a intentarlo antes de guardarlo como versión final.'
         );
       }
 
@@ -5721,6 +5866,13 @@ class StorageManager {
     const versionNumber = maxExistingVersion + 1;
     const manuscriptId = `manu_${interviewId}_v${versionNumber}`;
 
+    const manuscriptStatus: ManuscriptRecord['status'] =
+      draft.generationStatus === 'approved'
+        ? 'approved'
+        : draft.generationStatus === 'incomplete_draft'
+        ? 'incomplete_draft'
+        : 'draft';
+
     const manuscript: ManuscriptRecord = {
       id: manuscriptId,
       interviewId,
@@ -5728,7 +5880,13 @@ class StorageManager {
       title: draft.title || interview.title,
       summary: draft.summary,
       content: draft.compiledMarkdown,
-      status: 'draft',
+      status: manuscriptStatus,
+      isPartialMemoir: draft.isPartialMemoir,
+      incompleteDraftNotice: draft.incompleteDraftNotice,
+      internalReasonCode: draft.internalReasonCode,
+      diagnosticSummary: draft.diagnosticSummary,
+      documentaryAudit: draft.documentaryAudit,
+      editorialAudit: draft.editorialAudit,
       generatedAt: new Date().toISOString(),
       generatedBy: performedBy,
     };
@@ -5740,6 +5898,11 @@ class StorageManager {
       interviewId,
       versionNumber,
       answersIncludedCount: answers.length,
+      generationStatus: draft.generationStatus,
+      isPartialMemoir: Boolean(draft.isPartialMemoir),
+      internalReasonCode: draft.internalReasonCode || null,
+      diagnosticSummary: draft.diagnosticSummary || null,
+      coveragePercentage: draft.documentaryAudit?.coveragePercentage ?? null,
     });
 
     return manuscript;
