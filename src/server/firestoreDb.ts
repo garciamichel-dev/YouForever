@@ -11,6 +11,7 @@ import {
   where,
   getDocFromServer,
   Firestore,
+  setLogLevel,
 } from 'firebase/firestore';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -24,6 +25,9 @@ export function getDb(): Firestore {
     const configPath = path.resolve(process.cwd(), 'firebase-applet-config.json');
     if (fs.existsSync(configPath)) {
       const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      try {
+        setLogLevel('error');
+      } catch {}
       const app = getApps().length > 0 ? getApp() : initializeApp(config);
       dbInstance = getFirestore(app, config.firestoreDatabaseId);
 

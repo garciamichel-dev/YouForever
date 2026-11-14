@@ -94,18 +94,34 @@ export interface MiEsenciaArchivedCompilationPdf {
 /**
  * Entidad B — Testimonios Originales Inmutables (mi_esencia_testimonies)
  */
+export interface MiEsenciaTestimonyPhotoAttachment {
+  id?: string;
+  questionId?: string;
+  fileName?: string;
+  mimeType?: string;
+  caption?: string;
+  dataUrl?: string;
+  imageUrl?: string;
+  participantName?: string;
+}
+
 export interface MiEsenciaTestimonyBlock {
   testimonyId: string;
   personId: string;
   avatarId: string;
   sourcePdfId: string;
   sourceAnswerId?: string;
+  sourceQuestionId?: string;
+  isAdditionalMemory?: boolean;
+  isFollowUp?: boolean;
+  participantName?: string;
   lifeStage: 'infancia' | 'juventud' | 'adultez' | 'madurez' | 'legado_general';
   topic: string;
   questionLiteral: string;
   answerLiteral: string;
   audioTranscriptionLiteral?: string;
   photoCaptionsLiteral?: string[];
+  photoAttachments?: MiEsenciaTestimonyPhotoAttachment[];
   entitiesMentioned: string[];
   keywords: string[];
   recordedAt: string;
@@ -1277,14 +1293,104 @@ export function extractTextFromUploadedPdfBase64(pdfBase64: string): string {
 }
 
 /**
- * Genera bajo demanda el PDF real «Compilado Testimonial Fidedigno» en Base64
- * con todas las preguntas y respuestas literales de la entrevista.
+/**
+ * Sanitiza texto para las fuentes estándar WinAnsi/Latin-1 de jsPDF,
+ * conservando íntegramente acentos españoles (áéíóúüñÁÉÍÓÚÜÑ¿¡) y evitando errores 500
+ * por glifos tipográficos o caracteres Unicode fuera de rango.
+ */
+export function sanitizePdfTextForJsPdf(input: unknown): string {
+  if (input === null || input === undefined) return '';
+  return String(input)
+    .replace(/[\u2018\u2019\u201A\u201B]/g, "'")
+    .replace(/[\u201C\u201D\u201E\u201F]/g, '"')
+    .replace(/[\u2013\u2014\u2015]/g, '-')
+    .replace(/\u2026/g, '...')
+    .replace(/\u2022/g, '-')
+    .replace(/\u00A0/g, ' ')
+    // Conservar caracteres ASCII imprimibles, saltos de línea y bloque Latin-1 Supplement (incluye áéíóúüñ¿¡«»)
+    .replace(/[^\x09\x0A\x0D\x20-\x7E\xA0-\xFF]/g, '')
+    .trim();
+}
+
+function detectJsPdfImageFormat(dataUrl: string, mimeType?: string): 'JPEG' | 'PNG' | null {
+  const clean = String(dataUrl || '').trim();
+  if (!clean) return null;
+  const lowerMime = String(mimeType || '').toLowerCase();
+  if (clean.startsWith('data:image/png') || lowerMime.includes('png')) {
+    return 'PNG';
+  }
+  if (
+    clean.startsWith('data:image/jpeg') ||
+    clean.startsWith('data:image/jpg') ||
+    clean.startsWith('data:image/webp') ||
+    lowerMime.includes('jpeg') ||
+    lowerMime.includes('jpg')
+  ) {
+    return 'JPEG';
+  }
+  if (clean.startsWith('data:image/')) {
+    return 'JPEG';
+  }
+  return null;
+}
+
+/**
+ * Verifica que el registro del PDF «Compilado Testimonial Fidedigno» exista,
+ * tenga un binario PDF válido (cabecera %PDF-) y contenga la información testimonial.
+ */
+export function validateCompilationPdfRecord(
+  pdf: Partial<MiEsenciaArchivedCompilationPdf> | null | undefined
+): { valid: boolean; reason?: string } {
+  if (!pdf) {
+    return {
+      valid: false,
+      reason: 'No se encontró el documento fuente Compilado Testimonial Fidedigno.',
+    };
+  }
+  const cleanB64 = String(pdf.pdfBase64 || '')
+    .replace(/^data:application\/pdf;base64,/i, '')
+    .trim();
+  if (!cleanB64 || cleanB64.length < 100) {
+    return {
+      valid: false,
+      reason: 'El archivo PDF del Compilado Testimonial Fidedigno está vacío o incompleto.',
+    };
+  }
+  try {
+    const buf = Buffer.from(cleanB64, 'base64');
+    const header = buf.subarray(0, 5).toString('ascii');
+    if (header !== '%PDF-') {
+      return {
+        valid: false,
+        reason: 'El binario del Compilado Testimonial Fidedigno no tiene una cabecera PDF válida.',
+      };
+    }
+  } catch {
+    return {
+      valid: false,
+      reason: 'No fue posible decodificar el archivo PDF del Compilado Testimonial Fidedigno.',
+    };
+  }
+  if (!pdf.rawTextContent || String(pdf.rawTextContent).trim().length === 0) {
+    return {
+      valid: false,
+      reason: 'El Compilado Testimonial Fidedigno no contiene testimonios registrados.',
+    };
+  }
+  return { valid: true };
+}
+
+/**
+ * Genera bajo demanda el PDF real «Compilado Testimonial Fidedigno (Preguntas, Respuestas, Audios y Fotos)»
+ * en Base64 con todas las preguntas y respuestas originales, testimonios escritos, transcripciones de voz,
+ * fotografías asociadas con sus descripciones e información adicional incorporada posteriormente.
  */
 export function buildCompilationPdfBase64(params: {
   interviewTitle: string;
   participantNames: string[];
   rawTextContent: string;
   testimonies: MiEsenciaTestimonyBlock[];
+  photos?: MiEsenciaTestimonyPhotoAttachment[];
 }): { pdfBase64: string; sha256Hash: string } {
   const doc = new jsPDF({
     orientation: 'portrait',
@@ -1296,86 +1402,278 @@ export function buildCompilationPdfBase64(params: {
   const pageHeight = doc.internal.pageSize.getHeight();
   const margin = 18;
   const contentWidth = pageWidth - margin * 2;
-  let y = 24;
+  let y = 22;
+
+  const ensureSpace = (neededMm: number) => {
+    if (y + neededMm > pageHeight - 20) {
+      doc.addPage();
+      y = 22;
+    }
+  };
+
+  const safeTitle = sanitizePdfTextForJsPdf(params.interviewTitle || 'Entrevista Biográfica YouForever');
+  const safeParticipants = (params.participantNames || [])
+    .map((n) => sanitizePdfTextForJsPdf(n))
+    .filter(Boolean);
 
   doc.setFont('times', 'bold');
-  doc.setFontSize(18);
+  doc.setFontSize(16.5);
   doc.setTextColor(28, 25, 23);
-  doc.text('Compilado Testimonial Fidedigno', margin, y);
-  y += 8;
+  doc.text(
+    sanitizePdfTextForJsPdf('Compilado Testimonial Fidedigno (Preguntas, Respuestas, Audios y Fotos)'),
+    margin,
+    y
+  );
+  y += 7;
 
   doc.setFont('times', 'italic');
-  doc.setFontSize(11);
+  doc.setFontSize(10.5);
   doc.setTextColor(87, 83, 78);
-  doc.text('Preguntas, Respuestas Literales, Transcripciones de Audio y Pies de Foto', margin, y);
-  y += 8;
+  doc.text(
+    sanitizePdfTextForJsPdf(
+      'Documento fuente oficial: Testimonios originales, transcripciones de voz, fotografías y descripciones'
+    ),
+    margin,
+    y
+  );
+  y += 7;
 
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(9.5);
-  doc.text(`Entrevista: ${params.interviewTitle}`, margin, y);
+  doc.setTextColor(41, 37, 36);
+  doc.text(`Entrevista: ${safeTitle}`, margin, y);
   y += 5;
-  doc.text(`Participante(s): ${params.participantNames.join(' & ')}`, margin, y);
+  doc.text(
+    `Participante(s): ${safeParticipants.length > 0 ? safeParticipants.join(' & ') : 'Participante'}`,
+    margin,
+    y
+  );
   y += 5;
-  doc.text(`Fecha de compilación: ${new Date().toLocaleDateString('es-MX')}`, margin, y);
-  y += 8;
+  doc.text(
+    `Fecha de compilacion: ${sanitizePdfTextForJsPdf(new Date().toLocaleDateString('es-MX'))}`,
+    margin,
+    y
+  );
+  y += 7;
 
   doc.setDrawColor(180, 160, 120);
   doc.line(margin, y, pageWidth - margin, y);
   y += 8;
 
-  for (let i = 0; i < params.testimonies.length; i++) {
-    const t = params.testimonies[i];
-    if (y > pageHeight - 35) {
-      doc.addPage();
-      y = 22;
+  const renderedPhotoIds = new Set<string>();
+
+  const renderPhotoBlock = (
+    photo: MiEsenciaTestimonyPhotoAttachment,
+    photoIndexLabel: string
+  ) => {
+    if (photo.id) {
+      renderedPhotoIds.add(photo.id);
+    }
+    const cleanCaption = sanitizePdfTextForJsPdf(
+      photo.caption || 'Sin descripción registrada'
+    );
+    const cleanDataUrl = String(photo.dataUrl || '').trim();
+    const imgFormat = detectJsPdfImageFormat(cleanDataUrl, photo.mimeType);
+
+    if (cleanDataUrl && imgFormat) {
+      ensureSpace(64);
+      let imageRendered = false;
+      try {
+        const imgWidth = 72;
+        const imgHeight = 50;
+        doc.addImage(cleanDataUrl, imgFormat, margin, y, imgWidth, imgHeight);
+        y += imgHeight + 4;
+        imageRendered = true;
+      } catch {
+        imageRendered = false;
+      }
+      if (!imageRendered) {
+        ensureSpace(10);
+      }
+    } else {
+      ensureSpace(12);
     }
 
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(8.5);
+    doc.setTextColor(120, 53, 15);
+    doc.text(sanitizePdfTextForJsPdf(photoIndexLabel), margin, y);
+    y += 4.5;
+
+    doc.setFont('times', 'italic');
+    doc.setFontSize(9.5);
+    doc.setTextColor(68, 64, 60);
+    const capLines: string[] = doc.splitTextToSize(
+      `Descripcion de fotografia: ${cleanCaption}`,
+      contentWidth
+    );
+    for (const line of capLines) {
+      ensureSpace(5);
+      doc.text(sanitizePdfTextForJsPdf(line), margin, y);
+      y += 4.5;
+    }
+    y += 3;
+  };
+
+  const effectiveTestimonies: MiEsenciaTestimonyBlock[] =
+    Array.isArray(params.testimonies) && params.testimonies.length > 0
+      ? params.testimonies
+      : parseCompilationTextIntoTestimonies({
+          rawText: params.rawTextContent || '',
+          avatarId: 'avatar_pdf',
+          personId: 'person_pdf',
+          sourcePdfId: 'pdf_temp',
+        });
+
+  for (let i = 0; i < effectiveTestimonies.length; i++) {
+    const t = effectiveTestimonies[i];
+    ensureSpace(28);
+
+    const stageLabel = sanitizePdfTextForJsPdf(
+      t.isAdditionalMemory
+        ? 'INFORMACION ADICIONAL INCORPORADA POSTERIORMENTE'
+        : `ETAPA: ${String(t.lifeStage || 'legado_general').toUpperCase()}${
+            t.isFollowUp ? ' (PROFUNDIZACION)' : ''
+          }`
+    );
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8.5);
     doc.setTextColor(146, 64, 14);
-    doc.text(`ETAPA: ${t.lifeStage.toUpperCase()} • REGISTRO #${i + 1}`, margin, y);
+    doc.text(`${stageLabel} - REGISTRO #${i + 1}`, margin, y);
     y += 5;
 
+    if (t.participantName) {
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8.5);
+      doc.setTextColor(87, 83, 78);
+      doc.text(
+        `Participante: ${sanitizePdfTextForJsPdf(t.participantName)}`,
+        margin,
+        y
+      );
+      y += 4.5;
+    }
+
+    const questionText = sanitizePdfTextForJsPdf(
+      t.questionLiteral ||
+        (t.isAdditionalMemory
+          ? 'Recuerdo o informacion adicional aportada libremente'
+          : `Pregunta #${i + 1}`)
+    );
     doc.setFont('times', 'bold');
     doc.setFontSize(11);
     doc.setTextColor(28, 25, 23);
-    const qLines = doc.splitTextToSize(`Pregunta: ${t.questionLiteral}`, contentWidth);
-    doc.text(qLines, margin, y);
-    y += qLines.length * 5 + 2;
+    const qLines: string[] = doc.splitTextToSize(`Pregunta: ${questionText}`, contentWidth);
+    for (const line of qLines) {
+      ensureSpace(5.5);
+      doc.text(sanitizePdfTextForJsPdf(line), margin, y);
+      y += 5;
+    }
+    y += 1.5;
 
-    doc.setFont('times', 'normal');
-    doc.setFontSize(10.5);
-    doc.setTextColor(41, 37, 36);
-    const aLines = doc.splitTextToSize(`Respuesta literal: ${t.answerLiteral}`, contentWidth);
-    for (const line of aLines) {
-      if (y > pageHeight - 20) {
-        doc.addPage();
-        y = 22;
+    const answerText = sanitizePdfTextForJsPdf(t.answerLiteral || '');
+    if (answerText) {
+      doc.setFont('times', 'normal');
+      doc.setFontSize(10.5);
+      doc.setTextColor(41, 37, 36);
+      const aLines: string[] = doc.splitTextToSize(
+        `Respuesta literal: ${answerText}`,
+        contentWidth
+      );
+      for (const line of aLines) {
+        ensureSpace(5);
+        doc.text(sanitizePdfTextForJsPdf(line), margin, y);
+        y += 4.8;
       }
-      doc.text(line, margin, y);
-      y += 4.8;
     }
 
-    if (t.audioTranscriptionLiteral) {
-      y += 2;
+    const audioTranscription = sanitizePdfTextForJsPdf(t.audioTranscriptionLiteral || '');
+    if (audioTranscription) {
+      y += 1.5;
       doc.setFont('times', 'italic');
       doc.setFontSize(9.5);
       doc.setTextColor(87, 83, 78);
-      const audioLines = doc.splitTextToSize(
-        `Transcripción de voz literal: ${t.audioTranscriptionLiteral}`,
+      const audioLines: string[] = doc.splitTextToSize(
+        `Transcripcion de voz literal: ${audioTranscription}`,
         contentWidth
       );
       for (const line of audioLines) {
-        if (y > pageHeight - 20) {
-          doc.addPage();
-          y = 22;
-        }
-        doc.text(line, margin, y);
+        ensureSpace(5);
+        doc.text(sanitizePdfTextForJsPdf(line), margin, y);
         y += 4.5;
       }
     }
 
+    // Fotografías asociadas a este testimonio
+    const blockPhotos: MiEsenciaTestimonyPhotoAttachment[] = [];
+    if (Array.isArray(t.photoAttachments) && t.photoAttachments.length > 0) {
+      blockPhotos.push(...t.photoAttachments);
+    } else if (Array.isArray(params.photos) && params.photos.length > 0 && t.sourceQuestionId) {
+      const matching = params.photos.filter(
+        (p) => p.questionId === t.sourceQuestionId && (!p.id || !renderedPhotoIds.has(p.id))
+      );
+      blockPhotos.push(...matching);
+    }
+
+    if (blockPhotos.length > 0) {
+      y += 2;
+      for (let pIdx = 0; pIdx < blockPhotos.length; pIdx++) {
+        renderPhotoBlock(
+          blockPhotos[pIdx],
+          `Fotografia asociada #${pIdx + 1} (Registro #${i + 1})`
+        );
+      }
+    } else if (Array.isArray(t.photoCaptionsLiteral) && t.photoCaptionsLiteral.length > 0) {
+      y += 2;
+      for (let cIdx = 0; cIdx < t.photoCaptionsLiteral.length; cIdx++) {
+        const cap = sanitizePdfTextForJsPdf(t.photoCaptionsLiteral[cIdx]);
+        if (!cap) continue;
+        ensureSpace(9);
+        doc.setFont('times', 'italic');
+        doc.setFontSize(9.5);
+        doc.setTextColor(68, 64, 60);
+        const capLines: string[] = doc.splitTextToSize(
+          `Fotografia asociada #${cIdx + 1} - Descripcion: ${cap}`,
+          contentWidth
+        );
+        for (const line of capLines) {
+          ensureSpace(5);
+          doc.text(sanitizePdfTextForJsPdf(line), margin, y);
+          y += 4.5;
+        }
+      }
+    }
+
+    y += 5;
+    doc.setDrawColor(231, 229, 228);
+    doc.line(margin, y, pageWidth - margin, y);
     y += 6;
+  }
+
+  // Incluir cualquier fotografía adicional de la entrevista que no haya quedado vinculada a un bloque específico
+  if (Array.isArray(params.photos) && params.photos.length > 0) {
+    const remainingPhotos = params.photos.filter(
+      (p) => !p.id || !renderedPhotoIds.has(p.id)
+    );
+    if (remainingPhotos.length > 0) {
+      ensureSpace(25);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(10);
+      doc.setTextColor(146, 64, 14);
+      doc.text(
+        sanitizePdfTextForJsPdf('FOTOGRAFIAS ADICIONALES ASOCIADAS AL TESTIMONIO'),
+        margin,
+        y
+      );
+      y += 6;
+      for (let idx = 0; idx < remainingPhotos.length; idx++) {
+        renderPhotoBlock(
+          remainingPhotos[idx],
+          `Fotografia testimonial complementaria #${idx + 1}`
+        );
+      }
+    }
   }
 
   const arrayBuf = doc.output('arraybuffer');

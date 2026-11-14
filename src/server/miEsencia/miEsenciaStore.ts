@@ -7,12 +7,10 @@ import {
   getFirestore,
   collection,
   doc,
-  getDocs,
-  setDoc,
-  deleteDoc,
 } from 'firebase/firestore';
 import firebaseConfig from '../../../firebase-applet-config.json';
 import { storage } from '../storage.ts';
+import { firestoreTelemetry } from '../firestoreTelemetry.ts';
 import { generateQACompilationMarkdown } from '../backupService.ts';
 import {
   MiEsenciaGlobalConfig,
@@ -51,11 +49,13 @@ import {
   parseCompilationTextIntoTestimonies,
   extractTextFromUploadedPdfBase64,
   buildCompilationPdfBase64,
+  validateCompilationPdfRecord,
   detectConversationalIntentAndPrivacy,
   retrieveRelevantTestimonies,
   sanitizeAvatarResponseText,
   MiEsenciaReflectionTheme,
   MiEsenciaConfirmedInterlocutorIdentity,
+  MiEsenciaTestimonyPhotoAttachment,
   isGenericAdministrativeInterlocutorName,
   buildVariedInitialReflectiveGreeting,
   identifyInterlocutorFromLegacy,
@@ -162,6 +162,8 @@ class MiEsenciaStore {
   };
 
   private initialized = false;
+  private lastFirestoreSyncAt: string | null = null;
+  private activeSyncPromise: Promise<void> | null = null;
 
   constructor() {
     for (const p of DEFAULT_MI_ESENCIA_PLANS) {
@@ -248,8 +250,19 @@ class MiEsenciaStore {
         plans: Array.from(this.plans.values()),
         subscriptions: Array.from(this.subscriptions.values()),
         persons: Array.from(this.persons.values()),
-        compilationPdfs: Array.from(this.compilationPdfs.values()),
-        testimonies: Array.from(this.testimonies.values()),
+        compilationPdfs: Array.from(this.compilationPdfs.values()).map((pdf) => ({
+          ...pdf,
+          pdfBase64: pdf.pdfBase64 && pdf.pdfBase64.length < 120_000 ? pdf.pdfBase64 : '',
+        })),
+        testimonies: Array.from(this.testimonies.values()).map((t) => ({
+          ...t,
+          photoAttachments: t.photoAttachments
+            ? t.photoAttachments.map((pa) => ({
+                ...pa,
+                dataUrl: pa.dataUrl && pa.dataUrl.length < 25_000 ? pa.dataUrl : undefined,
+              }))
+            : undefined,
+        })),
         relations: Array.from(this.relations.values()),
         interlocutors: Array.from(this.interlocutors.values()),
         credentials: Array.from(this.credentials.values()),
@@ -263,6 +276,7 @@ class MiEsenciaStore {
         promptLibrary: Array.from(this.promptLibrary.values()),
         avatarPromptVersions: Array.from(this.avatarPromptVersions.values()),
         fallbackLogs: Array.from(this.fallbackLogs.values()).slice(-100),
+        lastFirestoreSyncAt: this.lastFirestoreSyncAt,
       };
       fs.writeFileSync(this.getDiskPath(), JSON.stringify(payload, null, 2), 'utf-8');
     } catch (err) {
@@ -385,8 +399,10 @@ class MiEsenciaStore {
       if (Array.isArray(raw.fallbackLogs)) {
         for (const fl of raw.fallbackLogs) this.fallbackLogs.set(fl.logId, fl);
       }
+      if (typeof raw.lastFirestoreSyncAt === 'string') {
+        this.lastFirestoreSyncAt = raw.lastFirestoreSyncAt;
+      }
       this.applyDeletedRegistryFilters();
-      this.syncAllPersonsAndPdfs();
     } catch (err) {
       console.warn('[MiEsenciaStore] Disk load warning:', err);
     }
@@ -401,7 +417,12 @@ class MiEsenciaStore {
       if (byteSize > 800_000) {
         return;
       }
-      await setDoc(doc(serverDb, collectionName, docId), sanitized);
+      await firestoreTelemetry.trackedSetDoc(
+        serverDb,
+        doc(serverDb, collectionName, docId),
+        sanitized,
+        'miEsencia'
+      );
     } catch (err: any) {
       console.warn(
         `[MiEsenciaStore Firestore Note] Could not persist ${collectionName}/${docId}:`,
@@ -413,7 +434,11 @@ class MiEsenciaStore {
   private async removeDoc(collectionName: string, docId: string): Promise<void> {
     this.saveToDisk();
     try {
-      await deleteDoc(doc(serverDb, collectionName, docId));
+      await firestoreTelemetry.trackedDeleteDoc(
+        serverDb,
+        doc(serverDb, collectionName, docId),
+        'miEsencia'
+      );
     } catch (err: any) {
       console.warn(
         `[MiEsenciaStore Firestore Note] Could not delete ${collectionName}/${docId}:`,
@@ -423,24 +448,214 @@ class MiEsenciaStore {
   }
 
   /**
+   * Construye los bloques de testimonio completos (incluyendo preguntas/respuestas originales,
+   * transcripciones de voz editadas, recuerdos adicionales y fotografías con sus descripciones e imágenes en base64)
+   * a partir de los registros de una entrevista.
+   */
+  private buildTestimonyBlocksFromInterviewData(params: {
+    interviewId: string;
+    personId: string;
+    avatarId: string;
+    pdfId: string;
+    participantIdFilter?: string;
+    multipleParticipants?: boolean;
+  }): {
+    blocks: MiEsenciaTestimonyBlock[];
+    photosWithDataUrl: MiEsenciaTestimonyPhotoAttachment[];
+    rawMarkdown: string;
+  } {
+    const nowIso = new Date().toISOString();
+    const allInterviewAnswers = storage.getAnswersForInterview(params.interviewId);
+    const questions = storage.getQuestions();
+    const questionMap = new Map(questions.map((q) => [q.id, q]));
+    const allPhotos = storage.getPhotosForInterview(params.interviewId);
+    const photoMap = new Map(allPhotos.map((p) => [p.id, p]));
+    const allAudios = storage.getAudiosForInterview(params.interviewId);
+    const audioMap = new Map(allAudios.map((a) => [a.id, a]));
+
+    const filteredAnswers =
+      params.multipleParticipants && params.participantIdFilter
+        ? allInterviewAnswers.filter(
+            (a) => a.participantId === params.participantIdFilter || !a.participantId
+          )
+        : allInterviewAnswers;
+
+    const blocks: MiEsenciaTestimonyBlock[] = [];
+    const collectedPhotosMap = new Map<string, MiEsenciaTestimonyPhotoAttachment>();
+
+    for (const ans of filteredAnswers) {
+      if (ans.notRecalled) continue;
+      const qObj = questionMap.get(ans.questionId);
+      const parentQ = ans.parentQuestionId ? questionMap.get(ans.parentQuestionId) : undefined;
+      const qLiteral =
+        ans.questionText ||
+        qObj?.text ||
+        (ans.isAdditionalMemory
+          ? 'Información adicional incorporada posteriormente'
+          : 'Pregunta biográfica de entrevista');
+      const stage = (
+        qObj?.lifeStage ||
+        parentQ?.lifeStage ||
+        'legado_general'
+      ) as MiEsenciaTestimonyBlock['lifeStage'];
+
+      const voiceList =
+        ans.audioRecordings && ans.audioRecordings.length > 0
+          ? ans.audioRecordings
+          : ans.audio
+          ? [ans.audio]
+          : [];
+
+      const audioTranscriptions = voiceList
+        .map((v) => {
+          if (!v) return '';
+          const storedAud = v.id ? audioMap.get(v.id) : undefined;
+          return String(v.transcription || storedAud?.transcription || '').trim();
+        })
+        .filter(Boolean)
+        .join(' ');
+
+      const directPhotos = Array.isArray(ans.photos) ? ans.photos.filter(Boolean) : [];
+      const linkedByQuestion = allPhotos.filter(
+        (p) =>
+          p &&
+          p.questionId === ans.questionId &&
+          !directPhotos.some((dp) => dp.id === p.id)
+      );
+      const combinedAnsPhotos = [...directPhotos, ...linkedByQuestion];
+
+      const photoAttachments: MiEsenciaTestimonyPhotoAttachment[] = [];
+      const photoCaptions: string[] = [];
+
+      for (const ph of combinedAnsPhotos) {
+        const storedPh = (ph?.id ? photoMap.get(ph.id) : undefined) || (ph as any);
+        let resolvedDataUrl = String(storedPh?.dataUrl || (ph as any)?.dataUrl || '').trim();
+        if (!resolvedDataUrl && storedPh?.id) {
+          const diskBuf = storage.getPhotoBuffer(storedPh.id);
+          if (diskBuf && diskBuf.buffer.length > 0) {
+            resolvedDataUrl = `data:${diskBuf.mimeType || 'image/jpeg'};base64,${diskBuf.buffer.toString('base64')}`;
+          }
+        }
+        const caption = String(storedPh?.caption || ph?.caption || '').trim();
+        if (caption) {
+          photoCaptions.push(caption);
+        }
+        const attachment: MiEsenciaTestimonyPhotoAttachment = {
+          id: storedPh?.id || ph?.id,
+          questionId: ans.questionId,
+          fileName: storedPh?.fileName || ph?.fileName,
+          mimeType: storedPh?.mimeType || ph?.mimeType || 'image/jpeg',
+          caption: caption || 'Sin descripción registrada',
+          dataUrl: resolvedDataUrl || undefined,
+          imageUrl: storedPh?.imageUrl || ph?.imageUrl,
+          participantName: storedPh?.participantName || ans.participantName,
+        };
+        photoAttachments.push(attachment);
+        if (attachment.id) {
+          collectedPhotosMap.set(attachment.id, attachment);
+        }
+      }
+
+      const cleanAnswerLiteral = String(ans.answerText || '').trim();
+      // Si el testimonio tiene texto escrito, transcripción de voz o fotografías adjuntas, incluirlo siempre
+      if (!cleanAnswerLiteral && !audioTranscriptions && photoAttachments.length === 0) {
+        continue;
+      }
+
+      const effectiveAnswerLiteral =
+        cleanAnswerLiteral ||
+        audioTranscriptions ||
+        (photoCaptions.length > 0
+          ? `[Testimonio fotográfico: ${photoCaptions.join(' • ')}]`
+          : '[Testimonio registrado]');
+
+      const words = `${qLiteral} ${effectiveAnswerLiteral} ${audioTranscriptions} ${photoCaptions.join(' ')}`
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .split(/[^a-z0-9]+/)
+        .filter((w) => w.length >= 3);
+
+      blocks.push({
+        testimonyId: `test_${crypto.randomBytes(5).toString('hex')}`,
+        personId: params.personId,
+        avatarId: params.avatarId,
+        sourcePdfId: params.pdfId,
+        sourceAnswerId: ans.id,
+        sourceQuestionId: ans.questionId,
+        isAdditionalMemory: Boolean(ans.isAdditionalMemory),
+        isFollowUp: Boolean(ans.isFollowUp),
+        participantName: ans.participantName,
+        lifeStage: stage,
+        topic: qObj?.topic || (ans.isAdditionalMemory ? 'informacion_adicional' : stage),
+        questionLiteral: qLiteral,
+        answerLiteral: effectiveAnswerLiteral,
+        audioTranscriptionLiteral: audioTranscriptions || undefined,
+        photoCaptionsLiteral: photoCaptions.length > 0 ? photoCaptions : undefined,
+        photoAttachments: photoAttachments.length > 0 ? photoAttachments : undefined,
+        entitiesMentioned: [],
+        keywords: Array.from(new Set(words)).slice(0, 35),
+        recordedAt: ans.updatedAt || ans.createdAt || nowIso,
+        immutable: true,
+      });
+    }
+
+    const photosWithDataUrl = Array.from(collectedPhotosMap.values());
+
+    const rawMarkdown = blocks
+      .map((t, i) => {
+        const typeNote = t.isAdditionalMemory
+          ? ' [Información adicional incorporada posteriormente]'
+          : t.isFollowUp
+          ? ' [Profundización]'
+          : '';
+        const partNote = t.participantName ? `\n**Participante:** ${t.participantName}` : '';
+        const audioNote = t.audioTranscriptionLiteral
+          ? `\n\nTranscripción de voz literal: ${t.audioTranscriptionLiteral}`
+          : '';
+        const photoNote =
+          t.photoAttachments && t.photoAttachments.length > 0
+            ? `\n\nFotografías asociadas (${t.photoAttachments.length}):\n` +
+              t.photoAttachments
+                .map(
+                  (p, pIdx) =>
+                    `- Fotografía #${pIdx + 1}: Descripción: «${p.caption || 'Sin descripción'}»`
+                )
+                .join('\n')
+            : t.photoCaptionsLiteral && t.photoCaptionsLiteral.length > 0
+            ? `\n\nFotografías asociadas:\n` +
+              t.photoCaptionsLiteral
+                .map((cap, pIdx) => `- Fotografía #${pIdx + 1}: Descripción: «${cap}»`)
+                .join('\n')
+            : '';
+        return `### ${i + 1}. ${t.questionLiteral}${typeNote}${partNote}\n**Respuesta:**\n${t.answerLiteral}${audioNote}${photoNote}`;
+      })
+      .join('\n\n');
+
+    return {
+      blocks,
+      photosWithDataUrl,
+      rawMarkdown,
+    };
+  }
+
+  /**
    * Garantiza que cada Perfil Biográfico (Entidad A) tenga su propio archivo PDF Compilado
    * asignado (sourcePdfId -> MiEsenciaArchivedCompilationPdf) y que sus testimonios de Nivel A
    * correspondan estrictamente a las respuestas reales de su entrevista o PDF subido.
    */
-  public syncPersonWithAssignedPdfAndInterview(personId: string): void {
+  public syncPersonWithAssignedPdfAndInterview(personId: string, skipDiskSave = false): boolean {
     const person = this.persons.get(personId);
-    if (!person) return;
+    if (!person) return false;
 
     const nowIso = new Date().toISOString();
     const interview =
-      person.sourceInterviewId && person.sourceInterviewId !== 'manual' && person.sourceInterviewId !== 'uploaded_pdf'
+      person.sourceInterviewId &&
+      person.sourceInterviewId !== 'manual' &&
+      person.sourceInterviewId !== 'uploaded_pdf'
         ? storage.getInterviewById(person.sourceInterviewId)
         : undefined;
     const participants = interview ? storage.getParticipantsForInterview(interview.id) : [];
-    const allInterviewAnswers = interview ? storage.getAnswersForInterview(interview.id) : [];
-    const questions = storage.getQuestions();
-    const questionMap = new Map(questions.map((q) => [q.id, q]));
-    const photos = interview ? storage.getPhotosForInterview(interview.id) : [];
 
     // Verificar si otro perfil distinto comparte el mismo sourcePdfId; cada perfil debe tener su propio PDF
     const otherPersonSharingPdf = Array.from(this.persons.values()).find(
@@ -461,27 +676,51 @@ class MiEsenciaStore {
         'Quiero que mi familia siempre recuerde cuánto los amo, el valor del trabajo honesto'
       );
 
-    // Filtrar respuestas reales de la entrevista que corresponden a este participante
-    const personInterviewAnswers =
-      allInterviewAnswers.length > 0
-        ? participants.length > 1 && person.sourceParticipantId
-          ? allInterviewAnswers.filter(
-              (a) => a.participantId === person.sourceParticipantId || !a.participantId
-            )
-          : allInterviewAnswers
-        : [];
+    let builtFromInterview:
+      | {
+          blocks: MiEsenciaTestimonyBlock[];
+          photosWithDataUrl: MiEsenciaTestimonyPhotoAttachment[];
+          rawMarkdown: string;
+        }
+      | undefined;
 
-    const syncedAnswerCount = personTestimonies.filter((t) => Boolean(t.sourceAnswerId)).length;
-    const shouldRebuildFromInterview =
-      personInterviewAnswers.length > 0 &&
-      (personTestimonies.length === 0 ||
-        hasOnlyGenericFallback ||
-        (syncedAnswerCount > 0 && syncedAnswerCount !== personInterviewAnswers.length));
+    if (interview) {
+      builtFromInterview = this.buildTestimonyBlocksFromInterviewData({
+        interviewId: interview.id,
+        personId: person.personId,
+        avatarId: person.avatarId,
+        pdfId: dedicatedPdfId,
+        participantIdFilter: person.sourceParticipantId,
+        multipleParticipants: participants.length > 1,
+      });
+    }
+
+    const existingAnswersDigest = personTestimonies
+      .map(
+        (t) =>
+          `${t.sourceAnswerId || ''}:${t.questionLiteral}:${t.answerLiteral}:${t.audioTranscriptionLiteral || ''}:${(t.photoCaptionsLiteral || []).join('|')}`
+      )
+      .join('||');
+    const latestInterviewDigest = builtFromInterview
+      ? builtFromInterview.blocks
+          .map(
+            (t) =>
+              `${t.sourceAnswerId || ''}:${t.questionLiteral}:${t.answerLiteral}:${t.audioTranscriptionLiteral || ''}:${(t.photoCaptionsLiteral || []).join('|')}`
+          )
+          .join('||')
+      : '';
+
+    const shouldRebuildFromInterview = Boolean(
+      builtFromInterview &&
+        builtFromInterview.blocks.length > 0 &&
+        (personTestimonies.length === 0 ||
+          hasOnlyGenericFallback ||
+          existingAnswersDigest !== latestInterviewDigest)
+    );
 
     let changed = false;
 
-    if (shouldRebuildFromInterview) {
-      // Eliminar testimonios y relaciones anteriores de este perfil para reconstruirlos desde las respuestas reales
+    if (shouldRebuildFromInterview && builtFromInterview) {
       for (const [tid, t] of this.testimonies.entries()) {
         if (t.personId === person.personId) {
           this.testimonies.delete(tid);
@@ -493,50 +732,11 @@ class MiEsenciaStore {
         }
       }
 
-      const rebuiltTestimonies: MiEsenciaTestimonyBlock[] = [];
-      for (const ans of personInterviewAnswers) {
-        const qObj = questionMap.get(ans.questionId);
-        const qLiteral =
-          ans.questionText || qObj?.text || 'Pregunta biográfica de entrevista';
-        const stage = (qObj?.lifeStage || 'legado_general') as MiEsenciaTestimonyBlock['lifeStage'];
-        const voiceList = ans.audioRecordings || (ans.audio ? [ans.audio] : []);
-        const audioTranscriptions = voiceList
-          .map((v) => v.transcription || '')
-          .filter(Boolean)
-          .join(' ');
-        const photoCaptions = (ans.photos || [])
-          .map((ph) => ph.caption || '')
-          .filter(Boolean);
-
-        const words = `${qLiteral} ${ans.answerText} ${audioTranscriptions}`
-          .toLowerCase()
-          .normalize('NFD')
-          .replace(/[\u0300-\u036f]/g, '')
-          .split(/[^a-z0-9]+/)
-          .filter((w) => w.length >= 3);
-
-        const block: MiEsenciaTestimonyBlock = {
-          testimonyId: `test_${crypto.randomBytes(5).toString('hex')}`,
-          personId: person.personId,
-          avatarId: person.avatarId,
-          sourcePdfId: dedicatedPdfId,
-          sourceAnswerId: ans.id,
-          lifeStage: stage,
-          topic: qObj?.topic || stage,
-          questionLiteral: qLiteral,
-          answerLiteral: ans.answerText,
-          audioTranscriptionLiteral: audioTranscriptions || undefined,
-          photoCaptionsLiteral: photoCaptions.length > 0 ? photoCaptions : undefined,
-          entitiesMentioned: [],
-          keywords: Array.from(new Set(words)).slice(0, 35),
-          recordedAt: ans.updatedAt || ans.createdAt || nowIso,
-          immutable: true,
-        };
-        rebuiltTestimonies.push(block);
+      for (const block of builtFromInterview.blocks) {
         this.testimonies.set(block.testimonyId, block);
       }
 
-      personTestimonies = rebuiltTestimonies;
+      personTestimonies = builtFromInterview.blocks;
       const newRelations = extractRelatedPersonsFromTestimonies(
         person.avatarId,
         person.personId,
@@ -568,31 +768,37 @@ class MiEsenciaStore {
       changed = true;
     }
 
-    // Verificar si el PDF compilado de este perfil existe y tiene su contenido binario y textual al día
+    // Verificar si el PDF compilado de este perfil existe y tiene su contenido binario, textual y fotográfico al día
     const existingPdf = this.compilationPdfs.get(dedicatedPdfId);
+    const photosCount = builtFromInterview ? builtFromInterview.photosWithDataUrl.length : 0;
     const needsPdfGeneration =
       !existingPdf ||
       !existingPdf.pdfBase64 ||
       changed ||
-      existingPdf.totalLiteralAnswers !== personTestimonies.length;
+      existingPdf.totalLiteralAnswers !== personTestimonies.length ||
+      existingPdf.totalPhotosReferenced !== photosCount;
 
     if (needsPdfGeneration && personTestimonies.length > 0) {
-      const rawMarkdown = personTestimonies
-        .map(
-          (t, i) =>
-            `### ${i + 1}. ${t.questionLiteral}\n**Respuesta:**\n${t.answerLiteral}${
-              t.audioTranscriptionLiteral
-                ? `\n\nTranscripción de voz literal: ${t.audioTranscriptionLiteral}`
-                : ''
-            }`
-        )
-        .join('\n\n');
+      const rawMarkdown =
+        builtFromInterview && builtFromInterview.rawMarkdown
+          ? builtFromInterview.rawMarkdown
+          : personTestimonies
+              .map(
+                (t, i) =>
+                  `### ${i + 1}. ${t.questionLiteral}\n**Respuesta:**\n${t.answerLiteral}${
+                    t.audioTranscriptionLiteral
+                      ? `\n\nTranscripción de voz literal: ${t.audioTranscriptionLiteral}`
+                      : ''
+                  }`
+              )
+              .join('\n\n');
 
       const generated = buildCompilationPdfBase64({
         interviewTitle: interview?.title || `Legado de ${person.fullName}`,
         participantNames: [person.fullName],
         rawTextContent: rawMarkdown,
         testimonies: personTestimonies,
+        photos: builtFromInterview?.photosWithDataUrl,
       });
 
       const archivedPdf: MiEsenciaArchivedCompilationPdf = {
@@ -607,7 +813,7 @@ class MiEsenciaStore {
         totalQuestions: personTestimonies.length,
         totalLiteralAnswers: personTestimonies.length,
         totalAudiosTranscribed: personTestimonies.filter((t) => Boolean(t.audioTranscriptionLiteral)).length,
-        totalPhotosReferenced: photos.length,
+        totalPhotosReferenced: photosCount,
         rawTextContent: rawMarkdown,
         pdfBase64: generated.pdfBase64,
         createdAt: existingPdf?.createdAt || nowIso,
@@ -637,15 +843,21 @@ class MiEsenciaStore {
     if (changed) {
       person.updatedAt = nowIso;
       this.persons.set(person.personId, person);
-      this.saveToDisk();
+      if (!skipDiskSave) {
+        this.saveToDisk();
+      }
     }
+    return changed;
   }
 
   public syncAllPersonsAndPdfs(): void {
     this.applyDeletedRegistryFilters();
 
+    let anyPersonChanged = false;
     for (const personId of Array.from(this.persons.keys())) {
-      this.syncPersonWithAssignedPdfAndInterview(personId);
+      if (this.syncPersonWithAssignedPdfAndInterview(personId, true)) {
+        anyPersonChanged = true;
+      }
     }
 
     // Eliminar PDFs huérfanos que no estén asociados a ningún perfil activo
@@ -656,9 +868,14 @@ class MiEsenciaStore {
         .filter((id): id is string => Boolean(id))
     );
     for (const [pdfId, pdf] of Array.from(this.compilationPdfs.entries())) {
+      const isDirectInterviewPdf =
+        pdf.avatarId === 'interview_compilation' ||
+        Boolean(pdf.sourceInterviewId && storage.getInterviewById(pdf.sourceInterviewId));
       if (
         this.deletedRegistry.pdfs.has(pdfId) ||
-        (!activePdfIds.has(pdfId) && !activeAvatarIds.has(pdf.avatarId))
+        (!isDirectInterviewPdf &&
+          !activePdfIds.has(pdfId) &&
+          !activeAvatarIds.has(pdf.avatarId))
       ) {
         this.compilationPdfs.delete(pdfId);
       }
@@ -725,147 +942,270 @@ class MiEsenciaStore {
       this.credentials.set(credId, cred);
     }
 
-    if (credsChanged) {
+    if (credsChanged || anyPersonChanged) {
       this.saveToDisk();
     }
+  }
+
+  public async syncFromFirestore(force = false): Promise<void> {
+    const lastSyncMs = this.lastFirestoreSyncAt
+      ? new Date(this.lastFirestoreSyncAt).getTime()
+      : 0;
+    const ageMs = Date.now() - lastSyncMs;
+    if (!force && lastSyncMs > 0 && ageMs < 60_000) {
+      return;
+    }
+
+    if (this.activeSyncPromise) {
+      await this.activeSyncPromise;
+      return;
+    }
+
+    this.activeSyncPromise = (async () => {
+      try {
+        const firestorePromise = Promise.allSettled([
+          firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'mi_esencia_config'), 'miEsencia'),
+          firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'mi_esencia_plans'), 'miEsencia'),
+          firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'mi_esencia_subscriptions'), 'miEsencia'),
+          firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'mi_esencia_persons'), 'miEsencia'),
+          firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'mi_esencia_testimonies'), 'miEsencia'),
+          firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'mi_esencia_relations'), 'miEsencia'),
+          firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'mi_esencia_interlocutors'), 'miEsencia'),
+          firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'mi_esencia_credentials'), 'miEsencia'),
+          firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'mi_esencia_memories'), 'miEsencia'),
+          firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'mi_esencia_contradictions'), 'miEsencia'),
+          firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'mi_esencia_prompt_library'), 'miEsencia'),
+          firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'mi_esencia_prompt_versions'), 'miEsencia'),
+          firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'mi_esencia_pdfs'), 'miEsencia'),
+        ]);
+
+        const timeoutPromise = new Promise<null>((resolve) => {
+          const t = setTimeout(() => {
+            console.warn('[MiEsenciaStore] Firestore fetch took > 3s; operating reliably with disk snapshot.');
+            resolve(null);
+          }, 3000);
+          if (t && typeof t.unref === 'function') {
+            t.unref();
+          }
+        });
+
+        const raceResult = await Promise.race([firestorePromise, timeoutPromise]);
+        if (!raceResult) {
+          return;
+        }
+
+        const unwrap = (idx: number) => {
+          const r = raceResult[idx];
+          return r && r.status === 'fulfilled' ? r.value : null;
+        };
+
+        const configSnap = unwrap(0);
+        const plansSnap = unwrap(1);
+        const subsSnap = unwrap(2);
+        const personsSnap = unwrap(3);
+        const testSnap = unwrap(4);
+        const relSnap = unwrap(5);
+        const interSnap = unwrap(6);
+        const credSnap = unwrap(7);
+        const memSnap = unwrap(8);
+        const contraSnap = unwrap(9);
+        const promptLibSnap = unwrap(10);
+        const promptVerSnap = unwrap(11);
+        const pdfsSnap = unwrap(12);
+
+        if (configSnap) {
+          configSnap.forEach((d) => {
+            if (d.id === 'global') {
+              this.config = { ...DEFAULT_MI_ESENCIA_CONFIG, ...(d.data() as any) };
+            } else if (d.id === 'deleted_registry') {
+              const reg = d.data() as any;
+              if (Array.isArray(reg?.persons)) {
+                reg.persons.forEach((id: string) => this.deletedRegistry.persons.add(id));
+              }
+              if (Array.isArray(reg?.subscriptions)) {
+                reg.subscriptions.forEach((id: string) => this.deletedRegistry.subscriptions.add(id));
+              }
+              if (Array.isArray(reg?.pdfs)) {
+                reg.pdfs.forEach((id: string) => this.deletedRegistry.pdfs.add(id));
+              }
+              if (Array.isArray(reg?.credentials)) {
+                reg.credentials.forEach((id: string) => this.deletedRegistry.credentials.add(id));
+              }
+            }
+          });
+        }
+
+        if (plansSnap) {
+          plansSnap.forEach((d) => {
+            const val = d.data() as unknown as MiEsenciaPlanRecord;
+            if (val?.planId) this.plans.set(val.planId, val);
+          });
+        }
+
+        if (subsSnap) {
+          subsSnap.forEach((d) => {
+            const val = d.data() as unknown as MiEsenciaSubscriptionRecord;
+            if (val?.avatarId && !this.deletedRegistry.subscriptions.has(val.avatarId)) {
+              this.subscriptions.set(val.avatarId, val);
+            }
+          });
+        }
+
+        if (personsSnap) {
+          personsSnap.forEach((d) => {
+            const val = d.data() as unknown as MiEsenciaPersonProfile;
+            if (
+              val?.personId &&
+              !this.deletedRegistry.persons.has(val.personId) &&
+              !this.deletedRegistry.subscriptions.has(val.avatarId)
+            ) {
+              this.persons.set(val.personId, val);
+            }
+          });
+        }
+
+        if (pdfsSnap) {
+          pdfsSnap.forEach((d) => {
+            const val = d.data() as unknown as MiEsenciaArchivedCompilationPdf;
+            if (
+              val?.pdfId &&
+              !this.deletedRegistry.pdfs.has(val.pdfId) &&
+              !this.deletedRegistry.subscriptions.has(val.avatarId)
+            ) {
+              const existingInMem = this.compilationPdfs.get(val.pdfId);
+              this.compilationPdfs.set(val.pdfId, {
+                ...val,
+                pdfBase64: val.pdfBase64 || existingInMem?.pdfBase64 || '',
+              });
+            }
+          });
+        }
+
+        if (testSnap) {
+          testSnap.forEach((d) => {
+            const val = d.data() as unknown as MiEsenciaTestimonyBlock;
+            if (
+              val?.testimonyId &&
+              !this.deletedRegistry.persons.has(val.personId) &&
+              !this.deletedRegistry.subscriptions.has(val.avatarId)
+            ) {
+              this.testimonies.set(val.testimonyId, val);
+            }
+          });
+        }
+
+        if (relSnap) {
+          relSnap.forEach((d) => {
+            const val = d.data() as unknown as MiEsenciaRelatedPerson;
+            if (
+              val?.relatedPersonId &&
+              !this.deletedRegistry.persons.has(val.personId) &&
+              !this.deletedRegistry.subscriptions.has(val.avatarId)
+            ) {
+              this.relations.set(val.relatedPersonId, val);
+            }
+          });
+        }
+
+        if (interSnap) {
+          interSnap.forEach((d) => {
+            const val = d.data() as unknown as MiEsenciaInterlocutor;
+            if (val?.interlocutorId && !this.deletedRegistry.subscriptions.has(val.avatarId)) {
+              this.interlocutors.set(val.interlocutorId, val);
+            }
+          });
+        }
+
+        if (credSnap) {
+          credSnap.forEach((d) => {
+            const val = d.data() as unknown as MiEsenciaAccessCredential;
+            if (
+              val?.accessCredentialId &&
+              !this.deletedRegistry.credentials.has(val.accessCredentialId) &&
+              !this.deletedRegistry.subscriptions.has(val.avatarId)
+            ) {
+              this.credentials.set(val.accessCredentialId, val);
+            }
+          });
+        }
+
+        if (memSnap) {
+          memSnap.forEach((d) => {
+            const val = d.data() as unknown as MiEsenciaMemoryRecord;
+            if (val?.memoryId && !this.deletedRegistry.persons.has(val.personId)) {
+              this.memories.set(val.memoryId, val);
+            }
+          });
+        }
+
+        if (contraSnap) {
+          contraSnap.forEach((d) => {
+            const val = d.data() as unknown as MiEsenciaContradictionRecord;
+            if (val?.contradictionId && !this.deletedRegistry.persons.has(val.personId)) {
+              this.contradictions.set(val.contradictionId, val);
+            }
+          });
+        }
+
+        if (promptLibSnap) {
+          promptLibSnap.forEach((d) => {
+            const val = d.data() as unknown as MiEsenciaLibraryPromptRecord;
+            if (val?.promptId) this.promptLibrary.set(val.promptId, val);
+          });
+        }
+
+        if (promptVerSnap) {
+          promptVerSnap.forEach((d) => {
+            const val = d.data() as unknown as MiEsenciaPromptVersionRecord;
+            if (val?.versionId) this.avatarPromptVersions.set(val.versionId, val);
+          });
+        }
+
+        if (raceResult.some((r) => r.status === 'fulfilled')) {
+          this.lastFirestoreSyncAt = new Date().toISOString();
+          this.saveToDisk();
+        }
+      } catch {
+        // Continuar con estado en disco y memoria
+      } finally {
+        this.activeSyncPromise = null;
+      }
+      this.applyDeletedRegistryFilters();
+      this.seedDefaultPromptLibraryIfNeeded();
+      this.syncAllPersonsAndPdfs();
+    })();
+
+    await this.activeSyncPromise;
   }
 
   public async ensureInitialized(): Promise<void> {
     if (this.initialized) return;
     this.initialized = true;
-    try {
-      await storage.ensureInitialized();
-      const [
-        configSnap,
-        plansSnap,
-        subsSnap,
-        personsSnap,
-        testSnap,
-        relSnap,
-        interSnap,
-        credSnap,
-        memSnap,
-        contraSnap,
-        promptLibSnap,
-        promptVerSnap,
-      ] = await Promise.all([
-        getDocs(collection(serverDb, 'mi_esencia_config')),
-        getDocs(collection(serverDb, 'mi_esencia_plans')),
-        getDocs(collection(serverDb, 'mi_esencia_subscriptions')),
-        getDocs(collection(serverDb, 'mi_esencia_persons')),
-        getDocs(collection(serverDb, 'mi_esencia_testimonies')),
-        getDocs(collection(serverDb, 'mi_esencia_relations')),
-        getDocs(collection(serverDb, 'mi_esencia_interlocutors')),
-        getDocs(collection(serverDb, 'mi_esencia_credentials')),
-        getDocs(collection(serverDb, 'mi_esencia_memories')),
-        getDocs(collection(serverDb, 'mi_esencia_contradictions')),
-        getDocs(collection(serverDb, 'mi_esencia_prompt_library')),
-        getDocs(collection(serverDb, 'mi_esencia_prompt_versions')),
-      ]);
+    await storage.ensureInitialized();
 
-      configSnap.forEach((d) => {
-        if (d.id === 'global') {
-          this.config = { ...DEFAULT_MI_ESENCIA_CONFIG, ...(d.data() as any) };
-        } else if (d.id === 'deleted_registry') {
-          const reg = d.data() as any;
-          if (Array.isArray(reg?.persons)) {
-            reg.persons.forEach((id: string) => this.deletedRegistry.persons.add(id));
-          }
-          if (Array.isArray(reg?.subscriptions)) {
-            reg.subscriptions.forEach((id: string) => this.deletedRegistry.subscriptions.add(id));
-          }
-          if (Array.isArray(reg?.pdfs)) {
-            reg.pdfs.forEach((id: string) => this.deletedRegistry.pdfs.add(id));
-          }
-          if (Array.isArray(reg?.credentials)) {
-            reg.credentials.forEach((id: string) => this.deletedRegistry.credentials.add(id));
-          }
-        }
-      });
+    const lastSyncMs = this.lastFirestoreSyncAt
+      ? new Date(this.lastFirestoreSyncAt).getTime()
+      : 0;
+    const hasWarmDiskSnapshot =
+      this.persons.size > 0 || this.compilationPdfs.size > 0 || this.credentials.size > 0;
+    const isFreshSnapshot = lastSyncMs > 0 && Date.now() - lastSyncMs < 5 * 60_000;
 
-      plansSnap.forEach((d) => {
-        const val = d.data() as unknown as MiEsenciaPlanRecord;
-        if (val?.planId) this.plans.set(val.planId, val);
-      });
-
-      subsSnap.forEach((d) => {
-        const val = d.data() as unknown as MiEsenciaSubscriptionRecord;
-        if (val?.avatarId && !this.deletedRegistry.subscriptions.has(val.avatarId)) {
-          this.subscriptions.set(val.avatarId, val);
-        }
-      });
-      personsSnap.forEach((d) => {
-        const val = d.data() as unknown as MiEsenciaPersonProfile;
-        if (
-          val?.personId &&
-          !this.deletedRegistry.persons.has(val.personId) &&
-          !this.deletedRegistry.subscriptions.has(val.avatarId)
-        ) {
-          this.persons.set(val.personId, val);
-        }
-      });
-      testSnap.forEach((d) => {
-        const val = d.data() as unknown as MiEsenciaTestimonyBlock;
-        if (
-          val?.testimonyId &&
-          !this.deletedRegistry.persons.has(val.personId) &&
-          !this.deletedRegistry.subscriptions.has(val.avatarId)
-        ) {
-          this.testimonies.set(val.testimonyId, val);
-        }
-      });
-      relSnap.forEach((d) => {
-        const val = d.data() as unknown as MiEsenciaRelatedPerson;
-        if (
-          val?.relatedPersonId &&
-          !this.deletedRegistry.persons.has(val.personId) &&
-          !this.deletedRegistry.subscriptions.has(val.avatarId)
-        ) {
-          this.relations.set(val.relatedPersonId, val);
-        }
-      });
-      interSnap.forEach((d) => {
-        const val = d.data() as unknown as MiEsenciaInterlocutor;
-        if (val?.interlocutorId && !this.deletedRegistry.subscriptions.has(val.avatarId)) {
-          this.interlocutors.set(val.interlocutorId, val);
-        }
-      });
-      credSnap.forEach((d) => {
-        const val = d.data() as unknown as MiEsenciaAccessCredential;
-        if (
-          val?.accessCredentialId &&
-          !this.deletedRegistry.credentials.has(val.accessCredentialId) &&
-          !this.deletedRegistry.subscriptions.has(val.avatarId)
-        ) {
-          this.credentials.set(val.accessCredentialId, val);
-        }
-      });
-      memSnap.forEach((d) => {
-        const val = d.data() as unknown as MiEsenciaMemoryRecord;
-        if (val?.memoryId && !this.deletedRegistry.persons.has(val.personId)) {
-          this.memories.set(val.memoryId, val);
-        }
-      });
-      contraSnap.forEach((d) => {
-        const val = d.data() as unknown as MiEsenciaContradictionRecord;
-        if (val?.contradictionId && !this.deletedRegistry.persons.has(val.personId)) {
-          this.contradictions.set(val.contradictionId, val);
-        }
-      });
-      promptLibSnap.forEach((d) => {
-        const val = d.data() as unknown as MiEsenciaLibraryPromptRecord;
-        if (val?.promptId) this.promptLibrary.set(val.promptId, val);
-      });
-      promptVerSnap.forEach((d) => {
-        const val = d.data() as unknown as MiEsenciaPromptVersionRecord;
-        if (val?.versionId) this.avatarPromptVersions.set(val.versionId, val);
-      });
-    } catch {
-      // Continuar con estado en disco y memoria
+    if (hasWarmDiskSnapshot && isFreshSnapshot) {
+      const estimatedSaved =
+        this.persons.size +
+        this.testimonies.size +
+        this.compilationPdfs.size +
+        this.credentials.size +
+        this.memories.size +
+        15;
+      firestoreTelemetry.recordReadsSaved(estimatedSaved);
+      this.applyDeletedRegistryFilters();
+      this.seedDefaultPromptLibraryIfNeeded();
+      this.syncAllPersonsAndPdfs();
+      return;
     }
-    this.applyDeletedRegistryFilters();
-    this.seedDefaultPromptLibraryIfNeeded();
-    this.syncAllPersonsAndPdfs();
+
+    await this.syncFromFirestore(true);
   }
 
   // ============================================================================
@@ -3917,7 +4257,178 @@ Respuesta directa en primera persona singular:`;
 
   public getCompilationPdfById(pdfId: string): MiEsenciaArchivedCompilationPdf | undefined {
     this.syncAllPersonsAndPdfs();
-    return this.compilationPdfs.get(pdfId);
+    let pdf = this.compilationPdfs.get(pdfId);
+
+    // Si se pasó el ID de una persona o de una entrevista, buscar el PDF correspondiente
+    if (!pdf) {
+      const matchingPerson = Array.from(this.persons.values()).find(
+        (p) => p.sourcePdfId === pdfId || p.personId === pdfId || p.sourceInterviewId === pdfId
+      );
+      if (matchingPerson && matchingPerson.sourcePdfId) {
+        this.syncPersonWithAssignedPdfAndInterview(matchingPerson.personId);
+        pdf = this.compilationPdfs.get(matchingPerson.sourcePdfId);
+      }
+    }
+
+    if (!pdf && storage.getInterviewById(pdfId)) {
+      pdf = this.buildAndCacheInterviewCompilationPdfSync(pdfId);
+    }
+
+    // Si el PDF existe pero su binario pdfBase64 estaba vacío (ej. al hidratar desde Firestore >60KB), regenerarlo al vuelo
+    if (pdf && (!pdf.pdfBase64 || pdf.pdfBase64.trim().length < 100)) {
+      if (
+        pdf.sourceInterviewId &&
+        pdf.sourceInterviewId !== 'manual' &&
+        pdf.sourceInterviewId !== 'uploaded_pdf' &&
+        storage.getInterviewById(pdf.sourceInterviewId)
+      ) {
+        const regenerated = this.buildAndCacheInterviewCompilationPdfSync(
+          pdf.sourceInterviewId,
+          pdf.pdfId,
+          pdf.avatarId
+        );
+        if (regenerated) {
+          pdf = regenerated;
+        }
+      } else {
+        const linkedTestimonies = Array.from(this.testimonies.values()).filter(
+          (t) => t.sourcePdfId === pdf!.pdfId
+        );
+        const generated = buildCompilationPdfBase64({
+          interviewTitle: pdf.fileName.replace(/\.pdf$/i, '').replace(/_/g, ' '),
+          participantNames: ['Participante'],
+          rawTextContent: pdf.rawTextContent || '',
+          testimonies: linkedTestimonies,
+        });
+        pdf = {
+          ...pdf,
+          pdfBase64: generated.pdfBase64,
+          sha256Hash: generated.sha256Hash,
+        };
+        this.compilationPdfs.set(pdf.pdfId, pdf);
+        this.saveToDisk();
+      }
+    }
+
+    return pdf;
+  }
+
+  /**
+   * Construye o actualiza de forma síncrona el PDF «Compilado Testimonial Fidedigno (Preguntas, Respuestas, Audios y Fotos)»
+   * de una entrevista completa, incluyendo todas las preguntas/respuestas originales, transcripciones de voz editadas,
+   * información adicional y fotografías con sus descripciones.
+   */
+  public buildAndCacheInterviewCompilationPdfSync(
+    interviewId: string,
+    preferredPdfId?: string,
+    preferredAvatarId?: string
+  ): MiEsenciaArchivedCompilationPdf | undefined {
+    const interview = storage.getInterviewById(interviewId);
+    if (!interview) return undefined;
+
+    const participants = storage.getParticipantsForInterview(interviewId);
+    const participantNames =
+      participants.length > 0 ? participants.map((p) => p.name) : [interview.title];
+    const pdfId = preferredPdfId || `comp_pdf_int_${interviewId}`;
+    const avatarId = preferredAvatarId || 'interview_compilation';
+
+    const built = this.buildTestimonyBlocksFromInterviewData({
+      interviewId,
+      personId: `person_int_${interviewId}`,
+      avatarId,
+      pdfId,
+      multipleParticipants: false,
+    });
+
+    const generated = buildCompilationPdfBase64({
+      interviewTitle: interview.title,
+      participantNames,
+      rawTextContent: built.rawMarkdown,
+      testimonies: built.blocks,
+      photos: built.photosWithDataUrl,
+    });
+
+    const nowIso = new Date().toISOString();
+    const existing = this.compilationPdfs.get(pdfId);
+    const record: MiEsenciaArchivedCompilationPdf = {
+      pdfId,
+      avatarId,
+      sourceInterviewId: interviewId,
+      fileName:
+        existing?.fileName ||
+        `Compilado_Testimonial_Fidedigno_${interview.title.replace(/[^a-zA-Z0-9_-]/g, '_')}.pdf`,
+      origin: 'auto_generated_from_interview',
+      sha256Hash: generated.sha256Hash,
+      totalQuestions: built.blocks.length,
+      totalLiteralAnswers: built.blocks.length,
+      totalAudiosTranscribed: built.blocks.filter((b) => Boolean(b.audioTranscriptionLiteral)).length,
+      totalPhotosReferenced: built.photosWithDataUrl.length,
+      rawTextContent: built.rawMarkdown,
+      pdfBase64: generated.pdfBase64,
+      createdAt: existing?.createdAt || nowIso,
+      createdBy: existing?.createdBy || 'system',
+    };
+
+    this.compilationPdfs.set(pdfId, record);
+    this.saveToDisk();
+    return record;
+  }
+
+  /**
+   * Paso obligatorio 1, 2 y 3 para la generación de libros autobiográficos:
+   * 1. Recupera todos los testimonios, transcripciones, textos, fotografías y descripciones de la entrevista.
+   * 2. Genera o recupera el PDF actualizado del Compilado Testimonial Fidedigno.
+   * 3. Verifica que el PDF exista, sea válido y contenga toda la información disponible.
+   */
+  public async ensureInterviewCompilationPdf(interviewId: string): Promise<{
+    pdfRecord: MiEsenciaArchivedCompilationPdf;
+    testimonies: MiEsenciaTestimonyBlock[];
+    photosWithDataUrl: MiEsenciaTestimonyPhotoAttachment[];
+  }> {
+    await this.ensureInitialized();
+    const interview = storage.getInterviewById(interviewId);
+    if (!interview) {
+      throw new Error('No se encontró la entrevista para generar el Compilado Testimonial Fidedigno.');
+    }
+
+    const pdfId = `comp_pdf_int_${interviewId}`;
+    const built = this.buildTestimonyBlocksFromInterviewData({
+      interviewId,
+      personId: `person_int_${interviewId}`,
+      avatarId: 'interview_compilation',
+      pdfId,
+      multipleParticipants: false,
+    });
+
+    if (built.blocks.length === 0) {
+      throw new Error(
+        'No existen testimonios registrados en la entrevista para generar el PDF fuente del Compilado Testimonial Fidedigno.'
+      );
+    }
+
+    const pdfRecord = this.buildAndCacheInterviewCompilationPdfSync(interviewId, pdfId);
+    const validation = validateCompilationPdfRecord(pdfRecord);
+    if (!validation.valid || !pdfRecord) {
+      throw new Error(
+        validation.reason ||
+          'No se pudo crear o recuperar válidamente el PDF fuente del Compilado Testimonial Fidedigno.'
+      );
+    }
+
+    // Sincronizar también cualquier perfil de Mi Esencia vinculado a esta entrevista
+    for (const p of Array.from(this.persons.values())) {
+      if (p.sourceInterviewId === interviewId) {
+        this.syncPersonWithAssignedPdfAndInterview(p.personId);
+      }
+    }
+
+    await this.persistDoc('mi_esencia_pdfs', pdfRecord.pdfId, pdfRecord);
+
+    return {
+      pdfRecord,
+      testimonies: built.blocks,
+      photosWithDataUrl: built.photosWithDataUrl,
+    };
   }
 
   // ============================================================================

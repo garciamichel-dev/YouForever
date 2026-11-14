@@ -1,0 +1,1164 @@
+# PROMPT MAESTRO DE CORRECCIÓN TÉCNICA — YOUFOREVER
+
+## Generación de libros autobiográficos, estructura de capítulos, fidelidad testimonial, vista previa, paginación y exportación PDF
+
+### 1. ROL Y OBJETIVO
+
+Actúa simultáneamente como:
+
+- Arquitecto de software especializado en aplicaciones React, TypeScript y Node.js.
+- Ingeniero senior de integración con Google Gemini y OpenAI.
+- Especialista en sistemas de generación de documentos y libros con jsPDF.
+- Experto en composición editorial, paginación y tipografía digital.
+- Especialista en procesamiento de testimonios autobiográficos.
+- Ingeniero de aseguramiento de calidad, pruebas automatizadas y validación documental.
+
+Tu tarea es **analizar y corregir directamente el código fuente existente de YouForever**, sin reconstruir la aplicación desde cero.
+
+Debes corregir los problemas identificados en la generación de libros autobiográficos, especialmente las duplicaciones, los capítulos excesivamente fragmentados, las omisiones testimoniales, los saltos de página incorrectos, la falta de validación documental y la descoordinación entre la vista previa y el PDF definitivo.
+
+Realiza los cambios necesarios en el código y verifica su funcionamiento.
+
+No te limites a explicar las soluciones o generar recomendaciones: **implementa las correcciones en el proyecto real**.
+
+### 2. REGLA EDITORIAL FUNDAMENTAL E INNEGOCIABLE
+
+**CADA CAPÍTULO REAL DEBE COMENZAR EN UNA PÁGINA NUEVA.**
+
+Esta decisión es obligatoria y debe conservarse.
+
+Sin embargo:
+
+**UNA PREGUNTA RESPONDIDA NO EQUIVALE A UN CAPÍTULO.**
+
+El sistema debe distinguir correctamente entre:
+
+1. Pregunta de entrevista: unidad utilizada para recopilar información.
+2. Respuesta testimonial: contenido proporcionado por una persona.
+3. Recuerdo o acontecimiento: unidad autobiográfica que puede estar distribuida entre varias respuestas.
+4. Párrafo: unidad de redacción que forma parte de una narración.
+5. Sección o subtema: agrupación interna dentro de un capítulo.
+6. Capítulo: unidad narrativa mayor que reúne recuerdos, acontecimientos y experiencias relacionados.
+7. Página: unidad física de composición, determinada por el espacio disponible.
+
+Estas entidades no son equivalentes y no deben tratarse como si lo fueran.
+
+#### Comportamiento correcto
+
+Una entrevista puede contener numerosas preguntas relacionadas con la infancia.
+
+Por ejemplo:
+
+- Una pregunta sobre el nacimiento.
+- Otra sobre la elección del nombre.
+- Otra sobre los apodos familiares.
+- Otra sobre los padres.
+- Otra sobre la casa de la infancia.
+- Otra sobre la convivencia familiar.
+- Varias preguntas de profundización sobre esos recuerdos.
+
+El sistema debe analizar su relación temática y temporal.
+
+Puede integrar varias de ellas en un mismo capítulo, construyendo un relato coherente y sin reproducir mecánicamente la estructura del cuestionario.
+
+No debe crear automáticamente siete capítulos porque existan siete preguntas.
+
+Tampoco debe imponer un número fijo de respuestas por capítulo.
+
+La agrupación debe responder a criterios autobiográficos y editoriales, no a la cantidad de registros.
+
+#### Reglas obligatorias
+
+- Una pregunta no genera automáticamente un capítulo.
+- Una respuesta no genera automáticamente una sección.
+- Una profundización debe integrarse con el recuerdo al que pertenece, cuando corresponda.
+- Varias preguntas pueden contribuir a un mismo acontecimiento narrativo.
+- Un capítulo puede contener tantos recuerdos relacionados como resulte editorialmente adecuado.
+- Un acontecimiento extenso puede ocupar varias páginas del mismo capítulo.
+- Los capítulos se crean por coherencia temática, temporal y narrativa.
+- Un recuerdo excepcionalmente amplio puede justificar un capítulo propio.
+- No deben fusionarse acontecimientos independientes únicamente para reducir páginas.
+- No debe imponerse una cantidad fija de capítulos, salvo que exista una configuración explícita de estructura fija.
+- Ningún salto de página debe depender directamente del identificador de una pregunta o respuesta.
+
+**Solo el inicio de un capítulo real debe provocar obligatoriamente un salto de página.**
+
+Dentro del mismo capítulo, los párrafos deben continuar de manera natural.
+
+Si un capítulo termina y todavía queda espacio en su última página, ese espacio puede permanecer vacío porque el capítulo siguiente debe comenzar en una página nueva. Esta es una excepción editorial válida y no debe eliminarse.
+
+Lo que debe evitarse son los espacios innecesarios **dentro de un capítulo que todavía tiene contenido pendiente**.
+
+---
+
+### 3. ARCHIVOS Y COMPONENTES QUE DEBES ANALIZAR
+
+Revisa las implementaciones actuales y sus dependencias, especialmente:
+
+**`src/components/ParticipantBookStudio.tsx`**
+
+Analiza las funciones relacionadas con:
+
+- Selección del estilo literario.
+- Generación de vista previa.
+- Almacenamiento temporal del manuscrito.
+- Regeneración.
+- Guardado de versiones.
+- Exportación del libro.
+- Gestión de fotografías.
+- Caché del navegador.
+
+Presta especial atención a:
+
+- `handleSelectNarrativeStyle`
+- `handleSaveAndGenerateBookVersion`
+- `lockedPreviewGroups`
+- `lockedPreviewManuscript`
+- `fullManuscriptToSave`
+- `stylePreviewCacheRef`
+
+**`src/logic/demoStoryRules.ts`**
+
+Revisa especialmente:
+
+- `composeBookPages`
+- `buildFaithfulFallbackManuscript`
+- `buildParticipantInitialManuscriptFromAnswers`
+- `sanitizeAndRepairBookManuscript`
+- `DEMO_BOOK_FORMATS`
+- `maxCharsPerContentPage`
+- `maxParagraphsPerPage`
+- `contentPageGroupsRaw`
+- `effectiveLockedGroups`
+
+**`src/server/geminiService.ts`**
+
+Revisa:
+
+- `generateParticipantBookManuscriptWithAI`
+- `generateManuscriptDraft`
+- `callGeminiBookModelBatch`
+- `callOpenAiBookModelBatch`
+- `manuscriptAiMemoryCache`
+- `chapterBatches`
+- `bookStructureMode`
+- `prompt_autonomous`
+- `fixed_five_stages`
+- Construcción de instrucciones complementarias.
+- Ensamblado del contenido devuelto por los proveedores.
+
+**`src/utils/demoPdfGenerator.ts`**
+
+Revisa especialmente:
+
+- `renderRichParagraphPdf`
+- `renderChapterContentPagePdf`
+- Cálculo de altura disponible.
+- Representación de fotografías.
+- Encabezados y pies.
+- Distribución del texto.
+- Control de desbordamiento.
+
+**`src/server/storage.ts` y `src/server/api.ts`**
+
+Revisa:
+
+- Generación de manuscritos.
+- Validación del compilado testimonial.
+- Persistencia de libros.
+- Guardado de versiones.
+- Validación de solicitudes.
+- Gestión de errores.
+- Recuperación y reutilización de manuscritos.
+
+Revisa también las interfaces, tipos, pruebas y componentes de vista previa que dependan de estas funciones.
+
+Los nombres anteriores corresponden a la estructura original del proyecto. Comprueba su implementación actual antes de modificarlos.
+
+---
+
+### 4. UNIFICAR LA GENERACIÓN DEL MANUSCRITO
+
+Actualmente existen procesos diferenciados para generar la vista previa y el libro completo.
+
+Esto puede ocasionar que cada proceso produzca capítulos, títulos, párrafos y recuerdos diferentes.
+
+**Debes eliminar esta duplicidad de fuentes narrativas.**
+
+Implementa una arquitectura donde exista un único manuscrito integral canónico para cada versión autobiográfica.
+
+#### Flujo obligatorio
+
+1. Recuperar el compilado testimonial fidedigno.
+2. Recuperar las preguntas, respuestas, profundizaciones y textos complementarios.
+3. Recuperar las fotografías y sus descripciones originales.
+4. Identificar las unidades autobiográficas significativas.
+5. Determinar la organización de capítulos.
+6. Generar el manuscrito integral.
+7. Validar su estructura.
+8. Auditarlo contra las fuentes.
+9. Corregir las incidencias detectadas.
+10. Aprobar el manuscrito cuando supere los controles críticos.
+11. Componer y paginar el libro completo.
+12. Derivar la vista previa de esa composición.
+13. Guardar o exportar el libro definitivo sin regenerar su contenido narrativo.
+
+**La vista previa y el libro completo deben derivarse del mismo manuscrito.**
+
+No generes primero tres páginas narrativas con IA para después solicitar a otro proceso que genere nuevamente la misma historia completa.
+
+Cuando el usuario seleccione un estilo literario, genera o recupera el manuscrito integral correspondiente a ese estilo.
+
+La vista previa se construirá con sus primeras páginas reales.
+
+Cuando el usuario decida guardar o descargar, reutiliza ese manuscrito.
+
+Si el usuario cambia únicamente el formato del papel, los márgenes, la tipografía, el tamaño del texto, los colores o la composición visual, repagina el mismo manuscrito.
+
+No vuelvas a generar el texto con IA por simples cambios de presentación.
+
+Si cambia el contenido testimonial, el prompt literario activo, el estilo narrativo o alguna edición del manuscrito que afecte su contenido, aplica la invalidación y revalidación correspondientes.
+
+Para manuscritos extensos, permite el procesamiento por lotes, pero todos los lotes deberán responder a un plan único de capítulos y ensamblarse en un solo manuscrito canónico antes de aprobarse.
+
+---
+
+### 5. ELIMINAR CAPÍTULOS Y RECUERDOS DUPLICADOS
+
+El código actual conserva páginas de la vista previa mediante estructuras como `lockedPreviewGroups` y posteriormente agrega contenido de una generación completa.
+
+Este mecanismo puede provocar duplicaciones cuando los identificadores de capítulos o la estructura narrativa cambian.
+
+Corrige este comportamiento.
+
+#### Prohibiciones
+
+- No concatenar páginas de vista previa con capítulos regenerados de manera independiente.
+- No conservar textos antiguos y agregar una nueva versión del mismo recuerdo.
+- No identificar duplicaciones exclusivamente por el título del capítulo.
+- No depender únicamente de la posición de los párrafos.
+- No asumir que dos identificadores de capítulo diferentes representan necesariamente dos acontecimientos diferentes.
+- No eliminar recuerdos diferentes simplemente porque contienen palabras semejantes.
+
+#### Solución requerida
+
+Utiliza un único manuscrito y asigna identificadores estables a:
+
+- Capítulos.
+- Unidades testimoniales.
+- Acontecimientos.
+- Párrafos narrativos, cuando sea necesario.
+- Fotografías y sus vinculaciones.
+
+Construye un mapa entre cada unidad testimonial y el capítulo o párrafo que la representa.
+
+La detección de duplicados deberá comparar también el contenido y la procedencia autobiográfica.
+
+Si dos testimonios describen el mismo acontecimiento, fusiónalos preservando sus detalles únicos.
+
+Si describen acontecimientos distintos, consérvalos separadamente aunque compartan personas, lugares o fechas.
+
+Las estructuras heredadas `lockedPreviewGroups` y `lockedPreviewManuscript` deberán eliminarse del proceso de ensamblado narrativo o transformarse en referencias de visualización que nunca introduzcan una segunda copia del contenido.
+
+Los libros previamente guardados deberán seguir siendo recuperables mediante una estrategia de compatibilidad o migración que no altere silenciosamente su texto.
+
+---
+
+### 6. ORGANIZACIÓN INTELIGENTE DE CAPÍTULOS
+
+Antes de generar el texto definitivo, analiza los testimonios para construir una estructura narrativa coherente.
+
+Cada capítulo debe tener:
+
+- Identificador estable.
+- Título representativo.
+- Orden cronológico o temático justificado.
+- Relación de acontecimientos incluidos.
+- Relación de unidades testimoniales de origen.
+- Párrafos narrativos.
+- Fotografías relacionadas.
+- Información necesaria para la auditoría.
+
+La cantidad de capítulos será determinada por la riqueza y diversidad de los testimonios.
+
+No establezcas reglas como:
+
+- Una pregunta = un capítulo.
+- Una respuesta = un capítulo.
+- Una etapa = obligatoriamente un capítulo en todos los modos.
+- Cada cierto número de párrafos = un capítulo.
+- Cada cierta cantidad de palabras = un capítulo.
+
+Mantén el funcionamiento de la configuración `bookStructureMode`.
+
+Cuando el modo sea `prompt_autonomous`, el modelo podrá organizar libremente los capítulos de acuerdo con el Prompt Maestro activo.
+
+Cuando el modo sea `fixed_five_stages`, respeta la estructura fija seleccionada, pero no fragmentes cada pregunta en un capítulo adicional.
+
+La distribución física en páginas deberá ser independiente de la decisión narrativa de dónde comienza y termina un capítulo.
+
+#### Resultado esperado
+
+Un capítulo puede comenzar en la página 7, continuar en las páginas 8 y 9 y terminar en la página 10.
+
+El capítulo siguiente comenzará en la página 11.
+
+No deben existir saltos artificiales entre los párrafos del capítulo anterior.
+
+---
+
+### 7. CORREGIR LA VISTA PREVIA
+
+La vista previa actual puede seleccionar una página posterior que contenga una fotografía e introducirla entre las primeras páginas.
+
+Este comportamiento altera el orden narrativo.
+
+Elimina esta selección artificial.
+
+#### Nueva regla
+
+La vista previa debe mostrar las primeras páginas físicas reales del libro, en el mismo orden en que aparecerán en el PDF definitivo.
+
+Conserva el diseño de vista previa de YouForever, incluida su página final especial de demostración cuando corresponda.
+
+Sin embargo:
+
+- Las páginas de contenido deben provenir directamente del libro integral.
+- No se deben omitir páginas intermedias.
+- No se deben adelantar acontecimientos para mostrar fotografías.
+- No se deben insertar capítulos que pertenezcan a posiciones posteriores.
+- No se deben crear capítulos ficticios para completar un número de páginas.
+- No se deben fragmentar testimonios artificialmente para llenar la vista previa.
+- No se deben generar textos nuevos exclusivos de la vista previa.
+
+Si las primeras páginas contienen únicamente texto, la vista previa deberá mostrar únicamente ese texto.
+
+No es obligatorio mostrar una fotografía en las primeras páginas.
+
+La fotografía debe aparecer donde corresponda en el libro completo.
+
+#### Consistencia
+
+Cuando no haya cambios de contenido ni configuración visual, las páginas iniciales de la vista previa y las páginas correspondientes del libro definitivo deberán ser idénticas.
+
+Si el usuario modifica parámetros editoriales, vuelve a componer ambas representaciones desde el mismo manuscrito.
+
+No conserves capturas o bloques de páginas antiguas como fuente narrativa.
+
+La página especial que identifica el documento como vista previa podrá existir exclusivamente en ese modo y no debe confundirse con una página autobiográfica.
+
+---
+
+### 8. REEMPLAZAR LA PAGINACIÓN POR UNA BASADA EN MEDIDAS REALES
+
+El sistema actual utiliza límites aproximados de caracteres y párrafos para distribuir el contenido.
+
+Estos límites no son suficientes para determinar cuánto texto cabe realmente en una página.
+
+Debes reemplazar las decisiones principales de paginación basadas en `maxCharsPerContentPage` y `maxParagraphsPerPage` por cálculos físicos reales.
+
+#### Parámetros a considerar
+
+Utiliza las configuraciones existentes de YouForever para determinar:
+
+- Dimensiones del papel.
+- Márgenes.
+- Área útil.
+- Familia tipográfica.
+- Tamaño del texto.
+- Interlineado.
+- Espaciado entre párrafos.
+- Encabezados.
+- Pies de página.
+- Número de página.
+- Títulos.
+- Ornamentos.
+- Capitulares.
+- Fotografías.
+- Pies de fotografía.
+- Separaciones editoriales.
+
+Emplea las capacidades de medición de jsPDF y las métricas reales de las fuentes.
+
+La medición y el renderizado deben compartir exactamente la misma lógica de distribución de líneas para evitar discrepancias.
+
+#### Reglas de paginación
+
+**A. Inicio de capítulo**
+
+Cuando comienza un capítulo real:
+
+1. Cierra la página anterior.
+2. Inicia una nueva página.
+3. Coloca el número y título del capítulo.
+4. Comienza su contenido narrativo.
+
+Esta regla es obligatoria.
+
+**B. Continuación de capítulo**
+
+Cuando el capítulo todavía tiene contenido:
+
+1. Calcula el espacio disponible.
+2. Coloca todas las líneas que quepan correctamente.
+3. Si el párrafo no cabe completo, divídelo de forma editorialmente adecuada.
+4. Traslada las líneas restantes a la siguiente página.
+5. Continúa con el resto del mismo capítulo.
+6. No vuelvas a presentar la continuación como un capítulo nuevo.
+
+**C. Flujo continuo**
+
+No fuerces saltos de página por:
+
+- Finalización de una pregunta.
+- Finalización de una respuesta.
+- Finalización de un párrafo.
+- Finalización de una profundización.
+- Cambio de subtema dentro del mismo capítulo.
+- Aparición de una fotografía, salvo necesidad física de espacio.
+
+**D. Evitar espacios injustificados**
+
+Dentro de un capítulo, aprovecha razonablemente el espacio disponible.
+
+Permite que varios párrafos ocupen una misma página.
+
+No limites artificialmente una página a tres o cuatro párrafos cuando físicamente quepan más.
+
+No reduzcas de forma arbitraria la capacidad de texto por la sola existencia de una fotografía.
+
+Calcula el espacio real ocupado por cada elemento.
+
+**E. Control editorial**
+
+Implementa:
+
+- Protección contra líneas viudas y huérfanas.
+- Títulos acompañados de sus primeras líneas.
+- Separaciones equilibradas.
+- Evitación de títulos aislados.
+- Continuidad de párrafos.
+- Espaciado consistente.
+
+No sacrifiques la integridad del texto únicamente para evitar una viuda o una huérfana.
+
+**F. Ninguna línea puede desaparecer**
+
+Revisa especialmente `renderRichParagraphPdf`.
+
+La implementación actual puede interrumpir el dibujo de líneas cuando llega al límite inferior de la página.
+
+No permitas que las líneas pendientes se descarten.
+
+La función deberá devolver información suficiente para conocer:
+
+- Líneas renderizadas.
+- Líneas pendientes.
+- Posición final.
+- Estado de continuación.
+
+El sistema debe trasladar automáticamente cualquier contenido restante a la siguiente página.
+
+Nunca resuelvas un desbordamiento eliminando texto.
+
+**G. Límites de páginas**
+
+No comprimas ni mezcles bloques de páginas para cumplir un número máximo si eso compromete su legibilidad o integridad.
+
+Si existe una limitación técnica de tamaño o páginas, informa del problema y utiliza una estrategia segura de procesamiento, sin descartar contenido.
+
+---
+
+### 9. INTEGRACIÓN DOCUMENTAL DE FOTOGRAFÍAS
+
+Las fotografías deben vincularse al acontecimiento testimonial al que pertenecen.
+
+Actualmente existen rutas que colocan fotografías no ubicadas automáticamente en el primer capítulo disponible.
+
+Este comportamiento debe corregirse.
+
+#### Nueva arquitectura
+
+Cada fotografía deberá conservar, cuando exista:
+
+- `photoId`.
+- Identificador de la respuesta de origen.
+- Identificador de la pregunta.
+- Identificador del acontecimiento.
+- Identificador del capítulo.
+- Identificador del párrafo narrativo.
+- Descripción testimonial original.
+- Autor o persona que la proporcionó.
+- Fecha o época documentada.
+- Estado de validación e incorporación.
+
+La ubicación debe decidirse mediante su relación testimonial, no por disponibilidad de espacio.
+
+Utiliza identificadores estables de párrafo para que la fotografía no se desplace de contexto cuando se inserten, eliminen o reorganicen párrafos.
+
+Si necesitas conservar `paragraphIndex` por compatibilidad, resuélvelo a partir del identificador estable durante la composición.
+
+#### Reglas obligatorias
+
+- La fotografía debe colocarse junto al pasaje donde se describe su acontecimiento.
+- No debe desplazarse a otro capítulo para llenar espacio.
+- No debe anticiparse para aparecer en la vista previa.
+- No debe duplicarse sin una justificación editorial.
+- No debe sustituirse por imágenes artificiales.
+- No deben inventarse datos en sus pies.
+- No debe separarse innecesariamente de su explicación.
+
+Si la fotografía y su pie no caben en el espacio disponible, distribúyelos conjuntamente en una posición válida.
+
+Si no puede determinarse su relación con un acontecimiento, registra una incidencia.
+
+Cuando el prompt y la configuración editorial lo permitan, utiliza una galería complementaria identificada y documentada.
+
+Nunca la coloques silenciosamente en el primer capítulo.
+
+Preserva las opciones actuales de selección, tamaño, encuadre y presentación de fotografías.
+
+---
+
+### 10. AUDITORÍA DOCUMENTAL OBLIGATORIA
+
+Actualmente, recibir un JSON válido con capítulos no demuestra que el manuscrito sea fiel a las fuentes.
+
+Implementa una auditoría documental real antes de aprobar cualquier libro.
+
+Esta auditoría debe ejecutarse en el servidor y no depender exclusivamente de comprobaciones de la interfaz.
+
+#### 10.1. Matriz de trazabilidad
+
+Construye una matriz que relacione:
+
+- Testimonio original.
+- Identificador del registro.
+- Pregunta.
+- Respuesta.
+- Profundizaciones.
+- Datos y acontecimientos únicos.
+- Personas.
+- Relaciones.
+- Fechas.
+- Lugares.
+- Emociones documentadas.
+- Incertidumbres.
+- Fotografías.
+- Capítulo de destino.
+- Párrafo o fragmento de destino.
+- Estado de integración.
+
+Cada unidad significativa debe tener un destino verificable.
+
+#### 10.2. Auditoría de cobertura
+
+Comprueba que:
+
+- Se consideraron todos los registros testimoniales.
+- Se integraron todos los acontecimientos significativos.
+- No desaparecieron detalles únicos.
+- Se conservaron los recuerdos cotidianos.
+- Se preservaron opiniones y emociones relevantes.
+- Se incorporaron las descripciones testimoniales de las fotografías.
+- No existen registros omitidos sin justificación.
+
+Eliminar muletillas o repeticiones verbales no constituye pérdida documental.
+
+Eliminar hechos, matices o circunstancias significativas sí constituye una incidencia.
+
+#### 10.3. Auditoría de veracidad
+
+Comprueba que el manuscrito no contenga:
+
+- Hechos inventados.
+- Recuerdos añadidos.
+- Fechas sin respaldo.
+- Lugares inventados.
+- Personas incorrectamente identificadas.
+- Relaciones familiares alteradas.
+- Diálogos ficticios.
+- Emociones añadidas.
+- Motivaciones inventadas.
+- Conclusiones personales no documentadas.
+- Información atribuida a personas equivocadas.
+
+Conserva las incertidumbres originales.
+
+Expresiones como «creo», «no recuerdo» o «tal vez» no deben transformarse en certezas.
+
+#### 10.4. Auditoría estructural
+
+Valida que:
+
+- Cada capítulo tenga un identificador único.
+- La numeración sea consecutiva.
+- No existan capítulos duplicados.
+- No existan continuaciones huérfanas.
+- No se reinicie incorrectamente la numeración.
+- Las preguntas relacionadas se integren en capítulos narrativos coherentes.
+- No existan saltos cronológicos injustificados.
+- No se repitan episodios ya narrados.
+- El libro tenga un principio, desarrollo y cierre editorial coherentes.
+
+#### 10.5. Auditoría fotográfica
+
+Comprueba:
+
+- Correspondencia entre fotografía y acontecimiento.
+- Integración de su descripción.
+- Existencia del recurso visual.
+- Ausencia de duplicaciones arbitrarias.
+- Coherencia de pies de fotografía.
+- Integridad de los identificadores.
+- Ausencia de imágenes huérfanas sin tratamiento editorial.
+
+#### 10.6. Auditoría de paginación
+
+Comprueba:
+
+- Cada capítulo comienza en una página nueva.
+- Las respuestas no generan automáticamente capítulos.
+- Los párrafos del mismo capítulo fluyen correctamente.
+- No hay líneas cortadas.
+- No hay párrafos descartados.
+- No existen páginas vacías accidentales.
+- No existen saltos artificiales dentro de capítulos.
+- Las fotografías y pies no se salen del área imprimible.
+- La numeración corresponde al libro real.
+
+#### 10.7. Aprobación
+
+No apruebes un manuscrito únicamente porque la IA afirme que está completo.
+
+Utiliza validaciones estructurales deterministas y comprobaciones semánticas fundamentadas en las fuentes.
+
+Cuando sea necesario utilizar IA para la auditoría, exige resultados estructurados con referencias verificables a los registros originales.
+
+No inventes porcentajes de cobertura.
+
+Un resultado no verificable debe marcarse como pendiente y no como aprobado.
+
+Cada incidencia deberá registrarse con:
+
+- Tipo.
+- Gravedad.
+- Fuente original.
+- Fragmento afectado.
+- Explicación.
+- Acción correctiva.
+- Resultado de la nueva validación.
+
+Cuando una incidencia sea corregible, realiza una corrección localizada y repite los controles correspondientes.
+
+No reescribas innecesariamente capítulos que ya cumplan los requisitos.
+
+---
+
+### 11. RESPETAR EL PROMPT MAESTRO LITERARIO ACTIVO
+
+El Prompt Maestro configurado por el administrador para cada estilo narrativo debe mantenerse como autoridad editorial.
+
+No lo sustituyas ni reescribas.
+
+El sistema debe respetar los estilos A, B y C y la configuración del proveedor de IA correspondiente.
+
+Revisa las instrucciones complementarias añadidas por el código.
+
+Elimina o condiciona cualquier instrucción que pueda obligar a:
+
+- Inventar emociones.
+- Introducir reflexiones filosóficas no documentadas.
+- Crear motivaciones personales.
+- Redactar despedidas imaginarias.
+- Añadir epílogos autobiográficos sin respaldo.
+- Incorporar dedicatorias personales no proporcionadas.
+- Elaborar escenas para completar capítulos.
+
+El programa puede agregar instrucciones técnicas para obtener JSON válido, identificadores estables y ubicaciones fotográficas, pero esas instrucciones no deben contradecir el prompt literario activo.
+
+Si el prompt requiere fidelidad estricta, no puede existir otra instrucción interna que exija sentimentalismo artificial.
+
+La misma regla aplica tanto a Gemini como a OpenAI y a cualquier proveedor alternativo.
+
+---
+
+### 12. CORREGIR LA CACHÉ DE MANUSCRITOS
+
+Revisa tanto la caché del navegador como la del servidor.
+
+No permitas recuperar manuscritos obsoletos o editorialmente no validados como si fueran versiones definitivas.
+
+#### Clave de caché
+
+Considera, según corresponda:
+
+- Identificador de entrevista.
+- Versión o hash del compilado testimonial.
+- Cambios en respuestas.
+- Cambios en textos adicionales.
+- Fotografías y descripciones.
+- Estilo narrativo.
+- Versión y contenido del prompt literario.
+- Modo de estructura del libro.
+- Versión del esquema del manuscrito.
+- Versión de las reglas de generación y auditoría.
+- Cambios editoriales al contenido.
+
+Separa conceptualmente la caché del manuscrito de la caché de su composición visual.
+
+Modificar márgenes o formato no debe exigir necesariamente volver a llamar a la IA.
+
+#### Revalidación obligatoria
+
+Antes de reutilizar un manuscrito en caché:
+
+1. Comprueba su integridad.
+2. Comprueba la compatibilidad de versión.
+3. Comprueba su relación con las fuentes actuales.
+4. Comprueba su estado de auditoría.
+5. Verifica que no haya sido invalidado.
+6. Reutilízalo solamente cuando resulte seguro.
+
+Los registros antiguos sin auditoría válida deberán tratarse como pendientes de validación.
+
+No basta con que el objeto contenga un arreglo `chapters` no vacío.
+
+Las versiones aprobadas deben conservar información de trazabilidad, versiones del prompt y resultado de validación.
+
+---
+
+### 13. IMPEDIR LIBROS INCOMPLETOS CUANDO FALLA LA IA
+
+Revisa `handleSaveAndGenerateBookVersion` y las funciones del servidor relacionadas.
+
+Actualmente existen rutas de manejo de errores que permiten continuar con un manuscrito disponible cuando falla o expira la generación completa.
+
+Esto debe corregirse.
+
+#### Comportamiento obligatorio
+
+Si falla la generación del manuscrito integral:
+
+- No presentar una vista previa parcial como libro completo.
+- No marcar la generación como exitosa.
+- No guardar el contenido incompleto como versión definitiva.
+- No descargar un PDF definitivo silenciosamente incompleto.
+- No sustituir capítulos pendientes por contenido genérico.
+- No ocultar errores de tiempo de espera o conexión.
+
+Implementa manejo explícito de estados, por ejemplo:
+
+- Pendiente.
+- Generando.
+- Generación completa.
+- En auditoría.
+- Requiere correcciones.
+- Aprobado.
+- Error.
+
+Un borrador incompleto puede conservarse para recuperación interna, pero debe identificarse claramente como tal.
+
+La aplicación solo podrá habilitar la descarga definitiva cuando exista un manuscrito completo y validado.
+
+Si un proveedor falla y existe otro proveedor autorizado y configurado, mantén el comportamiento de respaldo existente, pero exige las mismas validaciones al resultado alternativo.
+
+Si los testimonios son extensos, utiliza procesamiento por etapas con persistencia segura, reintentos controlados y ensamblado verificable.
+
+No reduzcas ni omitas información para evitar tiempos de espera.
+
+---
+
+### 14. CORREGIR ÍNDICE Y ESTRUCTURA EDITORIAL
+
+El generador de PDF debe incorporar correctamente los elementos editoriales solicitados por el Prompt Maestro activo, respetando las capacidades y configuraciones de YouForever.
+
+Revisa:
+
+- Portada.
+- Portadilla.
+- Créditos editoriales.
+- Índice general.
+- Introducción o prólogo.
+- Capítulos.
+- Secciones documentales.
+- Epílogo, solamente cuando esté respaldado.
+- Dedicatoria, cuando corresponda.
+- Galería complementaria, si es necesaria.
+- Cierre editorial.
+
+#### Índice
+
+El índice debe obtenerse de la estructura real del manuscrito.
+
+Debe reflejar:
+
+- Títulos definitivos.
+- Orden definitivo.
+- Numeración definitiva.
+- Página real de inicio de cada capítulo.
+
+Implementa la composición en las fases necesarias para calcular primero las páginas y después completar correctamente el índice.
+
+Si el índice provoca cambios de paginación, recalcula hasta obtener una distribución estable.
+
+Nunca inventes números de página.
+
+#### Créditos
+
+Distingue correctamente:
+
+- Protagonista y autoría testimonial.
+- Participación editorial de YouForever.
+- Asistencia de inteligencia artificial.
+- Información editorial disponible.
+
+No inventes registros, derechos legales, editores ni datos de publicación.
+
+#### Configuración
+
+No impongas nuevos tamaños de papel ni tamaños de letra desde este proceso.
+
+Respeta los parámetros configurables existentes en la aplicación.
+
+---
+
+### 15. GARANTIZAR INTEGRIDAD Y CONSISTENCIA DEL PDF
+
+Antes de exportar, valida que:
+
+1. Todos los capítulos aprobados estén presentes.
+2. Todos los párrafos aprobados estén representados.
+3. Las líneas no hayan sido cortadas.
+4. Los fragmentos no hayan sido descartados.
+5. Cada capítulo comience en una página nueva.
+6. Las páginas de continuación mantengan el capítulo correcto.
+7. Las fotografías conserven su anclaje narrativo.
+8. El índice corresponda a las páginas definitivas.
+9. No existan páginas vacías accidentales.
+10. El documento pueda abrirse correctamente.
+
+El renderizador no puede limitarse a detenerse cuando se llena una página.
+
+Debe comunicar el contenido pendiente y continuar su representación en la página siguiente.
+
+En particular, elimina las rutas donde una instrucción `break` provoque que se pierdan líneas o párrafos que no alcanzaron a dibujarse.
+
+La prueba de integridad debe comparar el contenido aprobado con el contenido efectivamente compuesto, considerando identificadores de fragmentos y elementos, no únicamente cantidades de caracteres.
+
+Mantén el estilo visual oficial de YouForever y los parámetros de maquetación elegidos por el usuario.
+
+---
+
+### 16. PRUEBAS AUTOMATIZADAS OBLIGATORIAS
+
+Agrega pruebas de regresión al proyecto.
+
+No utilices únicamente pruebas basadas en casos felices.
+
+#### Prueba 1. Varias preguntas, un capítulo
+
+Preparar una entrevista ficticia con varias preguntas relacionadas con un mismo período autobiográfico.
+
+Resultado esperado:
+
+- Las respuestas se integran narrativamente.
+- No se crea un capítulo por pregunta.
+- Se conserva la información significativa.
+- El capítulo puede abarcar varias páginas.
+- No existen saltos artificiales entre sus respuestas.
+
+#### Prueba 2. Capítulos independientes
+
+Preparar una entrevista con acontecimientos de etapas o temas suficientemente diferentes.
+
+Resultado esperado:
+
+- Se generan capítulos distintos cuando corresponde.
+- Cada capítulo comienza en una página nueva.
+- La última página del capítulo anterior no recibe contenido del siguiente.
+- El cambio de capítulo no depende del número de preguntas.
+
+#### Prueba 3. Paginación continua
+
+Crear un capítulo con numerosos párrafos de distintas longitudes.
+
+Resultado esperado:
+
+- El capítulo ocupa tantas páginas como requiera.
+- Las páginas aprovechan adecuadamente el espacio.
+- Ningún párrafo queda omitido.
+- Ninguna línea queda cortada.
+- No aparecen páginas parcialmente vacías por límites artificiales de caracteres o párrafos.
+
+#### Prueba 4. Vista previa
+
+Generar el manuscrito integral de una entrevista con múltiples capítulos.
+
+Resultado esperado:
+
+- La vista previa presenta las primeras páginas reales.
+- No adelanta páginas posteriores.
+- No cambia el orden de los acontecimientos.
+- No introduce contenido que no exista en el manuscrito.
+- El PDF completo conserva las mismas páginas iniciales bajo idéntica configuración.
+
+#### Prueba 5. Fotografía tardía
+
+Preparar una entrevista cuya única fotografía corresponda a un acontecimiento narrado hacia el final.
+
+Resultado esperado:
+
+- La fotografía permanece en su contexto correcto.
+- No se adelanta a la vista previa.
+- No aparece en el primer capítulo por defecto.
+- No se duplica.
+
+#### Prueba 6. Duplicación de testimonios
+
+Preparar dos respuestas que describan un mismo acontecimiento con detalles complementarios.
+
+Resultado esperado:
+
+- El acontecimiento se narra una sola vez.
+- Se conservan los detalles únicos.
+- No se crean capítulos duplicados.
+- No desaparecen hechos significativos.
+
+#### Prueba 7. Fidelidad documental
+
+Introducir testimonios con fechas aproximadas, recuerdos inciertos y declaraciones expresas de desconocimiento.
+
+Resultado esperado:
+
+- Se conservan las incertidumbres.
+- No se convierten posibilidades en certezas.
+- No se inventan acontecimientos.
+- La auditoría detecta afirmaciones sin respaldo.
+
+#### Prueba 8. Fallo del proveedor
+
+Simular:
+
+- Tiempo de espera agotado.
+- Respuesta vacía.
+- JSON incorrecto.
+- Respuesta parcial.
+- Fallo de Gemini.
+- Fallo de OpenAI.
+
+Resultado esperado:
+
+- No se guarda un libro parcial como definitivo.
+- Se comunica el error.
+- Se mantienen los borradores recuperables.
+- No se presenta una generación incompleta como exitosa.
+
+#### Prueba 9. Caché obsoleta
+
+Modificar una respuesta, una descripción fotográfica o el prompt literario.
+
+Resultado esperado:
+
+- Se invalida el manuscrito afectado.
+- No se recupera una versión obsoleta como aprobada.
+- Se repite la auditoría cuando corresponda.
+- Los cambios exclusivamente visuales no provocan una nueva redacción innecesaria.
+
+#### Prueba 10. Diferentes formatos
+
+Comprobar A5, 6 × 9 pulgadas y Carta, utilizando diferentes tamaños de texto y opciones tipográficas admitidas.
+
+Resultado esperado:
+
+- Se conservan las configuraciones.
+- Los capítulos comienzan en páginas nuevas.
+- No se corta contenido.
+- Los espacios se aprovechan adecuadamente.
+- El mismo manuscrito conserva su integridad.
+
+#### Prueba 11. Índice
+
+Crear un libro con múltiples capítulos y diferente paginación según el formato.
+
+Resultado esperado:
+
+- El índice corresponde a la paginación definitiva.
+- Los títulos son correctos.
+- No existen referencias a capítulos ausentes.
+- Los números de página se actualizan al recomponer el libro.
+
+#### Prueba 12. Conservación exhaustiva
+
+Preparar un conjunto de testimonios con recuerdos cotidianos, acontecimientos repetidos, personas, objetos, fechas, emociones y detalles únicos.
+
+Resultado esperado:
+
+- Todas las unidades autobiográficas significativas cuentan con una referencia de integración o una incidencia justificada.
+- No se aprueban omisiones detectadas.
+- La auditoría produce resultados verificables.
+- La cantidad de palabras no se utiliza como sustituto de la cobertura semántica.
+
+#### Prueba 13. Compatibilidad
+
+Abrir libros previamente guardados y probar las tres modalidades literarias.
+
+Resultado esperado:
+
+- Se conservan los libros históricos.
+- No se pierden configuraciones.
+- No se rompen funciones existentes.
+- Los manuscritos antiguos no se consideran automáticamente auditados.
+
+---
+
+### 17. RESTRICCIONES DE IMPLEMENTACIÓN
+
+**No debes realizar cambios ajenos a los problemas especificados.**
+
+Preserva:
+
+- Autenticación y permisos.
+- Entrevistas y cuestionarios.
+- Preguntas de profundización.
+- Almacenamiento de respuestas.
+- Archivos de audio.
+- Fotografías originales.
+- Configuración de motores de IA.
+- Prompts literarios A, B y C.
+- Configuración de modelos Gemini y OpenAI.
+- Sistema de respaldo entre proveedores.
+- Estilos de portada.
+- Tamaños de papel.
+- Tamaños tipográficos.
+- Márgenes.
+- Paletas de colores.
+- Identidad visual de YouForever.
+- Administración de usuarios.
+- Versiones históricas de libros.
+- Funciones ajenas a la generación autobiográfica.
+
+No cambies nombres de interfaces públicas, contratos de API ni estructuras persistidas sin actualizar todos sus consumidores y establecer compatibilidad.
+
+No crees una implementación paralela que deje activa la ruta defectuosa anterior.
+
+No uses textos autobiográficos ficticios para llenar espacios.
+
+No elimines testimonios para reducir el número de páginas.
+
+No desactives controles de seguridad.
+
+No expongas claves ni secretos de los proveedores.
+
+No conviertas una corrección editorial en una reestructuración general del proyecto.
+
+Si necesitas modificar estructuras de datos, hazlo de manera controlada y con migración o compatibilidad documentada.
+
+---
+
+### 18. CRITERIOS DE ACEPTACIÓN FINAL
+
+La corrección únicamente podrá considerarse completada cuando se cumplan las siguientes condiciones:
+
+**A. Capítulos**
+
+Cada capítulo real comienza obligatoriamente en una página nueva.
+
+Las preguntas individuales no generan capítulos automáticamente.
+
+La organización narrativa agrupa correctamente los testimonios relacionados.
+
+**B. Continuidad**
+
+Los párrafos dentro de un mismo capítulo fluyen continuamente entre páginas.
+
+Los saltos interiores dependen del espacio real disponible.
+
+**C. Manuscrito único**
+
+La vista previa y el libro definitivo utilizan el mismo manuscrito integral y la misma versión aprobada.
+
+No existen contenidos narrativos superpuestos procedentes de dos generaciones independientes.
+
+**D. Fidelidad**
+
+Todas las unidades testimoniales significativas están representadas fielmente o tienen una incidencia justificada.
+
+No se aprueban invenciones ni alteraciones documentales críticas.
+
+**E. Fotografías**
+
+Las fotografías mantienen sus asociaciones testimoniales y su posición narrativa.
+
+**F. Paginación**
+
+Ninguna línea, párrafo, fotografía o fragmento aprobado desaparece por límites de renderizado.
+
+**G. Estructura**
+
+El índice, los créditos y los capítulos corresponden a la composición definitiva.
+
+**H. Caché**
+
+Ningún manuscrito obsoleto o sin validar puede utilizarse como versión aprobada.
+
+**I. Errores**
+
+Un fallo de generación no puede producir silenciosamente un libro incompleto.
+
+**J. Compatibilidad**
+
+Las funciones existentes de YouForever continúan operando correctamente.
+
+---
+
+### 19. ENTREGABLES Y VERIFICACIÓN
+
+Implementa directamente los cambios necesarios en el proyecto.
+
+Al finalizar, proporciona un informe técnico que contenga:
+
+1. Archivos modificados.
+2. Funciones corregidas.
+3. Causa original de cada defecto.
+4. Solución implementada.
+5. Arquitectura definitiva de generación.
+6. Forma en que se agrupan las preguntas en capítulos.
+7. Forma en que se ejecutan los saltos de página.
+8. Funcionamiento de la nueva vista previa.
+9. Funcionamiento de la auditoría documental.
+10. Cambios realizados a la paginación.
+11. Cambios realizados a la caché.
+12. Correcciones fotográficas y editoriales.
+13. Pruebas automatizadas ejecutadas y resultados.
+14. Limitaciones pendientes, si existen.
+
+Ejecuta las comprobaciones de TypeScript, compilación y las pruebas aplicables disponibles en el repositorio.
+
+No declares que una prueba pasó si no fue ejecutada.
+
+No declares resuelto un problema únicamente porque se modificó el código.
+
+Si una corrección no puede completarse, informa exactamente cuál quedó pendiente y por qué.
+
+No alteres ni reemplaces el Prompt Maestro literario existente.
+
+La implementación debe funcionar con cualquier persona, cualquier cantidad de testimonios y los distintos formatos y estilos disponibles en YouForever.
+
+---
+
+## INSTRUCCIÓN FINAL
+
+Corrige la arquitectura de generación de libros autobiográficos de YouForever respetando esta regla central:
+
+**UN CAPÍTULO REAL COMIENZA EN UNA PÁGINA NUEVA, PERO UN CAPÍTULO PUEDE CONTENER MUCHAS PREGUNTAS, RESPUESTAS, PROFUNDIZACIONES Y RECUERDOS RELACIONADOS.**
+
+Las páginas que forman un mismo capítulo deben aprovechar el espacio disponible y continuar sin interrupciones artificiales.
+
+La vista previa y el PDF definitivo deben utilizar un único manuscrito integral, documentalmente fiel y validado.
+
+Las fotografías deben permanecer asociadas a sus acontecimientos originales.
+
+No se deben permitir capítulos duplicados, omisiones testimoniales, invenciones documentales, cachés obsoletas aprobadas ni pérdidas de contenido durante la paginación.
+
+**Implementa, prueba y documenta todas las correcciones necesarias en el código fuente real de YouForever.**

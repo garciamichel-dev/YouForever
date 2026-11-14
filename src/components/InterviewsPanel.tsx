@@ -28,12 +28,19 @@ import {
   AlertTriangle,
   Download,
   Settings,
+  CopyPlus,
+  Save,
+  Minus,
+  RefreshCw,
+  ClipboardList,
 } from 'lucide-react';
 import {
   InterviewRecord,
   ParticipantRecord,
   SufficiencyStatus,
   computeLayoutEditQuotaStatus,
+  sortInterviewsWithCopies,
+  buildDefaultAdminCopyNote,
 } from '../logic/interviewRules.ts';
 import {
   ParticipantBookVersionRecord,
@@ -69,8 +76,26 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
   onOpenManuscript,
   onEnterParticipantPortal,
 }) => {
-  const [interviews, setInterviews] = useState<EnrichedInterview[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [interviews, setInterviews] = useState<EnrichedInterview[]>(() => {
+    try {
+      const cached = localStorage.getItem('foreveryou_interviews_cache');
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch {}
+    return [];
+  });
+  const [loading, setLoading] = useState<boolean>(() => {
+    try {
+      const cached = localStorage.getItem('foreveryou_interviews_cache');
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length > 0) return false;
+      }
+    } catch {}
+    return true;
+  });
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('todos');
   const [copiedToken, setCopiedToken] = useState<string | null>(null);
@@ -124,10 +149,58 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
   const [restoreQuotaOnDelete, setRestoreQuotaOnDelete] = useState<boolean>(false);
   const [deletingVersion, setDeletingVersion] = useState<boolean>(false);
 
+  // Duplication, admin-only copy note, and inline quota states
+  const [duplicateTarget, setDuplicateTarget] = useState<EnrichedInterview | null>(null);
+  const [duplicatingId, setDuplicatingId] = useState<string | null>(null);
+  const [copyNoteDrafts, setCopyNoteDrafts] = useState<Record<string, string>>({});
+  const [savingCopyNoteId, setSavingCopyNoteId] = useState<string | null>(null);
+  const [savedCopyNoteId, setSavedCopyNoteId] = useState<string | null>(null);
+  const [inlineQuotaDrafts, setInlineQuotaDrafts] = useState<Record<string, number>>({});
+  const [savingInlineQuotaId, setSavingInlineQuotaId] = useState<string | null>(null);
+  const [savedInlineQuotaId, setSavedInlineQuotaId] = useState<string | null>(null);
+  const [syncingFirestore, setSyncingFirestore] = useState<boolean>(false);
+  const [lastUpdatedLabel, setLastUpdatedLabel] = useState<string | null>(null);
+  const lastFetchTimestampRef = React.useRef<number>(0);
+  const [firestoreSyncStatus, setFirestoreSyncStatus] = useState<{
+    lastAttemptAt: string | null;
+    lastSuccessAt: string | null;
+    lastError: string | null;
+    quotaExhausted: boolean;
+    source: 'firestore' | 'disk_cache';
+    syncedRemoteInterviewsCount: number;
+    localInterviewsCount: number;
+  } | null>(null);
+
+  // "Datos de registro" modal state (per interviewee inspection & edit)
+  const [registrationModalTarget, setRegistrationModalTarget] = useState<{
+    interview: EnrichedInterview;
+    focusedParticipantId: string;
+  } | null>(null);
+  const [regTitleDraft, setRegTitleDraft] = useState<string>('');
+  const [regParticipantDrafts, setRegParticipantDrafts] = useState<
+    Array<{
+      participantId: string;
+      name: string;
+      email: string;
+      age: string;
+      city: string;
+      relationship: string;
+      role: 'primary' | 'contributor';
+      accessCode?: string;
+      privacyAcceptedAt?: string;
+      privacyVersion?: string;
+    }>
+  >([]);
+  const [regModalError, setRegModalError] = useState<string | null>(null);
+  const [savingRegistration, setSavingRegistration] = useState<boolean>(false);
+
   const fetchInterviews = async () => {
     try {
-      setLoading(true);
-      const [resInterviews, resAppInfo] = await Promise.all([
+      // If we don't have any cached interviews, show loading spinner
+      if (interviews.length === 0) {
+        setLoading(true);
+      }
+      const [resInterviews, resAppInfo, resSyncStatus] = await Promise.all([
         apiFetch<EnrichedInterview[]>('/api/interviews', {
           headers: {
             'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
@@ -137,15 +210,35 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
         apiFetch<{ appUrl: string; sharedUrl: string; isDevUrl: boolean }>('/api/app-info', {
           retries: 1,
         }),
+        apiFetch<{
+          lastAttemptAt: string | null;
+          lastSuccessAt: string | null;
+          lastError: string | null;
+          quotaExhausted: boolean;
+          source: 'firestore' | 'disk_cache';
+          syncedRemoteInterviewsCount: number;
+          localInterviewsCount: number;
+        }>('/api/interviews/sync-status', {
+          headers: {
+            'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
+          },
+          retries: 1,
+        }),
       ]);
+
+      if (resSyncStatus.ok && resSyncStatus.data) {
+        setFirestoreSyncStatus(resSyncStatus.data);
+      }
 
       if (resInterviews.ok && resInterviews.data) {
         let finalList = resInterviews.data;
         try {
           const cachedRaw = localStorage.getItem('foreveryou_interviews_cache');
           const cachedBvRaw = localStorage.getItem('foreveryou_book_versions_cache');
+          const deletedBvRaw = localStorage.getItem('foreveryou_deleted_book_version_ids');
           const cachedList: EnrichedInterview[] = cachedRaw ? JSON.parse(cachedRaw) : [];
           const cachedBvList: ParticipantBookVersionRecord[] = cachedBvRaw ? JSON.parse(cachedBvRaw) : [];
+          const deletedBvSet = new Set<string>(deletedBvRaw ? JSON.parse(deletedBvRaw) : []);
 
           const serverMap = new Map(finalList.map((i) => [i.id, i]));
           const serverBvIds = new Set(
@@ -153,26 +246,55 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
           );
 
           const interviewsToSync = Array.isArray(cachedList)
-            ? cachedList.filter((c) => {
-                if (!c || !c.id) return false;
-                const s = serverMap.get(c.id);
-                if (!s) return true;
-                if (c.userDeclaredComplete && !s.userDeclaredComplete) {
-                  const serverReopenedTime = s.reopenedAt ? new Date(s.reopenedAt).getTime() : 0;
-                  const cachedClosedTime = c.closedAt ? new Date(c.closedAt).getTime() : 0;
-                  if (s.status === 'open' && (serverReopenedTime >= cachedClosedTime || !s.closedAt)) {
-                    return false;
+            ? cachedList
+                .map((c): EnrichedInterview | null => {
+                  if (!c || !c.id) return null;
+                  const cleanVers = Array.isArray(c.bookVersions)
+                    ? c.bookVersions.filter(
+                        (bv) =>
+                          bv &&
+                          bv.id &&
+                          !deletedBvSet.has(bv.id) &&
+                          !deletedBvSet.has(`pbv_${c.id}_v${bv.versionNumber}`)
+                      )
+                    : [];
+                  return {
+                    ...c,
+                    bookVersions: cleanVers,
+                    bookVersionsCount: cleanVers.length,
+                  };
+                })
+                .filter((c): c is EnrichedInterview => {
+                  if (!c || !c.id) return false;
+                  const s = serverMap.get(c.id);
+                  if (!s) return true;
+                  if (c.userDeclaredComplete && !s.userDeclaredComplete) {
+                    const serverReopenedTime = s.reopenedAt ? new Date(s.reopenedAt).getTime() : 0;
+                    const cachedClosedTime = c.closedAt ? new Date(c.closedAt).getTime() : 0;
+                    if (s.status === 'open' && (serverReopenedTime >= cachedClosedTime || !s.closedAt)) {
+                      return false;
+                    }
+                    return true;
                   }
-                  return true;
-                }
-                if ((c.bookGeneratedCount ?? 0) > (s.bookGeneratedCount ?? 0)) return true;
-                if ((c.bookVersions?.length ?? 0) > (s.bookVersions?.length ?? 0)) return true;
-                return false;
-              })
+                  const hasDeletedForInterview = Array.from(deletedBvSet).some((id) =>
+                    id.includes(c.id)
+                  );
+                  if (!hasDeletedForInterview) {
+                    if ((c.bookVersions?.length ?? 0) > (s.bookVersions?.length ?? 0)) return true;
+                  }
+                  return false;
+                })
             : [];
 
           const bookVersionsToSync = Array.isArray(cachedBvList)
-            ? cachedBvList.filter((bv) => bv && bv.id && !serverBvIds.has(bv.id))
+            ? cachedBvList.filter(
+                (bv) =>
+                  bv &&
+                  bv.id &&
+                  !serverBvIds.has(bv.id) &&
+                  !deletedBvSet.has(bv.id) &&
+                  !deletedBvSet.has(`pbv_${bv.interviewId}_v${bv.versionNumber}`)
+              )
             : [];
 
           if (interviewsToSync.length > 0 || bookVersionsToSync.length > 0) {
@@ -191,12 +313,56 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
               finalList = syncRes.data;
             }
           }
-          localStorage.setItem('foreveryou_interviews_cache', JSON.stringify(finalList));
-        } catch (_cacheErr) {
-          // Ignore localStorage quota/parse issues
+        } catch {
+          // Ignore localStorage error
         }
-        setInterviews(finalList);
-      } else if (resInterviews.error && adminEmail) {
+        const orderedFinalList = sortInterviewsWithCopies(finalList);
+        try {
+          const sanitizedForCache = orderedFinalList.map((inv) => ({
+            ...inv,
+            bookVersions: (inv.bookVersions || []).map((bv) => ({
+              id: bv.id,
+              versionNumber: bv.versionNumber,
+              interviewId: bv.interviewId,
+              participantId: bv.participantId,
+              participantName: bv.participantName,
+              title: bv.title,
+              subtitle: bv.subtitle,
+              authors: bv.authors,
+              dedication: bv.dedication,
+              closingPageText: bv.closingPageText,
+              narrativeStyle: bv.narrativeStyle,
+              editorialConfig: bv.editorialConfig,
+              manuscript: {
+                title: bv.manuscript?.title || '',
+                subtitle: bv.manuscript?.subtitle || '',
+                chapters: (bv.manuscript?.chapters || []).map((ch) => ({
+                  id: ch.id,
+                  partNumber: ch.partNumber,
+                  dimensionKey: ch.dimensionKey,
+                  title: ch.title,
+                  paragraphs: [],
+                })),
+              },
+              pageCount: bv.pageCount,
+              createdAt: bv.createdAt,
+              fileName: bv.fileName,
+            })),
+          }));
+          localStorage.setItem('foreveryou_interviews_cache', JSON.stringify(sanitizedForCache));
+        } catch {
+          // Ignore localStorage quota
+        }
+        setInterviews(orderedFinalList);
+        lastFetchTimestampRef.current = Date.now();
+        setLastUpdatedLabel(
+          new Date().toLocaleTimeString('es-MX', {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+          })
+        );
+      } else if (resInterviews.error) {
         console.warn('Notice loading interviews:', resInterviews.error);
       }
 
@@ -211,8 +377,32 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
   };
 
   useEffect(() => {
-    fetchInterviews();
+    void fetchInterviews();
   }, [refreshTrigger]);
+
+  // Automatic low-read incremental refresh across www.youforever.app and active devices
+  useEffect(() => {
+    const intervalId = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        void fetchInterviews();
+      }
+    }, 30_000);
+
+    const handleVisibilityOrFocus = () => {
+      if (document.visibilityState === 'visible' && Date.now() - lastFetchTimestampRef.current > 15_000) {
+        void fetchInterviews();
+      }
+    };
+
+    window.addEventListener('focus', handleVisibilityOrFocus);
+    document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+
+    return () => {
+      clearInterval(intervalId);
+      window.removeEventListener('focus', handleVisibilityOrFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+    };
+  }, [adminEmail]);
 
   const getPublicShareUrl = (token: string) => {
     return `https://youforever.app/interview?token=${token}`;
@@ -376,6 +566,10 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
       });
       const data = await res.json();
       if (data.success) {
+        setInlineQuotaDrafts((prev) => ({
+          ...prev,
+          [bookStudioAdminTarget.id]: Math.max(0, quotaRemainingInput),
+        }));
         await fetchInterviews();
         setBookStudioAdminTarget((prev) =>
           prev
@@ -524,10 +718,16 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
       );
       const data = await res.json();
       if (data.success) {
+        const synthId = `pbv_${interview.id}_v${version.versionNumber}`;
+        const serverRemainingVersions: ParticipantBookVersionRecord[] | undefined =
+          Array.isArray(data.data?.allVersions) ? data.data.allVersions : undefined;
+
         if (bookStudioAdminTarget && bookStudioAdminTarget.id === interview.id) {
-          const updatedVersions = (bookStudioAdminTarget.bookVersions || []).filter(
-            (v) => v.id !== version.id
-          );
+          const updatedVersions =
+            serverRemainingVersions ??
+            (bookStudioAdminTarget.bookVersions || []).filter(
+              (v) => v.id !== version.id && v.id !== synthId && v.versionNumber !== version.versionNumber
+            );
           const nextQuotaRemaining = restoreQuotaOnDelete
             ? quotaRemainingInput + 1
             : quotaRemainingInput;
@@ -536,32 +736,54 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
             ...bookStudioAdminTarget,
             bookVersions: updatedVersions,
             bookVersionsCount: updatedVersions.length,
+            bookGeneratedCount: updatedVersions.length,
             layoutEditsUsed: restoreQuotaOnDelete
               ? Math.max(0, (bookStudioAdminTarget.layoutEditsUsed || 1) - 1)
               : bookStudioAdminTarget.layoutEditsUsed,
           });
         }
 
-        setInterviews((prevList) =>
-          prevList.map((item) => {
+        setInterviews((prevList) => {
+          const nextList = prevList.map((item) => {
             if (item.id !== interview.id) return item;
-            const updatedVersions = (item.bookVersions || []).filter((v) => v.id !== version.id);
+            const updatedVersions =
+              serverRemainingVersions ??
+              (item.bookVersions || []).filter(
+                (v) => v.id !== version.id && v.id !== synthId && v.versionNumber !== version.versionNumber
+              );
             return {
               ...item,
               bookVersions: updatedVersions,
               bookVersionsCount: updatedVersions.length,
+              bookGeneratedCount: updatedVersions.length,
               layoutEditsUsed: restoreQuotaOnDelete
                 ? Math.max(0, (item.layoutEditsUsed || 1) - 1)
                 : item.layoutEditsUsed,
             };
-          })
-        );
+          });
+          try {
+            localStorage.setItem('foreveryou_interviews_cache', JSON.stringify(nextList));
+          } catch (_e) {
+            // ignore
+          }
+          return nextList;
+        });
 
         try {
+          const deletedRaw = localStorage.getItem('foreveryou_deleted_book_version_ids');
+          const deletedList: string[] = deletedRaw ? JSON.parse(deletedRaw) : [];
+          const nextDeleted = Array.from(new Set([...deletedList, version.id, synthId]));
+          localStorage.setItem('foreveryou_deleted_book_version_ids', JSON.stringify(nextDeleted));
+
           const cachedRaw = localStorage.getItem('foreveryou_book_versions_cache');
           if (cachedRaw) {
             const parsed: ParticipantBookVersionRecord[] = JSON.parse(cachedRaw);
-            const filtered = parsed.filter((v) => v.id !== version.id);
+            const filtered = parsed.filter(
+              (v) =>
+                v.id !== version.id &&
+                v.id !== synthId &&
+                !(v.interviewId === interview.id && v.versionNumber === version.versionNumber)
+            );
             localStorage.setItem('foreveryou_book_versions_cache', JSON.stringify(filtered));
           }
         } catch (_e) {
@@ -720,6 +942,293 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
     }
   };
 
+  const handleDuplicateInterview = async (interview: EnrichedInterview) => {
+    try {
+      setDuplicatingId(interview.id);
+      const res = await fetch(`/api/interviews/${encodeURIComponent(interview.id)}/duplicate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
+        },
+      });
+      const data = await res.json();
+      if (data.success && data.data?.interview) {
+        const duplicated: EnrichedInterview = data.data.interview;
+        const newTokens: Array<{ accessCode?: string }> = data.data.participantTokens || [];
+        const codesSummary = newTokens
+          .map((t) => t.accessCode)
+          .filter(Boolean)
+          .join(', ');
+
+        setInterviews((prev) => {
+          const next = sortInterviewsWithCopies([...prev, duplicated]);
+          try {
+            localStorage.setItem('foreveryou_interviews_cache', JSON.stringify(next));
+          } catch (_e) {
+            // ignore
+          }
+          return next;
+        });
+
+        await fetchInterviews();
+        setNoticeMessage(
+          `Entrevista «${interview.title}» duplicada exitosamente${
+            codesSummary ? ` con nuevo código de acceso: ${codesSummary}` : ''
+          }. La copia aparece listada debajo de la original.`
+        );
+        setTimeout(() => setNoticeMessage(null), 6000);
+      } else {
+        setNoticeMessage(data.error || 'No se pudo duplicar la entrevista.');
+      }
+    } catch (_err) {
+      setNoticeMessage('Error de red al duplicar la entrevista.');
+    } finally {
+      setDuplicatingId(null);
+      setDuplicateTarget(null);
+    }
+  };
+
+  const handleSaveAdminCopyNote = async (interview: EnrichedInterview) => {
+    const draftValue =
+      copyNoteDrafts[interview.id] !== undefined
+        ? copyNoteDrafts[interview.id]
+        : interview.adminCopyNote ||
+          buildDefaultAdminCopyNote(
+            interview.copiedFromName || interview.participants?.[0]?.name || interview.title,
+            interview.copiedAt || interview.openedAt
+          );
+    try {
+      setSavingCopyNoteId(interview.id);
+      const res = await fetch(`/api/interviews/${encodeURIComponent(interview.id)}/copy-note`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
+        },
+        body: JSON.stringify({ adminCopyNote: draftValue }),
+      });
+      const data = await res.json();
+      if (data.success && data.data) {
+        setInterviews((prev) => {
+          const next = prev.map((item) =>
+            item.id === interview.id
+              ? { ...item, adminCopyNote: data.data.adminCopyNote }
+              : item
+          );
+          try {
+            localStorage.setItem('foreveryou_interviews_cache', JSON.stringify(next));
+          } catch (_e) {
+            // ignore
+          }
+          return next;
+        });
+        setSavedCopyNoteId(interview.id);
+        setTimeout(() => setSavedCopyNoteId((curr) => (curr === interview.id ? null : curr)), 2500);
+      } else {
+        setNoticeMessage(data.error || 'Error al guardar la nota administrativa.');
+      }
+    } catch (_err) {
+      setNoticeMessage('Error de red al guardar la nota administrativa.');
+    } finally {
+      setSavingCopyNoteId(null);
+    }
+  };
+
+  const handleSaveInlineQuota = async (interview: EnrichedInterview) => {
+    const currentStatus = computeLayoutEditQuotaStatus(interview);
+    const desiredRemaining =
+      inlineQuotaDrafts[interview.id] !== undefined
+        ? Math.max(0, inlineQuotaDrafts[interview.id])
+        : currentStatus.remainingEdits;
+    try {
+      setSavingInlineQuotaId(interview.id);
+      const res = await fetch(`/api/interviews/${encodeURIComponent(interview.id)}/layout-quota`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
+        },
+        body: JSON.stringify({ remainingEdits: desiredRemaining }),
+      });
+      const data = await res.json();
+      if (data.success && data.data) {
+        setInterviews((prev) => {
+          const next = prev.map((item) =>
+            item.id === interview.id
+              ? {
+                  ...item,
+                  layoutEditsAllowed: data.data.layoutEditsAllowed,
+                  layoutEditsUsed: data.data.layoutEditsUsed,
+                }
+              : item
+          );
+          try {
+            localStorage.setItem('foreveryou_interviews_cache', JSON.stringify(next));
+          } catch (_e) {
+            // ignore
+          }
+          return next;
+        });
+        setSavedInlineQuotaId(interview.id);
+        setTimeout(
+          () => setSavedInlineQuotaId((curr) => (curr === interview.id ? null : curr)),
+          2500
+        );
+        setNoticeMessage(
+          `Cuota de edición actualizada para «${interview.title}»: ${desiredRemaining} edición(es) disponible(s).`
+        );
+        setTimeout(() => setNoticeMessage(null), 4000);
+      } else {
+        setNoticeMessage(data.error || 'No se pudo actualizar la cuota.');
+      }
+    } catch (_err) {
+      setNoticeMessage('Error de red al actualizar la cuota de edición.');
+    } finally {
+      setSavingInlineQuotaId(null);
+    }
+  };
+
+  const handleSyncFirestore = async () => {
+    try {
+      setSyncingFirestore(true);
+      const res = await fetch('/api/interviews/sync-firestore', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
+        },
+      });
+      const json = await res.json();
+      if (json?.syncResult?.status) {
+        setFirestoreSyncStatus(json.syncResult.status);
+      }
+      if (json?.success && Array.isArray(json.data)) {
+        const ordered = sortInterviewsWithCopies<EnrichedInterview>(json.data as EnrichedInterview[]);
+        setInterviews(ordered);
+        lastFetchTimestampRef.current = Date.now();
+        setLastUpdatedLabel(
+          new Date().toLocaleTimeString('es-MX', {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+          })
+        );
+        try {
+          localStorage.setItem('foreveryou_interviews_cache', JSON.stringify(ordered));
+        } catch {
+          // ignore
+        }
+        setNoticeMessage(
+          json.syncResult?.message ||
+            'Sincronización con Cloud Firestore completada sin sobrescribir registros.'
+        );
+        setTimeout(() => setNoticeMessage(null), 6000);
+      } else {
+        setNoticeMessage(json?.error || 'No se pudo completar la sincronización con Firestore.');
+      }
+    } catch (_err) {
+      setNoticeMessage('Error de red al sincronizar con Cloud Firestore.');
+    } finally {
+      setSyncingFirestore(false);
+    }
+  };
+
+  const handleOpenRegistrationModal = (
+    interview: EnrichedInterview,
+    participant: ParticipantRecord & { plainToken?: string; accessCode?: string }
+  ) => {
+    setRegModalError(null);
+    setRegTitleDraft(interview.title || '');
+    const orderedParts = [...interview.participants].sort((a, b) => {
+      if (a.id === participant.id) return -1;
+      if (b.id === participant.id) return 1;
+      return a.role === 'primary' && b.role !== 'primary' ? -1 : 0;
+    });
+    setRegParticipantDrafts(
+      orderedParts.map((part) => ({
+        participantId: part.id,
+        name: part.name || '',
+        email: part.email || '',
+        age: part.age !== undefined && part.age !== null ? String(part.age) : '',
+        city: part.city || '',
+        relationship: part.relationship || '',
+        role: part.role || 'contributor',
+        accessCode: part.accessCode,
+        privacyAcceptedAt: part.privacyAcceptedAt,
+        privacyVersion: part.privacyVersion,
+      }))
+    );
+    setRegistrationModalTarget({ interview, focusedParticipantId: participant.id });
+  };
+
+  const handleSaveRegistrationModal = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!registrationModalTarget) return;
+    setRegModalError(null);
+    try {
+      setSavingRegistration(true);
+      const res = await fetch(
+        `/api/admin/interviews/${encodeURIComponent(registrationModalTarget.interview.id)}/registration-data`,
+        {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
+          },
+          body: JSON.stringify({
+            interviewTitle: regTitleDraft.trim(),
+            participants: regParticipantDrafts.map((d) => ({
+              participantId: d.participantId,
+              name: d.name.trim(),
+              email: d.email.trim(),
+              age: d.age.trim() === '' ? null : Number(d.age.trim()),
+              city: d.city.trim(),
+              relationship: d.relationship.trim(),
+              role: d.role,
+            })),
+          }),
+        }
+      );
+      const json = await res.json();
+      if (!res.ok || !json.success || !json.data) {
+        setRegModalError(json.error || 'No se pudieron guardar los datos de registro.');
+        return;
+      }
+
+      const updatedInterview: InterviewRecord = json.data.interview;
+      const updatedParticipants = json.data.participants || [];
+      setInterviews((prev) => {
+        const next = prev.map((item) =>
+          item.id === updatedInterview.id
+            ? {
+                ...item,
+                title: updatedInterview.title,
+                lastActivityAt: updatedInterview.lastActivityAt,
+                participants: updatedParticipants,
+              }
+            : item
+        );
+        try {
+          localStorage.setItem('foreveryou_interviews_cache', JSON.stringify(next));
+        } catch {
+          // ignore
+        }
+        return next;
+      });
+
+      setRegistrationModalTarget(null);
+      setNoticeMessage(
+        `Datos de registro actualizados para «${updatedInterview.title}». Se conservaron respuestas, accesos y libros vinculados.`
+      );
+      setTimeout(() => setNoticeMessage(null), 5000);
+    } catch {
+      setRegModalError('Error de conexión al guardar los datos de registro.');
+    } finally {
+      setSavingRegistration(false);
+    }
+  };
+
   const getStatusBadge = (status: string) => {
     switch (status) {
       case 'open':
@@ -784,7 +1293,8 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
     }
   };
 
-  const filteredInterviews = interviews.filter((inv) => {
+  const orderedInterviews = sortInterviewsWithCopies(interviews);
+  const filteredInterviews = orderedInterviews.filter((inv) => {
     if (statusFilter !== 'todos' && inv.status !== statusFilter) {
       return false;
     }
@@ -825,14 +1335,31 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
           </h2>
           <p className="text-sm text-stone-500">
             Supervisa el ciclo de vida, participantes invitados, cobertura testimonial y manuscritos.
+            {lastUpdatedLabel && (
+              <span className="ml-2 font-mono text-[11px] text-stone-400 tabular-nums">
+                · Actualizado {lastUpdatedLabel}
+              </span>
+            )}
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
           <button
+            type="button"
+            onClick={() => void handleSyncFirestore()}
+            disabled={syncingFirestore}
+            data-testid="btn-sync-firestore"
+            className="inline-flex items-center space-x-1.5 min-h-[40px] px-3.5 py-2 bg-white hover:bg-stone-50 border border-stone-300 text-stone-800 rounded-lg text-xs font-semibold shadow-xs transition disabled:opacity-50 cursor-pointer whitespace-nowrap shrink-0"
+            title="Sincronizar desde Cloud Firestore (incluye registros recientes de www.youforever.app) sin sobrescribir datos"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 text-amber-700 ${syncingFirestore ? 'animate-spin' : ''}`} />
+            <span>{syncingFirestore ? 'Sincronizando...' : 'Sincronizar Firestore'}</span>
+          </button>
+
+          <button
             onClick={handleSeedTestStories}
             disabled={seedingStories}
-            className="inline-flex items-center space-x-1.5 px-3.5 py-2.5 bg-stone-100 hover:bg-stone-200 border border-stone-300 text-stone-800 rounded-lg text-xs font-semibold shadow-xs transition disabled:opacity-50"
+            className="inline-flex items-center space-x-1.5 min-h-[40px] px-3.5 py-2 bg-stone-100 hover:bg-stone-200 border border-stone-300 text-stone-800 rounded-lg text-xs font-semibold shadow-xs transition disabled:opacity-50 cursor-pointer whitespace-nowrap shrink-0"
             title="Carga 3 historias individuales variadas y 4 compartidas (de 2 a 5 participantes) con al menos 100 respuestas por cada miembro y umbral 100"
           >
             <Sparkles className="w-4 h-4 text-amber-700" />
@@ -841,13 +1368,39 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
 
           <button
             onClick={() => setShowCreateModal(true)}
-            className="inline-flex items-center space-x-1.5 px-4 py-2.5 bg-amber-700 hover:bg-amber-800 text-white rounded-lg text-xs font-semibold shadow-sm transition"
+            className="inline-flex items-center space-x-1.5 min-h-[40px] px-4 py-2 bg-amber-700 hover:bg-amber-800 text-white rounded-lg text-xs font-semibold shadow-sm transition cursor-pointer whitespace-nowrap shrink-0"
           >
             <Plus className="w-4 h-4" />
             <span>Nueva Entrevista</span>
           </button>
         </div>
       </div>
+
+      {firestoreSyncStatus?.quotaExhausted && (
+        <div className="p-4 bg-amber-50 border border-amber-300 rounded-xl text-amber-950 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-start space-x-2.5">
+            <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+            <div className="space-y-0.5 leading-relaxed">
+              <p className="font-bold">
+                Límite diario de lecturas de Cloud Firestore alcanzado temporalmente
+              </p>
+              <p className="text-amber-900">
+                Los registros existentes en caché segura permanecen intactos y protegidos. Los registros nuevos creados recientemente en{' '}
+                <strong>www.youforever.app</strong> se reflejarán automáticamente sin pérdida en cuanto se restablezca la cuota diaria de Firebase (o al pulsar «Sincronizar Firestore» una vez restablecida).
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => void handleSyncFirestore()}
+            disabled={syncingFirestore}
+            className="inline-flex items-center space-x-1.5 px-3 py-1.5 bg-white hover:bg-amber-100 border border-amber-300 text-amber-900 rounded-lg font-semibold shrink-0 cursor-pointer"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${syncingFirestore ? 'animate-spin' : ''}`} />
+            <span>Reintentar Sync</span>
+          </button>
+        </div>
+      )}
 
       {noticeMessage && (
         <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-lg text-emerald-900 text-xs flex items-center space-x-2">
@@ -955,16 +1508,79 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
               0,
               Math.ceil((new Date(inv.expiresAt).getTime() - Date.now()) / (1000 * 3600 * 24))
             );
+            const isCopy = Boolean(inv.copiedFromInterviewId);
+            const quotaStatus = computeLayoutEditQuotaStatus(inv);
+            const draftQuotaValue =
+              inlineQuotaDrafts[inv.id] !== undefined
+                ? inlineQuotaDrafts[inv.id]
+                : quotaStatus.remainingEdits;
+            const defaultCopyNote = buildDefaultAdminCopyNote(
+              inv.copiedFromName || inv.participants?.[0]?.name || inv.title,
+              inv.copiedAt || inv.openedAt
+            );
+            const draftCopyNote =
+              copyNoteDrafts[inv.id] !== undefined
+                ? copyNoteDrafts[inv.id]
+                : inv.adminCopyNote || defaultCopyNote;
 
             return (
               <div
                 key={inv.id}
-                className="bg-white rounded-xl border border-stone-200 shadow-sm p-5 hover:border-amber-200 transition"
+                data-testid={isCopy ? `interview-copy-card-${inv.id}` : `interview-card-${inv.id}`}
+                className={`bg-white rounded-xl border shadow-sm p-5 transition ${
+                  isCopy
+                    ? 'ml-4 sm:ml-8 border-amber-300 hover:border-amber-400'
+                    : 'border-stone-200 hover:border-amber-200'
+                }`}
               >
+                {/* Admin-only Copy Metadata Field (Never visible to participant) */}
+                {isCopy && (
+                  <div
+                    data-testid={`admin-copy-note-panel-${inv.id}`}
+                    className="mb-3 p-3 rounded-lg bg-amber-50/80 border border-amber-200 flex flex-col sm:flex-row sm:items-center gap-2 text-xs"
+                  >
+                    <label
+                      htmlFor={`copy-note-${inv.id}`}
+                      className="text-[11px] font-bold text-amber-950 shrink-0 flex items-center space-x-1"
+                    >
+                      <Lock className="w-3.5 h-3.5 text-amber-700" />
+                      <span>Solo Admin · Origen de copia:</span>
+                    </label>
+                    <input
+                      id={`copy-note-${inv.id}`}
+                      type="text"
+                      value={draftCopyNote}
+                      onChange={(e) =>
+                        setCopyNoteDrafts((prev) => ({ ...prev, [inv.id]: e.target.value }))
+                      }
+                      className="flex-1 px-2.5 py-1.5 bg-white border border-amber-300 rounded-md text-xs text-stone-900 focus:outline-none focus:ring-2 focus:ring-amber-200"
+                      placeholder={defaultCopyNote}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => handleSaveAdminCopyNote(inv)}
+                      disabled={savingCopyNoteId === inv.id}
+                      className="inline-flex items-center space-x-1 px-2.5 py-1.5 bg-amber-800 hover:bg-amber-900 text-white rounded-md text-[11px] font-semibold transition disabled:opacity-50 shrink-0"
+                    >
+                      {savedCopyNoteId === inv.id ? (
+                        <>
+                          <Check className="w-3.5 h-3.5" />
+                          <span>Nota guardada</span>
+                        </>
+                      ) : (
+                        <>
+                          <Save className="w-3.5 h-3.5" />
+                          <span>{savingCopyNoteId === inv.id ? 'Guardando...' : 'Guardar nota'}</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                )}
+
                 {/* Header row */}
                 <div className="flex flex-col md:flex-row md:items-center justify-between pb-4 border-b border-stone-100 gap-3">
                   <div>
-                    <div className="flex items-center space-x-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <span className="font-serif text-lg font-bold text-stone-900">
                         {inv.title}
                       </span>
@@ -1108,6 +1724,18 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
                       <span>Restablecer al Inicio</span>
                     </button>
 
+                    {/* Duplicate Interview (Faithful Copy with New Access Code) */}
+                    <button
+                      type="button"
+                      onClick={() => setDuplicateTarget(inv)}
+                      disabled={duplicatingId === inv.id}
+                      className="inline-flex items-center space-x-1 px-2.5 py-1.5 bg-stone-100 hover:bg-stone-200 text-stone-800 border border-stone-300 rounded-lg text-xs font-medium transition disabled:opacity-50"
+                      title="Crear una copia fiel de esta entrevista con un código de acceso diferente"
+                    >
+                      <CopyPlus className="w-3.5 h-3.5 text-amber-700" />
+                      <span>{duplicatingId === inv.id ? 'Duplicando...' : 'Duplicar'}</span>
+                    </button>
+
                     {/* Delete Interview from Database */}
                     <button
                       onClick={() => setDeleteTarget(inv)}
@@ -1151,14 +1779,71 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
                   </div>
 
                   <div>
-                    <span className="text-stone-500 block">Libro PDF del Entrevistado:</span>
-                    <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
+                    <span className="text-stone-500 block">Libro PDF y Cuota de Edición:</span>
+                    <div className="flex flex-wrap items-center gap-1.5 mt-0.5 tabular-nums">
                       <span className="px-2 py-0.5 rounded bg-amber-50 text-amber-900 border border-amber-200 font-semibold text-[11px]">
-                        {inv.bookVersions?.length || inv.bookVersionsCount || 0} PDF(s) guardados
+                        {inv.bookVersions?.length || inv.bookVersionsCount || 0} PDF(s)
                       </span>
                       <span className="text-[11px] text-stone-600">
-                        • {computeLayoutEditQuotaStatus(inv).remainingEdits} cambio(s) disp.
+                        Usadas: {quotaStatus.layoutEditsUsed} · Disp.: {quotaStatus.remainingEdits}
                       </span>
+                    </div>
+                    <div className="mt-1.5 flex items-center gap-1 flex-wrap">
+                      <label htmlFor={`quota-${inv.id}`} className="sr-only">
+                        Cuota de edición de manuscritos para {inv.title}
+                      </label>
+                      <button
+                        type="button"
+                        aria-label={`Disminuir cuota para ${inv.title}`}
+                        onClick={() =>
+                          setInlineQuotaDrafts((prev) => ({
+                            ...prev,
+                            [inv.id]: Math.max(0, draftQuotaValue - 1),
+                          }))
+                        }
+                        className="p-1 rounded border border-stone-300 bg-white hover:bg-stone-100 text-stone-700 transition"
+                      >
+                        <Minus className="w-3 h-3" />
+                      </button>
+                      <input
+                        id={`quota-${inv.id}`}
+                        type="number"
+                        min={0}
+                        max={50}
+                        value={draftQuotaValue}
+                        onChange={(e) =>
+                          setInlineQuotaDrafts((prev) => ({
+                            ...prev,
+                            [inv.id]: Math.max(0, parseInt(e.target.value, 10) || 0),
+                          }))
+                        }
+                        className="w-14 px-1.5 py-0.5 border border-stone-300 rounded text-xs font-bold text-stone-900 text-center tabular-nums bg-white"
+                      />
+                      <button
+                        type="button"
+                        aria-label={`Aumentar cuota para ${inv.title}`}
+                        onClick={() =>
+                          setInlineQuotaDrafts((prev) => ({
+                            ...prev,
+                            [inv.id]: Math.min(50, draftQuotaValue + 1),
+                          }))
+                        }
+                        className="p-1 rounded border border-stone-300 bg-white hover:bg-stone-100 text-stone-700 transition"
+                      >
+                        <Plus className="w-3 h-3" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleSaveInlineQuota(inv)}
+                        disabled={savingInlineQuotaId === inv.id}
+                        className="px-2 py-0.5 bg-amber-700 hover:bg-amber-800 text-white rounded text-[11px] font-semibold transition disabled:opacity-50"
+                      >
+                        {savedInlineQuotaId === inv.id
+                          ? '¡Guardada!'
+                          : savingInlineQuotaId === inv.id
+                          ? 'Guardando...'
+                          : 'Guardar cuota'}
+                      </button>
                     </div>
                   </div>
                 </div>
@@ -1188,64 +1873,77 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
                           </div>
                         </div>
 
-                        {p.plainToken ? (
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            {p.accessCode && (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  copyToClipboard(p.accessCode!);
-                                  setCopiedAccessBadge(p.id);
-                                  setTimeout(() => setCopiedAccessBadge(null), 2500);
-                                }}
-                                title="Clic para copiar el código de acceso"
-                                className="inline-flex items-center space-x-1 font-mono text-[10px] bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 px-1.5 py-0.5 rounded font-bold transition cursor-pointer"
-                              >
-                                <Key className="w-3 h-3 text-amber-700" />
-                                <span>
-                                  {copiedAccessBadge === p.id ? `¡Copiado: ${p.accessCode}!` : `Código: ${p.accessCode}`}
-                                </span>
-                              </button>
-                            )}
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <button
+                            type="button"
+                            data-testid={`btn-registration-data-${p.id}`}
+                            onClick={() => handleOpenRegistrationModal(inv, p)}
+                            className="inline-flex items-center space-x-1 px-2 py-1 bg-white hover:bg-stone-100 text-stone-800 border border-stone-300 rounded text-[11px] font-semibold shadow-xs transition cursor-pointer"
+                            title="Consultar o editar todos los datos de registro de este participante"
+                          >
+                            <ClipboardList className="w-3.5 h-3.5 text-amber-700" />
+                            <span>Datos de registro</span>
+                          </button>
 
-                            <button
-                              onClick={() => setSharingData({ interview: inv, participant: p })}
-                              className="inline-flex items-center space-x-1 px-2 py-1 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded text-[11px] font-semibold shadow-xs transition"
-                              title="Abrir opciones de compartir por WhatsApp, código o enlace público"
-                            >
-                              <Share2 className="w-3.5 h-3.5 text-amber-700" />
-                              <span>Compartir</span>
-                            </button>
-
-                            <button
-                              onClick={() => handleCopyLink(p.plainToken!)}
-                              className="inline-flex items-center space-x-1 px-2 py-1 bg-white hover:bg-stone-100 text-stone-700 border border-stone-300 rounded text-[11px] font-medium shadow-xs transition"
-                              title="Copiar enlace directo público"
-                            >
-                              {copiedToken === p.plainToken ? (
-                                <>
-                                  <Check className="w-3.5 h-3.5 text-emerald-600" />
-                                  <span className="text-emerald-700">Copiado</span>
-                                </>
-                              ) : (
-                                <>
-                                  <Copy className="w-3.5 h-3.5 text-stone-400" />
-                                  <span>Enlace</span>
-                                </>
+                          {p.plainToken ? (
+                            <>
+                              {p.accessCode && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    copyToClipboard(p.accessCode!);
+                                    setCopiedAccessBadge(p.id);
+                                    setTimeout(() => setCopiedAccessBadge(null), 2500);
+                                  }}
+                                  title="Clic para copiar el código de acceso"
+                                  className="inline-flex items-center space-x-1 font-mono text-[10px] bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 px-1.5 py-0.5 rounded font-bold transition cursor-pointer"
+                                >
+                                  <Key className="w-3 h-3 text-amber-700" />
+                                  <span>
+                                    {copiedAccessBadge === p.id ? `¡Copiado: ${p.accessCode}!` : `Código: ${p.accessCode}`}
+                                  </span>
+                                </button>
                               )}
-                            </button>
 
-                            <button
-                              onClick={() => onEnterParticipantPortal(p.plainToken!)}
-                              className="inline-flex items-center space-x-1 px-2.5 py-1 bg-amber-700 hover:bg-amber-800 text-white rounded text-[11px] font-medium shadow-xs transition"
-                            >
-                              <ExternalLink className="w-3.5 h-3.5" />
-                              <span>Entrar como {p.name.split(' ')[0]}</span>
-                            </button>
-                          </div>
-                        ) : (
-                          <span className="text-stone-400 text-[11px]">Enlace no disponible</span>
-                        )}
+                              <button
+                                onClick={() => setSharingData({ interview: inv, participant: p })}
+                                className="inline-flex items-center space-x-1 px-2 py-1 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded text-[11px] font-semibold shadow-xs transition"
+                                title="Abrir opciones de compartir por WhatsApp, código o enlace público"
+                              >
+                                <Share2 className="w-3.5 h-3.5 text-amber-700" />
+                                <span>Compartir</span>
+                              </button>
+
+                              <button
+                                onClick={() => handleCopyLink(p.plainToken!)}
+                                className="inline-flex items-center space-x-1 px-2 py-1 bg-white hover:bg-stone-100 text-stone-700 border border-stone-300 rounded text-[11px] font-medium shadow-xs transition"
+                                title="Copiar enlace directo público"
+                              >
+                                {copiedToken === p.plainToken ? (
+                                  <>
+                                    <Check className="w-3.5 h-3.5 text-emerald-600" />
+                                    <span className="text-emerald-700">Copiado</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Copy className="w-3.5 h-3.5 text-stone-400" />
+                                    <span>Enlace</span>
+                                  </>
+                                )}
+                              </button>
+
+                              <button
+                                onClick={() => onEnterParticipantPortal(p.plainToken!)}
+                                className="inline-flex items-center space-x-1 px-2.5 py-1 bg-amber-700 hover:bg-amber-800 text-white rounded text-[11px] font-medium shadow-xs transition"
+                              >
+                                <ExternalLink className="w-3.5 h-3.5" />
+                                <span>Entrar como {p.name.split(' ')[0]}</span>
+                              </button>
+                            </>
+                          ) : (
+                            <span className="text-stone-400 text-[11px]">Enlace no disponible</span>
+                          )}
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -1815,18 +2513,6 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
               </button>
             </div>
 
-            {/* Explanation Notice for iOS / 403 prevention */}
-            <div className="p-3.5 bg-amber-50/80 border border-amber-200 rounded-xl space-y-1.5 text-stone-700">
-              <div className="flex items-center space-x-1.5 text-amber-900 font-bold">
-                <AlertCircle className="w-4 h-4 text-amber-700 shrink-0" />
-                <span>Solución a bloqueos en Safari y error 403 de Google</span>
-              </div>
-              <p className="text-[11px] text-stone-600 leading-relaxed">
-                Las URLs de desarrollo de AI Studio (<code className="bg-amber-100 px-1 py-0.5 rounded text-[10px]">ais-dev-</code>) exigen acceso privado de Google y son bloqueadas en Safari con error 403.
-                Para que cualquier familiar pueda responder <strong>sin crear cuenta ni iniciar sesión</strong>, compártele el <strong>Código de Acceso</strong> o el <strong>Enlace Público</strong> a continuación:
-              </p>
-            </div>
-
             {/* Access Code Box */}
             {sharingData.participant.accessCode && (
               <div className="p-4 bg-stone-50 rounded-xl border border-stone-200 space-y-2">
@@ -2151,6 +2837,319 @@ Tus recuerdos y testimonios serán preservados con total fidelidad para nuestra 
                 <span>{isProcessingAction ? 'Restableciendo...' : 'Confirmar y Restablecer al Inicio'}</span>
               </button>
             </div>
+          </div>
+        </div>
+      )}
+      {/* Modal: Confirm Duplicate Interview */}
+      {duplicateTarget && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl max-w-lg w-full p-6 shadow-2xl border border-amber-200">
+            <div className="flex items-center space-x-3 text-amber-800 mb-3">
+              <div className="p-3 bg-amber-100 rounded-xl">
+                <CopyPlus className="w-6 h-6 text-amber-800" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-stone-900">
+                  ¿Duplicar entrevista con nuevo código de acceso?
+                </h3>
+                <p className="text-xs text-amber-800 font-medium">
+                  Copia fiel e independiente de {duplicateTarget.participants?.[0]?.name || duplicateTarget.title}
+                </p>
+              </div>
+            </div>
+
+            <div className="bg-stone-50 border border-stone-200 rounded-lg p-3.5 mb-4 text-xs space-y-1.5 text-stone-700">
+              <p>
+                Se duplicará íntegramente la entrevista <strong>«{duplicateTarget.title}»</strong> conservando:
+              </p>
+              <ul className="list-disc list-inside space-y-1 text-[11px] text-stone-600">
+                <li>Todas las <strong>{duplicateTarget.answersCount}</strong> respuestas, audios y fotografías adjuntas.</li>
+                <li>El consentimiento de privacidad activo y datos de entrega ya registrados.</li>
+                <li>Las versiones de manuscrito/PDF previas y la cuota actual exacta.</li>
+                <li>Se asignará un <strong>código de acceso nuevo</strong> manteniendo activos ambos códigos (original y copia).</li>
+              </ul>
+            </div>
+
+            <div className="flex justify-end space-x-2 pt-2 border-t border-stone-200">
+              <button
+                type="button"
+                onClick={() => setDuplicateTarget(null)}
+                disabled={duplicatingId === duplicateTarget.id}
+                className="px-4 py-2 border border-stone-300 text-stone-700 rounded-lg hover:bg-stone-50 text-xs font-medium"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={() => handleDuplicateInterview(duplicateTarget)}
+                disabled={duplicatingId === duplicateTarget.id}
+                className="px-4 py-2 bg-amber-700 hover:bg-amber-800 disabled:opacity-50 text-white rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition shadow-sm"
+              >
+                <CopyPlus className="w-3.5 h-3.5" />
+                <span>{duplicatingId === duplicateTarget.id ? 'Duplicando...' : 'Confirmar Duplicación'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Datos de Registro por Entrevistado */}
+      {registrationModalTarget && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div
+            data-testid="registration-data-modal"
+            className="bg-white rounded-xl max-w-2xl w-full p-6 shadow-2xl border border-stone-200 max-h-[90vh] overflow-y-auto text-xs space-y-4"
+          >
+            <div className="flex items-start justify-between gap-3 pb-3 border-b border-stone-200">
+              <div className="flex items-start space-x-2.5">
+                <div className="p-2 bg-amber-100 text-amber-800 rounded-lg shrink-0">
+                  <ClipboardList className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-serif text-base font-bold text-stone-900">
+                    Datos de registro — {registrationModalTarget.interview.title}
+                  </h3>
+                  <p className="text-[11px] text-stone-500 mt-0.5">
+                    {registrationModalTarget.interview.storyMode === 'compartida'
+                      ? 'Entrevista compartida: consulta y edita los datos individuales de cada participante por separado.'
+                      : 'Consulta y edita todos los datos registrados por esta persona.'}{' '}
+                    Se conservarán intactas sus respuestas, accesos y libros vinculados.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setRegistrationModalTarget(null)}
+                className="text-stone-400 hover:text-stone-600 p-1 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveRegistrationModal} className="space-y-4">
+              <div className="p-3 bg-stone-50 rounded-lg border border-stone-200 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-semibold text-stone-700 mb-1">
+                    Título de la historia *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    data-testid="reg-modal-title-input"
+                    value={regTitleDraft}
+                    onChange={(e) => setRegTitleDraft(e.target.value)}
+                    className="w-full px-3 py-1.5 border border-stone-300 rounded-lg text-xs text-stone-900 bg-white"
+                  />
+                </div>
+                <div className="flex flex-col justify-center text-[11px] text-stone-600 space-y-0.5">
+                  <div>
+                    <strong>Origen:</strong>{' '}
+                    {registrationModalTarget.interview.registrationSource === 'self_register_free'
+                      ? 'Autorregistro público (/free)'
+                      : 'Creación administrativa'}
+                  </div>
+                  <div>
+                    <strong>Respuestas / Libros vinculados:</strong>{' '}
+                    {registrationModalTarget.interview.answersCount} respuestas ·{' '}
+                    {registrationModalTarget.interview.bookVersions?.length ||
+                      registrationModalTarget.interview.bookVersionsCount ||
+                      0}{' '}
+                    PDF(s)
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                {regParticipantDrafts.map((draft, idx) => {
+                  const isFocused = draft.participantId === registrationModalTarget.focusedParticipantId;
+                  return (
+                    <div
+                      key={draft.participantId}
+                      data-testid={`reg-modal-participant-${draft.participantId}`}
+                      className={`p-4 rounded-xl border space-y-3 ${
+                        isFocused
+                          ? 'bg-amber-50/40 border-amber-300'
+                          : 'bg-stone-50/70 border-stone-200'
+                      }`}
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-stone-200/80">
+                        <div className="flex items-center gap-2">
+                          <span className="font-serif text-sm font-bold text-stone-900">
+                            Participante {idx + 1}: {draft.name || 'Sin nombre'}
+                          </span>
+                          {isFocused && (
+                            <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-900 border border-amber-300 text-[10px] font-bold">
+                              Ficha seleccionada
+                            </span>
+                          )}
+                        </div>
+                        {draft.accessCode && (
+                          <span className="font-mono text-[11px] text-stone-600 bg-white px-2 py-0.5 rounded border border-stone-200 tabular-nums">
+                            Acceso: {draft.accessCode}
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                          <label className="block font-semibold text-stone-700 mb-1">
+                            Nombre completo *
+                          </label>
+                          <input
+                            type="text"
+                            required
+                            data-testid={`reg-modal-name-${idx}`}
+                            value={draft.name}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setRegParticipantDrafts((prev) =>
+                                prev.map((item, i) => (i === idx ? { ...item, name: val } : item))
+                              );
+                            }}
+                            className="w-full px-2.5 py-1.5 border border-stone-300 rounded-lg text-xs text-stone-900 bg-white"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block font-semibold text-stone-700 mb-1">
+                            Correo electrónico
+                          </label>
+                          <input
+                            type="email"
+                            data-testid={`reg-modal-email-${idx}`}
+                            value={draft.email}
+                            placeholder="Sin correo capturado"
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setRegParticipantDrafts((prev) =>
+                                prev.map((item, i) => (i === idx ? { ...item, email: val } : item))
+                              );
+                            }}
+                            className="w-full px-2.5 py-1.5 border border-stone-300 rounded-lg text-xs text-stone-900 bg-white"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block font-semibold text-stone-700 mb-1">
+                            Edad
+                          </label>
+                          <input
+                            type="number"
+                            min={1}
+                            max={125}
+                            data-testid={`reg-modal-age-${idx}`}
+                            value={draft.age}
+                            placeholder="Sin edad capturada"
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setRegParticipantDrafts((prev) =>
+                                prev.map((item, i) => (i === idx ? { ...item, age: val } : item))
+                              );
+                            }}
+                            className="w-full px-2.5 py-1.5 border border-stone-300 rounded-lg text-xs text-stone-900 bg-white tabular-nums"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block font-semibold text-stone-700 mb-1">
+                            Ciudad
+                          </label>
+                          <input
+                            type="text"
+                            data-testid={`reg-modal-city-${idx}`}
+                            value={draft.city}
+                            placeholder="Sin ciudad capturada"
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setRegParticipantDrafts((prev) =>
+                                prev.map((item, i) => (i === idx ? { ...item, city: val } : item))
+                              );
+                            }}
+                            className="w-full px-2.5 py-1.5 border border-stone-300 rounded-lg text-xs text-stone-900 bg-white"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block font-semibold text-stone-700 mb-1">
+                            Parentesco / Vínculo
+                          </label>
+                          <input
+                            type="text"
+                            data-testid={`reg-modal-relationship-${idx}`}
+                            value={draft.relationship}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setRegParticipantDrafts((prev) =>
+                                prev.map((item, i) =>
+                                  i === idx ? { ...item, relationship: val } : item
+                                )
+                              );
+                            }}
+                            className="w-full px-2.5 py-1.5 border border-stone-300 rounded-lg text-xs text-stone-900 bg-white"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block font-semibold text-stone-700 mb-1">
+                            Rol en la entrevista
+                          </label>
+                          <select
+                            data-testid={`reg-modal-role-${idx}`}
+                            value={draft.role}
+                            onChange={(e) => {
+                              const val = e.target.value as 'primary' | 'contributor';
+                              setRegParticipantDrafts((prev) =>
+                                prev.map((item, i) => (i === idx ? { ...item, role: val } : item))
+                              );
+                            }}
+                            className="w-full px-2.5 py-1.5 border border-stone-300 rounded-lg text-xs text-stone-900 bg-white"
+                          >
+                            <option value="primary">Titular</option>
+                            <option value="contributor">Colaborador</option>
+                          </select>
+                        </div>
+                      </div>
+
+                      <div className="text-[10px] text-stone-500 pt-1">
+                        <strong>Aviso de privacidad en registro:</strong>{' '}
+                        {draft.privacyAcceptedAt
+                          ? `Aceptado el ${new Date(draft.privacyAcceptedAt).toLocaleString('es-MX')}${
+                              draft.privacyVersion ? ` (Versión ${draft.privacyVersion})` : ''
+                            }`
+                          : 'No capturado en el registro inicial'}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {regModalError && (
+                <div className="p-3 bg-rose-50 border border-rose-200 rounded-lg text-rose-800 text-xs flex items-center space-x-2">
+                  <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                  <span>{regModalError}</span>
+                </div>
+              )}
+
+              <div className="flex justify-end space-x-2 pt-3 border-t border-stone-200">
+                <button
+                  type="button"
+                  onClick={() => setRegistrationModalTarget(null)}
+                  disabled={savingRegistration}
+                  className="px-4 py-2 border border-stone-300 text-stone-700 rounded-lg hover:bg-stone-50 cursor-pointer"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  data-testid="reg-modal-save-btn"
+                  disabled={savingRegistration}
+                  className="px-4 py-2 bg-amber-700 hover:bg-amber-800 disabled:opacity-50 text-white rounded-lg font-semibold inline-flex items-center space-x-1.5 cursor-pointer"
+                >
+                  <Save className="w-3.5 h-3.5" />
+                  <span>{savingRegistration ? 'Guardando...' : 'Guardar datos de registro'}</span>
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

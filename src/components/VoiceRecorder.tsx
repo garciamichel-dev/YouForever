@@ -44,11 +44,12 @@ export interface VoiceRecorderProps {
     transcription: string,
     allAudios: AnswerVoiceAttachment[],
     diagnosis?: VoiceQualityDiagnosis
-  ) => void;
+  ) => void | Promise<void>;
   onVoiceDeleted?: (audioId: string) => void;
   onRecordingStatusChange?: (isRecording: boolean) => void;
   onFocusKeyboard?: () => void;
   disabled?: boolean;
+  isExternalProcessing?: boolean;
   isDemo?: boolean;
   frameless?: boolean;
 }
@@ -74,6 +75,7 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
       onRecordingStatusChange,
       onFocusKeyboard,
       disabled = false,
+      isExternalProcessing = false,
       isDemo = false,
       frameless = false,
     },
@@ -129,7 +131,7 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
     const backgroundNoiseFramesRef = useRef<number>(0);
     const thirtySecCheckTriggeredRef = useRef<boolean>(false);
 
-    // Sync when initial audios change or question changes
+    // Full recorder reset only when navigating to a different question
     useEffect(() => {
       const list = resolveInitialList();
       setSavedAudios(list);
@@ -144,7 +146,12 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
         URL.revokeObjectURL(previewAudioUrl);
         setPreviewAudioUrl(null);
       }
-    }, [questionId, initialAudio?.id, JSON.stringify(initialAudios?.map((a) => a.id))]);
+    }, [questionId]);
+
+    // Sync saved audio list updates on the same question without interrupting upload/quality alerts
+    useEffect(() => {
+      setSavedAudios(resolveInitialList());
+    }, [initialAudio?.id, JSON.stringify(initialAudios?.map((a) => a.id))]);
 
     // Notify parent if recording is active
     useEffect(() => {
@@ -430,7 +437,7 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
           );
         } else {
           setErrorMsg(
-            `No se pudo iniciar la grabación con micrófono (${errMsg || 'error del navegador'}). Puedes reintentar o responder escribiendo con el teclado.`
+            'No se pudo iniciar la grabación con micrófono (verifica que tu dispositivo tenga micrófono y permiso habilitado). Puedes reintentar o responder escribiendo con el teclado.'
           );
         }
       }
@@ -513,8 +520,8 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
               ? 'Grabación en pausa: detectamos mucho ruido de fondo y no hemos logrado comprender palabras claras'
               : 'Grabación en pausa: tras 30 segundos no hemos logrado escuchar ninguna palabra legible',
             message: hasHighBackgroundNoise
-              ? 'Llevas 30 segundos grabando, pero el ruido ambiental impide que el sistema comprenda lo que estás diciendo.'
-              : 'Llevas 30 segundos de grabación y el sistema aún no ha logrado identificar ninguna palabra comprensible.',
+              ? 'Llevas 30 segundos grabando, pero el ruido ambiental impide escuchar con claridad lo que estás diciendo.'
+              : 'Llevas 30 segundos de grabación y aún no se ha logrado identificar ninguna palabra comprensible.',
             suggestion:
               'Te sugerimos cancelar esta grabación y revisar tu micrófono o moverte a un lugar tranquilo sin ruido de fondo. Recuerda que también tienes la opción de escribir tu respuesta por tu cuenta usando el teclado.',
           });
@@ -628,7 +635,7 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
 
         const data = await res.json();
         if (!data.success) {
-          throw new Error(data.error || 'Error al guardar el archivo de voz.');
+          throw new Error(data.error || 'No pudimos guardar tu grabación en este momento. Inténtalo nuevamente.');
         }
 
         const returnedTranscription = (data.data.transcription || '').trim();
@@ -685,8 +692,7 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
           setQualityAlert(null);
         }
 
-        // Reset recorder state to idle ready to record another note if desired
-        setState('idle');
+        // Clean up temporary recording blob/preview before awaiting parent save & advance
         setTimerSeconds(0);
         setPreviewAudioName(null);
         finalRecordedBlobRef.current = null;
@@ -696,16 +702,20 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
           setPreviewAudioUrl(null);
         }
 
-        // Notify parent callback with newly created audio, transcription, and quality diagnosis
-        onVoiceSubmitted(audioAttachment, returnedTranscription, nextAudios, {
-          audioQuality: returnedQuality,
-          qualityWarning: returnedWarning,
-          suggestion: returnedSuggestion,
-        });
+        // Keep 'uploading' spinner visible until parent completes saving and question transition
+        try {
+          await onVoiceSubmitted(audioAttachment, returnedTranscription, nextAudios, {
+            audioQuality: returnedQuality,
+            qualityWarning: returnedWarning,
+            suggestion: returnedSuggestion,
+          });
+        } finally {
+          setState('idle');
+        }
 
         return audioAttachment;
       } catch (err: any) {
-        setErrorMsg(err.message || 'Error de conexión al enviar el archivo de voz.');
+        setErrorMsg(err.message || 'No pudimos enviar tu grabación por un problema de conexión. Inténtalo nuevamente.');
         setState('stopped');
         return null;
       }
@@ -735,7 +745,7 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
 
         const data = await res.json();
         if (!data.success) {
-          throw new Error(data.error || 'Error al eliminar la grabación.');
+          throw new Error(data.error || 'No pudimos eliminar esta grabación.');
         }
 
         const nextList = savedAudios.filter((a) => a.id !== audioId);
@@ -747,7 +757,7 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
 
         setConfirmDeleteTarget(null);
       } catch (err: any) {
-        setErrorMsg(err.message || 'No se pudo eliminar el archivo de voz.');
+        setErrorMsg(err.message || 'No pudimos eliminar tu grabación en este momento.');
       } finally {
         setDeletingAudioId(null);
       }
@@ -962,7 +972,7 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
           )}
 
           {/* 1. STATE: IDLE (Senior-friendly circular button) */}
-          {state === 'idle' && (
+          {state === 'idle' && !isExternalProcessing && (
             <div className="flex flex-col items-center justify-center text-center space-y-4 py-4">
               {/* Circular voice button designed for seniors */}
               <button
@@ -991,7 +1001,7 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
           )}
 
           {/* 2. STATE: RECORDING or PAUSED (Controls: Pausar/Continuar, Cancelar, Enviar y Transcribir) */}
-          {(state === 'recording' || state === 'paused') && (
+          {(state === 'recording' || state === 'paused') && !isExternalProcessing && (
             <div className="space-y-4 py-2">
               {/* Sound Wave Visualizer */}
               <div className="bg-stone-900 rounded-xl p-3 flex items-center justify-center gap-1.5 h-16 overflow-hidden shadow-inner">
@@ -1014,16 +1024,32 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
                 )}
               </div>
 
-              {/* CONTROLES: Pausar / Continuar, Cancelar, Enviar y Transcribir */}
-              <div className="bg-white p-3 rounded-xl border border-stone-200 flex flex-wrap items-center justify-between gap-2 shadow-xs">
-                <div className="flex flex-wrap items-center gap-2">
-                  {/* PAUSAR (visible al estar grabando) */}
+              {/* CONTROLES CENTRADOS: 1) Enviar y Transcribir arriba al centro; 2) Pausar/Continuar (izq) y Cancelar (der) abajo al centro */}
+              <div className="bg-white p-4 rounded-xl border border-stone-200 flex flex-col items-center justify-center gap-3 shadow-xs">
+                <div className="flex items-center justify-center w-full">
+                  {/* ENVIAR Y TRANSCRIBIR */}
+                  <button
+                    type="button"
+                    onClick={() => handleSend()}
+                    disabled={disabled}
+                    data-testid="voice-btn-send"
+                    className="inline-flex items-center justify-center gap-2 min-h-[44px] px-6 py-2.5 text-xs font-bold text-white bg-amber-800 hover:bg-amber-900 rounded-lg shadow-sm transition-all transform hover:scale-[1.02] cursor-pointer whitespace-nowrap shrink-0"
+                    title="Finalizar grabación, guardar tu nota de voz y pasarla a texto"
+                  >
+                    <Send className="w-3.5 h-3.5" />
+                    <span>Enviar y Transcribir</span>
+                  </button>
+                </div>
+
+                <div className="flex flex-wrap items-center justify-center gap-3 w-full">
+                  {/* PAUSAR / CONTINUAR (a la izquierda, debajo) */}
                   {state === 'recording' && (
                     <button
                       type="button"
                       onClick={handlePause}
                       disabled={disabled}
-                      className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg bg-amber-100 text-amber-900 hover:bg-amber-200 border border-amber-300 transition-colors cursor-pointer"
+                      data-testid="voice-btn-pause"
+                      className="inline-flex items-center justify-center gap-1.5 min-h-[44px] px-4 py-2 text-xs font-semibold rounded-lg bg-amber-100 text-amber-900 hover:bg-amber-200 border border-amber-300 transition-colors cursor-pointer whitespace-nowrap shrink-0"
                       title="Pausar temporalmente la nota de voz"
                     >
                       <Pause className="w-3.5 h-3.5" />
@@ -1031,13 +1057,13 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
                     </button>
                   )}
 
-                  {/* CONTINUAR (visible cuando está en pausa) */}
                   {state === 'paused' && (
                     <button
                       type="button"
                       onClick={handleResume}
                       disabled={disabled}
-                      className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg bg-emerald-700 text-white hover:bg-emerald-800 shadow-xs transition-colors cursor-pointer"
+                      data-testid="voice-btn-resume"
+                      className="inline-flex items-center justify-center gap-1.5 min-h-[44px] px-4 py-2 text-xs font-semibold rounded-lg bg-emerald-700 text-white hover:bg-emerald-800 shadow-xs transition-colors cursor-pointer whitespace-nowrap shrink-0"
                       title="Continuar la grabación en el punto donde se quedó"
                     >
                       <Play className="w-3.5 h-3.5" />
@@ -1045,30 +1071,17 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
                     </button>
                   )}
 
-                  {/* CANCELAR (cancela la grabación y descarta) */}
+                  {/* CANCELAR (a la derecha de Pausar/Continuar, debajo) */}
                   <button
                     type="button"
                     onClick={handleCancel}
                     disabled={disabled}
-                    className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-stone-600 hover:text-rose-700 hover:bg-rose-50 border border-stone-200 hover:border-rose-200 rounded-lg transition-colors cursor-pointer"
+                    data-testid="voice-btn-cancel"
+                    className="inline-flex items-center justify-center gap-1.5 min-h-[44px] px-4 py-2 text-xs font-medium text-stone-600 hover:text-rose-700 hover:bg-rose-50 border border-stone-200 hover:border-rose-200 rounded-lg transition-colors cursor-pointer whitespace-nowrap shrink-0"
                     title="Cancelar grabación y descartar sin guardar nada"
                   >
                     <X className="w-3.5 h-3.5" />
                     <span>Cancelar</span>
-                  </button>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  {/* ENVIAR Y TRANSCRIBIR */}
-                  <button
-                    type="button"
-                    onClick={() => handleSend()}
-                    disabled={disabled}
-                    className="inline-flex items-center gap-2 px-5 py-2.5 text-xs font-bold text-white bg-amber-800 hover:bg-amber-900 rounded-lg shadow-sm transition-all transform hover:scale-[1.02] cursor-pointer"
-                    title="Finalizar grabación, guardar en base de datos y transcribir con IA"
-                  >
-                    <Send className="w-3.5 h-3.5" />
-                    <span>Enviar y Transcribir</span>
                   </button>
                 </div>
               </div>
@@ -1076,7 +1089,7 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
           )}
 
           {/* 3. STATE: STOPPED (Preview mode before upload) */}
-          {state === 'stopped' && (
+          {state === 'stopped' && !isExternalProcessing && (
             <div className="space-y-3 py-1">
               {previewAudioUrl && (
                 <div className="bg-white p-4 rounded-xl border border-amber-200 shadow-xs space-y-3">
@@ -1085,7 +1098,7 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
                       <FileAudio className="w-4 h-4 text-amber-700" />
                       <span>{previewAudioName || 'Grabación lista para enviar y transcribir'}</span>
                     </span>
-                    <span className="text-stone-500 font-mono text-[11px]">
+                    <span className="text-stone-500 font-mono text-[11px] tabular-nums">
                       Duración: {formatTimer(timerSeconds)}
                     </span>
                   </div>
@@ -1096,25 +1109,25 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
                     title={previewAudioName || 'Vista previa del audio'}
                   />
 
-                  <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-stone-100">
-                    <button
-                      type="button"
-                      onClick={handleCancel}
-                      disabled={disabled}
-                      className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-stone-600 hover:text-stone-900 bg-stone-100 hover:bg-stone-200 rounded-lg transition cursor-pointer"
-                    >
-                      <RotateCcw className="w-3.5 h-3.5" />
-                      <span>Descartar y volver a grabar</span>
-                    </button>
-
+                  <div className="flex flex-col items-center justify-center gap-2.5 pt-2 border-t border-stone-100">
                     <button
                       type="button"
                       onClick={() => handleSend()}
                       disabled={disabled}
-                      className="inline-flex items-center gap-2 px-6 py-2.5 text-xs font-bold text-white bg-amber-800 hover:bg-amber-900 rounded-lg shadow-sm transition-all transform hover:scale-[1.02] cursor-pointer"
+                      className="inline-flex items-center justify-center gap-2 min-h-[44px] px-6 py-2.5 text-xs font-bold text-white bg-amber-800 hover:bg-amber-900 rounded-lg shadow-sm transition-all transform hover:scale-[1.02] cursor-pointer whitespace-nowrap shrink-0"
                     >
                       <Send className="w-4 h-4" />
                       <span>Enviar y Transcribir</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleCancel}
+                      disabled={disabled}
+                      className="inline-flex items-center justify-center gap-1.5 min-h-[44px] px-4 py-2 text-xs font-medium text-stone-600 hover:text-stone-900 bg-stone-100 hover:bg-stone-200 rounded-lg transition cursor-pointer whitespace-nowrap shrink-0"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      <span>Cancelar</span>
                     </button>
                   </div>
                 </div>
@@ -1122,9 +1135,13 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
             </div>
           )}
 
-          {/* 4. STATE: UPLOADING / TRANSCRIBING */}
-          {state === 'uploading' && (
-            <div className="py-8 px-4 bg-white border border-amber-200 rounded-xl flex flex-col items-center justify-center text-center space-y-3">
+          {/* 4. STATE: UPLOADING / TRANSCRIBING / SAVING & ADVANCING */}
+          {(state === 'uploading' || isExternalProcessing) && (
+            <div
+              role="status"
+              data-testid="voice-processing-spinner"
+              className="py-8 px-4 bg-white border border-amber-200 rounded-xl flex flex-col items-center justify-center text-center space-y-3"
+            >
               <div className="relative">
                 <RefreshCw className="w-9 h-9 text-amber-700 animate-spin" />
                 <Sparkles className="w-4 h-4 text-amber-500 absolute -top-1 -right-1 animate-bounce" />
@@ -1134,7 +1151,7 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
                   Estamos guardando tu audio y transcribiendo...
                 </h5>
                 <p className="text-xs text-stone-500 mt-1 leading-relaxed">
-                  Escuchando con atención tu testimonio para transcribirlo fidedignamente al texto de tu respuesta.
+                  Transcribiendo tu testimonio, guardando tu respuesta y preparando el siguiente paso.
                 </p>
               </div>
             </div>
@@ -1166,7 +1183,7 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
                   ¿Confirmas eliminar este archivo de voz?
                 </h3>
                 <p className="text-xs text-slate-600 leading-relaxed">
-                  Esta acción eliminará permanentemente la grabación de audio de la base de datos del servidor.
+                  Esta acción eliminará permanentemente esta grabación de voz.
                 </p>
                 {confirmDeleteTarget.transcription && (
                   <p className="text-xs text-slate-500 italic bg-slate-50 p-2 rounded-lg border border-slate-200 text-left line-clamp-2">
@@ -1196,7 +1213,7 @@ export const VoiceRecorder = forwardRef<VoiceRecorderHandle, VoiceRecorderProps>
                       Eliminando...
                     </>
                   ) : (
-                    'Sí, eliminar de la BDD'
+                    'Sí, eliminar'
                   )}
                 </button>
               </div>
@@ -1329,7 +1346,7 @@ export const SavedVoiceAudiosList: React.FC<SavedVoiceAudiosListProps> = ({
                 ¿Confirmas eliminar este archivo de voz?
               </h3>
               <p className="text-xs text-slate-600 leading-relaxed">
-                Esta acción eliminará permanentemente la grabación de audio de la base de datos del servidor.
+                Esta acción eliminará permanentemente esta grabación de voz.
               </p>
               {confirmDeleteTarget.transcription && (
                 <p className="text-xs text-slate-500 italic bg-slate-50 p-2 rounded-lg border border-slate-200 text-left line-clamp-2">

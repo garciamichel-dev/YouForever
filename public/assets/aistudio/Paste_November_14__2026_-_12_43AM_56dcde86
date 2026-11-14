@@ -1,0 +1,1332 @@
+# PROMPT MAESTRO — CORRECCIÓN INTEGRAL DEL MOTOR DE LIBROS AUTOBIOGRÁFICOS DE YOUFOREVER
+
+## 1. ROL Y OBJETIVO
+
+Actúa como un equipo integrado por:
+
+- Arquitecto senior de software especializado en TypeScript, React, Node.js y sistemas de procesamiento documental.
+- Ingeniero de inteligencia artificial especializado en Gemini, OpenAI, generación de contenido extenso y procesamiento por lotes.
+- Especialista en ingeniería de datos, trazabilidad documental y verificación semántica.
+- Ingeniero de aseguramiento de calidad, pruebas automatizadas y prevención de regresiones.
+- Especialista en edición de autobiografías, preservación de testimonios y organización narrativa.
+- Especialista en seguridad, privacidad y conservación de información personal.
+
+Tu tarea es **ANALIZAR, CORREGIR, IMPLEMENTAR Y VERIFICAR** los problemas del sistema de generación de libros autobiográficos de YouForever.
+
+Trabaja sobre el código fuente actual del proyecto, cuya versión de referencia corresponde al 14 de noviembre de 2026.
+
+No debes limitarte a elaborar un diagnóstico ni entregar recomendaciones. Debes implementar las correcciones necesarias en los archivos correspondientes, verificar su integración y ejecutar las pruebas disponibles.
+
+### OBJETIVO PRINCIPAL
+
+Garantizar que los libros autobiográficos generados por YouForever representen la totalidad de los hechos, recuerdos, experiencias, sentimientos, reflexiones, nombres, acontecimientos, relaciones, lugares y detalles únicos que las personas entrevistadas hayan proporcionado y autorizado para incorporarse al libro.
+
+El contenido debe transformarse en una autobiografía auténtica, coherente, cronológica, extensa según la riqueza testimonial y literariamente bien redactada.
+
+**UNA PREGUNTA RESPONDIDA NO EQUIVALE A UN CAPÍTULO.**
+
+Muchas preguntas y profundizaciones pueden alimentar un mismo episodio, varios párrafos o un capítulo completo.
+
+El objetivo no es reproducir mecánicamente las preguntas, sino transformar todos los testimonios elegibles en una narración continua, sin omisiones injustificadas, sin invenciones y sin repeticiones innecesarias.
+
+La fidelidad documental tiene prioridad sobre el tiempo de procesamiento, el número de llamadas a los proveedores y el costo de generación.
+
+La aprobación requiere evidencia verificable de cobertura; no se permite asumir que la IA integró un recuerdo únicamente porque recibió su texto.
+
+---
+
+## 2. RESTRICCIONES ABSOLUTAS
+
+### 2.1. NO MODIFICAR LOS PROMPTS LITERARIOS
+
+Los tres prompts literarios configurados actualmente en YouForever deberán permanecer COMPLETAMENTE INTACTOS:
+
+- Estilo A — Primera persona sencilla.
+- Estilo B — Primera persona literaria.
+- Estilo C — Tercera persona biográfica.
+
+No debes resumirlos, reescribirlos, eliminarlos, simplificarlos, alterar sus instrucciones, cambiar sus configuraciones ni sustituirlos por versiones abreviadas.
+
+Esto incluye los prompts activos almacenados en la configuración, sus versiones históricas y los valores literarios predeterminados del código.
+
+Está permitido modificar exclusivamente la lógica de software que los obtiene, transmite y ejecuta, así como las instrucciones técnicas internas de orquestación necesarias para producir resultados estructurados.
+
+Estas instrucciones técnicas internas no deberán modificar el significado de los prompts literarios ni contradecir sus reglas editoriales.
+
+Cada solicitud al modelo deberá incluir el prompt literario activo una sola vez, utilizando el mecanismo más adecuado para el proveedor.
+
+### 2.2. NO MODIFICAR LOS DATOS HISTÓRICOS
+
+Queda estrictamente prohibido:
+
+- Eliminar, reescribir o alterar las respuestas originales.
+- Modificar testimonios históricos.
+- Eliminar fotografías o grabaciones.
+- Alterar transcripciones existentes.
+- Eliminar libros generados anteriormente.
+- Sobrescribir versiones anteriores de libros.
+- Modificar manualmente `data/storage_state.json`.
+- Borrar o reconstruir registros históricos de Firestore.
+- Modificar los contadores de generación o las cuotas de edición fuera de sus operaciones normales.
+- Regenerar automáticamente libros históricos.
+- Cambiar las configuraciones literarias almacenadas.
+- Eliminar versiones anteriores de prompts.
+
+Las versiones históricas deberán permanecer accesibles.
+
+Los libros generados después de estas correcciones deberán almacenarse como nuevas versiones utilizando los mecanismos existentes.
+
+Si necesitas agregar metadatos técnicos de trazabilidad, utiliza extensiones compatibles y no destructivas del modelo de datos.
+
+No realices migraciones destructivas.
+
+No ejecutes operaciones de limpieza sobre bases de datos, cachés o archivos históricos reales.
+
+### 2.3. NO MODIFICAR FUNCIONALIDADES AJENAS
+
+Conserva el funcionamiento actual de:
+
+- Autenticación y códigos de acceso.
+- Permisos de entrevistados y familiares.
+- Administración de usuarios.
+- Entrevistas individuales y compartidas.
+- Preguntas principales y profundizaciones generadas con IA.
+- Captura de audio, transcripción y fotografías.
+- Módulo Mi Esencia.
+- Suscripciones y administración comercial.
+- Diseño de portadas.
+- Formatos y tamaños de impresión.
+- Estilos de interiores.
+- Índices, dedicatorias, prólogos y epílogos.
+- Descarga y visualización de PDF.
+- Configuración de proveedores Gemini y OpenAI.
+- Sistema de cuotas y versiones históricas.
+- Funcionalidades no relacionadas con la generación de autobiografías.
+
+Modifica únicamente lo necesario para corregir la creación, agrupación, redacción, auditoría, recuperación, almacenamiento y aprobación de manuscritos.
+
+No introduzcas modificaciones cosméticas ni cambios de diseño innecesarios.
+
+---
+
+## 3. COMPONENTES DEL CÓDIGO QUE DEBES REVISAR
+
+Localiza y examina, como mínimo, las siguientes funciones y archivos:
+
+### Generación literaria
+
+`src/server/geminiService.ts`
+
+- `generateParticipantBookManuscriptWithAI`
+- `generateManuscriptDraft`
+- `manuscriptAiMemoryCache`
+- `hydrateManuscriptCacheFromDisk`
+- `persistManuscriptCacheToDisk`
+- `systemInstructionWithActivePrompt`
+- `batchPrompt`
+- Integraciones de Gemini y OpenAI.
+- Gestión de respuestas estructuradas, proveedores alternativos y tiempos de espera.
+
+### Construcción y auditoría
+
+`src/logic/demoStoryRules.ts`
+
+- `buildParticipantInitialManuscriptFromAnswers`
+- `buildFaithfulFallbackManuscript`
+- `auditAndApproveBookManuscript`
+- `computeCanonicalManuscriptCacheKey`
+- `resolveDocumentaryPhotoChapterAndParagraph`
+- `composeBookPages`
+- `CANONICAL_AUDIT_RULES_VERSION`
+
+### Persistencia
+
+`src/server/storage.ts`
+
+- `compileManuscript`
+- `saveParticipantBookVersion`
+- `ensureSynthesizedBookVersionsForInterview`
+- Funciones relacionadas con versiones, manuscritos y entrevistas.
+
+### Interfaz
+
+`src/components/ParticipantBookStudio.tsx`
+
+- Generación de manuscritos.
+- Vista previa.
+- Aprobación.
+- Regeneración.
+- Guardado.
+- Reutilización de versiones aprobadas.
+
+### Servicio de demostración
+
+`src/server/demoGeminiService.ts`
+
+Revisa también las rutas de API y los componentes implicados en estos tres flujos:
+
+1. Estudio del Libro del entrevistado.
+2. Compilación de Manuscrito en el Panel Administrativo.
+3. Generación de libros en la prueba gratuita `/demo`.
+
+Verifica las rutas, contratos de datos y dependencias reales antes de modificar cualquier función.
+
+No asumas que las ubicaciones o los números de línea permanecen iguales si el código ha cambiado.
+
+---
+
+# PARTE I. REESTRUCTURACIÓN DEL PROCESAMIENTO DOCUMENTAL
+
+## 4. CREAR UN INVENTARIO COMPLETO DE INFORMACIÓN TESTIMONIAL
+
+Antes de solicitar la redacción literaria a cualquier modelo de IA, el servidor deberá construir un inventario estructurado de toda la información original elegible.
+
+Este inventario debe abarcar:
+
+- Respuestas principales.
+- Respuestas de profundización.
+- Respuestas adicionales.
+- Recuerdos libres.
+- Testimonios de entrevistas compartidas.
+- Transcripciones de audio disponibles.
+- Descripciones y contextos de fotografías.
+- Precisiones y correcciones expresadas por los entrevistados.
+
+No debes procesar únicamente las preguntas principales.
+
+Tampoco debes descartar información porque pertenezca a una etapa biográfica ya procesada.
+
+### 4.1. EXTRAER UNIDADES DE INFORMACIÓN
+
+Una respuesta puede contener muchos hechos distintos.
+
+Por ejemplo, una persona podría mencionar en una misma respuesta:
+
+- Que nació en determinado lugar.
+- Que vivía con sus abuelos.
+- Que su hermano le enseñó a pescar.
+- Que disfrutaba las tardes familiares.
+- Que una experiencia concreta le produjo miedo.
+- Que esa experiencia cambió su manera de pensar.
+
+Todos estos elementos tienen valor testimonial.
+
+Por lo tanto, no debes considerar una respuesta extensa como una única unidad indivisible.
+
+Implementa un mecanismo que identifique unidades documentales suficientemente precisas para comprobar su representación narrativa.
+
+Cada unidad deberá contener, según corresponda:
+
+- Identificador único y estable.
+- Identificador de entrevista.
+- Identificador del participante.
+- Identificador de respuesta original.
+- Identificador de pregunta.
+- Relación con preguntas de profundización.
+- Extracto de origen verificable.
+- Tipo de información.
+- Etapa biográfica.
+- Contexto temporal.
+- Personas mencionadas.
+- Lugares mencionados.
+- Hechos y acontecimientos.
+- Sentimientos y valoraciones personales.
+- Incertidumbres expresadas.
+- Relación con fotografías.
+- Restricciones explícitas de inclusión.
+- Estado de cobertura.
+
+No todos los campos deben inventarse o rellenarse obligatoriamente. Los valores desconocidos deberán permanecer desconocidos.
+
+Los identificadores deberán ser estables y permitir localizar el origen exacto de cada información.
+
+### 4.2. CONSERVACIÓN SEMÁNTICA
+
+El sistema debe distinguir entre:
+
+- Eliminar una repetición sin pérdida de información.
+- Omitir información original.
+- Fusionar recuerdos relacionados.
+- Mezclar incorrectamente acontecimientos diferentes.
+
+Cuando dos respuestas describan el mismo episodio, deberán integrarse en una narración común que conserve todos los detalles únicos aportados por ambas.
+
+Si aportan versiones contradictorias, conservar las diferencias sin inventar una reconciliación.
+
+Cuando varias respuestas describan acontecimientos distintos, no deberán eliminarse por similitud superficial de tema, personas o vocabulario.
+
+La detección de redundancias debe exigir suficiente evidencia de que se trata del mismo acontecimiento.
+
+No utilices solamente similitud textual para decidir que dos recuerdos son idénticos.
+
+### 4.3. INFORMACIÓN EXCLUIDA POR DECISIÓN DEL ENTREVISTADO
+
+Respeta toda exclusión o restricción explícita de publicación o inclusión que esté representada en los datos disponibles.
+
+El sistema deberá:
+
+1. Identificar la restricción y su alcance real.
+2. Excluir la información afectada del libro y de sus elementos derivados cuando así corresponda.
+3. Registrar internamente que se trata de una exclusión autorizada.
+4. No contabilizarla como un recuerdo omitido injustificadamente.
+5. Conservar la información original sin modificarla, sujeta a los permisos existentes.
+6. Evitar que la información excluida reaparezca en introducciones, epílogos, pies de foto, resúmenes o regeneraciones.
+
+Distingue entre:
+
+- Información que el usuario declaró no recordar.
+- Información que prefirió no responder.
+- Información que respondió, pero pidió excluir del libro.
+- Información válida y autorizada para inclusión.
+
+No interpretes automáticamente que un tema sensible debe excluirse. Respeta las decisiones explícitas del entrevistado y los controles de privacidad existentes.
+
+Si no existen datos suficientes para determinar una autorización particular, no inventes una.
+
+No agregues nuevas preguntas al entrevistado ni modifiques la interfaz de entrevistas para resolver este punto.
+
+---
+
+## 5. SEPARAR PLANIFICACIÓN EDITORIAL Y REDACCIÓN LITERARIA
+
+El flujo actual debe evolucionar hacia un procesamiento controlado por etapas, sin modificar los prompts literarios.
+
+### FASE A — PREPARACIÓN DOCUMENTAL
+
+Obtener todas las respuestas originales elegibles, sus relaciones y los metadatos asociados.
+
+Construir el inventario de unidades documentales.
+
+Verificar que no existan entradas perdidas durante la extracción.
+
+### FASE B — PLANIFICACIÓN DE CAPÍTULOS
+
+Construir un plan editorial antes de redactar el libro.
+
+Este plan debe establecer:
+
+- Capítulos propuestos.
+- Títulos provisionales.
+- Etapas biográficas.
+- Ejes temáticos.
+- Orden narrativo.
+- Unidades testimoniales asignadas a cada capítulo.
+- Acontecimientos principales.
+- Dependencias entre capítulos.
+- Fotografías relacionadas.
+
+**La cantidad de capítulos debe depender de la riqueza real de la entrevista.**
+
+No utilizar:
+
+- Un capítulo por pregunta.
+- Un capítulo por respuesta.
+- Un capítulo por profundización.
+- Un capítulo por cada unidad documental.
+- Un número artificial de capítulos basado en la cantidad de registros.
+
+Una entrevista con 46 respuestas puede necesitar varios capítulos narrativos, aunque todas las respuestas pertenezcan a la infancia.
+
+Una entrevista extensa puede necesitar muchos más.
+
+No deben crearse capítulos vacíos para etapas de vida que no estén documentadas.
+
+No deben existir microcapítulos cuya única justificación sea separar respuestas.
+
+Conserva las dos modalidades actuales de estructura editorial:
+
+- `prompt_autonomous`
+- `fixed_five_stages`
+
+En el modo autónomo, agrupa libremente según las reglas del prompt activo y el contenido real.
+
+En el modo de cinco etapas, respeta la configuración actual, pero agrupa las respuestas de cada etapa en una estructura narrativa continua, sin crear un capítulo adicional por cada pregunta ni inventar contenido en etapas vacías.
+
+### FASE C — REDACCIÓN POR CAPÍTULOS O LOTES CONTROLADOS
+
+Una vez aprobado internamente el plan editorial, generar la narración por capítulos o lotes de tamaño seguro.
+
+Cada lote deberá:
+
+- Recibir su contexto testimonial necesario.
+- Conocer su posición dentro del libro.
+- Respetar el estilo literario seleccionado.
+- Conservar todos los hechos asignados.
+- Mantener continuidad con los capítulos anteriores.
+- Evitar repetir episodios ya desarrollados.
+- No anticipar información indebidamente.
+- Devolver una estructura validable.
+
+Los lotes no deberán dividirse simplemente por cada pregunta.
+
+El tamaño de cada lote debe calcularse según límites efectivos del modelo, volumen del contexto y salida esperada, no mediante un número arbitrario de preguntas.
+
+Si un capítulo excede los límites seguros, dividir su redacción en segmentos internos sin convertir esos segmentos en capítulos nuevos.
+
+### FASE D — INTEGRACIÓN Y CONTINUIDAD
+
+Unir los capítulos redactados preservando:
+
+- Orden cronológico.
+- Continuidad narrativa.
+- Identificadores.
+- Atribución de recuerdos.
+- Referencias a personas.
+- Información documental.
+- Contexto de fotografías.
+- Consistencia entre capítulos.
+
+No reemplaces un capítulo previamente generado al recibir otro lote con el mismo identificador.
+
+Revisa la lógica actual de agregación y combinación de capítulos para impedir sobrescrituras, duplicaciones y pérdida silenciosa de contenido.
+
+### FASE E — AUDITORÍA Y REPARACIÓN
+
+Después de completar el manuscrito, ejecutar la auditoría integral indicada en las siguientes secciones.
+
+### FASE F — APROBACIÓN Y MAQUETACIÓN
+
+Solamente un manuscrito que supere la auditoría obligatoria podrá recibir el estado `approved` y quedar disponible como libro final.
+
+La maquetación no sustituye la auditoría documental.
+
+---
+
+# PARTE II. CORRECCIÓN DE LA GENERACIÓN CON IA
+
+## 6. ELIMINAR LA DUPLICACIÓN DE PROMPTS Y TESTIMONIOS
+
+En `generateParticipantBookManuscriptWithAI`, revisa la duplicación del prompt literario activo entre:
+
+- `systemInstructionWithActivePrompt`
+- `batchPrompt`
+
+Corrige la lógica para transmitir el prompt literario activo una sola vez por solicitud al modelo.
+
+Conserva íntegramente el texto original.
+
+No reduzcas sus caracteres.
+
+No alteres su contenido.
+
+Revisa también las entradas documentales duplicadas entre:
+
+- `pdfBase64`
+- `fullCompilationPdfContent`
+- `batchChapters`
+- `unidadesTestimonialesOriginales`
+
+Diseña un mecanismo que permita disponer de toda la información testimonial necesaria sin transmitir innecesariamente varias representaciones completas del mismo material.
+
+La eliminación de duplicaciones de transporte nunca deberá provocar pérdida documental.
+
+Elige una representación canónica verificable y conserva los identificadores de origen.
+
+Si alguna representación adicional es necesaria para conservar fotografías, transcripciones o información no incluida en la fuente principal, mantenla de manera justificada.
+
+La prioridad es la fidelidad documental, no eliminar información únicamente para ahorrar tokens.
+
+### 6.1. PROMPTS TÉCNICOS INTERNOS
+
+Está permitido modificar las instrucciones de software utilizadas para solicitar:
+
+- Planes editoriales.
+- Inventarios de hechos.
+- Capítulos individuales.
+- Respuestas JSON.
+- Verificación de cobertura.
+- Reparaciones narrativas.
+
+Sin embargo, estas instrucciones no deben alterar los tres prompts literarios activos ni sustituir sus directrices.
+
+No obligues al modelo a realizar tareas de maquetación física o cálculo real de páginas durante la redacción.
+
+Las instrucciones literarias y las operaciones de PDF deberán ejecutarse en sus componentes correspondientes.
+
+---
+
+## 7. CORREGIR LA GENERACIÓN Y LOS TIEMPOS DE ESPERA
+
+Actualmente existen límites temporales en diferentes flujos que pueden resultar insuficientes para determinadas solicitudes extensas.
+
+Revisa los tiempos de espera utilizados en Gemini, OpenAI, el servidor y el cliente.
+
+No resuelvas este problema simplemente estableciendo un timeout extremadamente grande.
+
+Implementa una estrategia robusta que contemple:
+
+- Generación por lotes.
+- Estimación de tamaño de entrada y salida.
+- Límites reales de cada proveedor.
+- Reintentos acotados.
+- Control de errores transitorios.
+- Respuestas incompletas.
+- JSON truncado o inválido.
+- Fallos de red.
+- Agotamiento del tiempo disponible.
+- Recuperación segura de etapas completadas.
+- Cancelación y limpieza de operaciones fallidas.
+
+Si la duración del procesamiento excede los límites prácticos de una petición HTTP, implementa un mecanismo de trabajo persistente, consultable y reanudable compatible con la arquitectura existente.
+
+Evita que la generación de una entrevista extensa dependa de una única llamada HTTP que deba permanecer abierta hasta terminar todo el libro.
+
+Mantén la configuración actual de proveedores y modelos.
+
+Conserva la conmutación entre proveedores cuando corresponda, sin cambiar la selección del administrador.
+
+No presentes una generación fallida como si hubiera terminado correctamente.
+
+No permitas que una respuesta parcial sea aceptada como el libro completo.
+
+---
+
+# PARTE III. AUDITORÍA DOCUMENTAL REAL
+
+## 8. CORREGIR EL ERROR CRÍTICO DE COBERTURA
+
+En `auditAndApproveBookManuscript`, se ha identificado el siguiente problema lógico:
+
+```typescript
+const totalSourceUnits = integratedUnits;
+
+const coveragePercentage =
+  totalSourceUnits > 0
+    ? Math.round((integratedUnits / totalSourceUnits) * 100)
+    : 100;
+```
+
+Este cálculo no demuestra cobertura documental.
+
+Además, la lógica actual puede asignar respuestas a capítulos o párrafos sin comprobar que su información esté realmente representada.
+
+**DEBES CORREGIR AMBOS PROBLEMAS.**
+
+No basta con modificar la fórmula matemática.
+
+### 8.1. CÁLCULO DE COBERTURA
+
+El denominador deberá representar la totalidad de las unidades documentales válidas y elegibles para el libro.
+
+El numerador deberá representar exclusivamente aquellas cuya información haya sido efectivamente verificada dentro del texto narrativo.
+
+La cobertura debe evaluarse tanto por respuesta original como por hecho o detalle único identificado.
+
+Se deberá poder distinguir entre:
+
+- Fuente procesada.
+- Fuente asignada a un capítulo.
+- Información redactada.
+- Información verificada.
+- Información faltante.
+- Información excluida por decisión explícita.
+- Información pendiente de revisión.
+
+Una fuente asignada a un capítulo **NO SIGNIFICA** que esté integrada.
+
+Un identificador presente en `sourceAnswerIds` tampoco demuestra cobertura.
+
+Un porcentaje del 100% no deberá asignarse por defecto cuando no existan unidades elegibles o cuando haya fallado la verificación.
+
+En esos casos deberán utilizarse estados explícitos, como ausencia de material verificable o auditoría no concluida.
+
+### 8.2. VERIFICACIÓN SEMÁNTICA DE CADA HECHO
+
+Implementa un proceso que compruebe si cada unidad documental elegible tiene una representación real en los capítulos generados.
+
+La verificación deberá considerar:
+
+- Hecho principal.
+- Participantes.
+- Relaciones familiares.
+- Fechas y periodos, cuando estén documentados.
+- Lugares.
+- Acciones.
+- Consecuencias.
+- Emociones expresadas.
+- Reflexiones.
+- Incertidumbres originales.
+- Detalles distintivos.
+
+No exijas coincidencia literal cuando el texto haya sido correctamente transformado en prosa literaria.
+
+No utilices exclusivamente palabras clave, similitud de cadenas o presencia de nombres.
+
+La equivalencia debe ser semántica y suficientemente específica.
+
+Ejemplo conceptual:
+
+Testimonio original:
+
+"Mi tío me enseñó a pescar cuando tenía unos ocho años. Íbamos al muelle y recuerdo que me daba miedo acercarme al borde, pero él siempre me cuidaba."
+
+Una narración que únicamente diga:
+
+"Durante mi infancia disfruté muchas experiencias familiares."
+
+NO representa suficientemente ese recuerdo.
+
+Una narración fiel deberá conservar la identidad del tío, la experiencia de pesca, el muelle, la edad aproximada, el miedo y el sentimiento de protección, aunque se utilice una redacción literaria diferente.
+
+No inventar nombres, ubicaciones, fechas, diálogos o emociones que no estén documentados.
+
+### 8.3. VERIFICACIÓN CON EVIDENCIA
+
+Cada unidad considerada integrada deberá contar con una referencia verificable que incluya:
+
+- Identificador del hecho o detalle.
+- Identificador de la respuesta fuente.
+- Identificador del capítulo.
+- Identificador del párrafo.
+- Fragmento de narración que demuestra la integración.
+- Resultado de la comparación semántica.
+- Estado de verificación.
+
+El sistema no podrá aceptar como evidencia una simple declaración del propio generador de que integró todos los recuerdos.
+
+Utiliza verificación independiente de la generación, validaciones deterministas y comprobaciones semánticas respaldadas por fragmentos reales.
+
+Las verificaciones inconclusas no deben considerarse aprobadas.
+
+### 8.4. PREVENCIÓN DE INVENCIONES
+
+Además de detectar omisiones, comprueba que el libro no incorpore hechos biográficos inventados.
+
+Verifica, según corresponda:
+
+- Personas inexistentes en los testimonios.
+- Relaciones familiares incorrectas.
+- Fechas inventadas.
+- Lugares inventados.
+- Atribuciones erróneas.
+- Sucesos no documentados.
+- Diálogos presentados como citas reales sin fundamento.
+- Sentimientos atribuidos al entrevistado sin evidencia.
+- Certezas creadas a partir de recuerdos expresados con duda.
+
+Las transiciones literarias son válidas siempre que no creen hechos nuevos.
+
+No atribuyas una misma experiencia a diferentes entrevistados en historias compartidas.
+
+---
+
+## 9. MATRIZ DE TRAZABILIDAD OBLIGATORIA
+
+Amplía la estructura existente `TraceabilityMatrixEntry` y la auditoría documental de manera compatible.
+
+Cada unidad elegible deberá poder localizarse en el manuscrito.
+
+La matriz debe relacionar:
+
+**RESPUESTA ORIGINAL → HECHO O DETALLE → CAPÍTULO → PÁRRAFO → EVIDENCIA → ESTADO DE VERIFICACIÓN.**
+
+Debe cubrir también las profundizaciones y los recuerdos adicionales.
+
+No generes registros ficticios de cobertura.
+
+Cuando un hecho aparezca distribuido entre varios párrafos, registra todas las ubicaciones necesarias.
+
+Cuando una misma respuesta contenga varios hechos, verifica individualmente cada uno.
+
+Cuando varias respuestas aporten detalles al mismo episodio, conserva la trazabilidad de todas las fuentes.
+
+### 9.1. RESULTADOS DE LA AUDITORÍA
+
+El reporte deberá incluir, al menos:
+
+- Total de respuestas originales.
+- Total de respuestas elegibles.
+- Total de respuestas excluidas justificadamente.
+- Total de unidades documentales identificadas.
+- Total de unidades verificadas.
+- Total de unidades pendientes.
+- Total de unidades omitidas.
+- Porcentaje de cobertura verificable.
+- Capítulos generados.
+- Párrafos generados.
+- Hechos añadidos sin respaldo documental.
+- Fotografías pendientes de ubicar.
+- Incertidumbres alteradas.
+- Errores estructurales.
+- Resultado general.
+- Versión de reglas de auditoría.
+- Versión del motor de generación.
+- Huella verificable del conjunto de fuentes procesadas.
+
+La información sensible de las fuentes debe mantenerse protegida y accesible únicamente bajo las autorizaciones existentes.
+
+No expongas testimonios privados en registros públicos, mensajes técnicos visibles al usuario ni servicios externos distintos de los proveedores ya autorizados para la generación.
+
+---
+
+# PARTE IV. CORRECCIÓN AUTOMÁTICA DE OMISIONES
+
+## 10. IMPLEMENTAR UN CICLO DE REPARACIÓN DOCUMENTAL
+
+Cuando la auditoría detecte uno o más recuerdos omitidos, el sistema deberá intentar corregir automáticamente el manuscrito.
+
+El procedimiento será:
+
+1. Identificar las unidades faltantes.
+2. Recuperar sus fuentes originales.
+3. Identificar el capítulo o episodio al que corresponden.
+4. Generar una corrección narrativa localizada.
+5. Incorporar la información sin duplicar episodios.
+6. Mantener la continuidad estilística.
+7. Volver a verificar las unidades corregidas.
+8. Reejecutar la auditoría del manuscrito completo.
+
+No generes automáticamente un capítulo nuevo por cada recuerdo omitido.
+
+No agregues respuestas sin procesar al final del libro como supuesto mecanismo de reparación.
+
+No conviertas el texto en una sucesión de preguntas y respuestas.
+
+La reparación debe integrarse de manera natural al capítulo correspondiente.
+
+### 10.1. CONTROL DE REINTENTOS
+
+Implementa un número acotado y configurable de intentos de reparación.
+
+Si después de los intentos permitidos permanecen omisiones, contradicciones injustificadas o fallos de verificación:
+
+- El manuscrito NO debe aprobarse.
+- No debe recibir `generationStatus: 'approved'`.
+- No debe guardarse como una versión final satisfactoria.
+- No debe registrarse una cobertura ficticia del 100%.
+- Debe conservarse un diagnóstico técnico de las unidades pendientes.
+- Debe ofrecerse la posibilidad de reintentar la generación posteriormente.
+
+Evita ciclos infinitos.
+
+No hagas desaparecer artificialmente una omisión cambiando su estado, reasignándola a un capítulo o eliminándola del denominador.
+
+### 10.2. CRITERIO DE APROBACIÓN
+
+Un manuscrito podrá aprobarse exclusivamente cuando:
+
+- Todas las unidades elegibles estén verificadas.
+- Las exclusiones estén correctamente respetadas.
+- No existan omisiones pendientes.
+- No existan invenciones biográficas detectadas sin resolver.
+- Se conserven las incertidumbres originales.
+- Los capítulos tengan una estructura válida.
+- No existan fotografías sin ubicación documental verificable.
+- No existan errores críticos de integridad.
+
+Un resultado ambiguo, parcial o no verificable no deberá aprobarse automáticamente.
+
+El sistema puede aspirar a representar el 100% del material elegible, pero debe demostrarlo mediante las verificaciones disponibles y nunca confundir una estimación con una garantía absoluta.
+
+---
+
+# PARTE V. CORRECCIÓN DE LOS TRES GENERADORES
+
+## 11. ESTUDIO DEL LIBRO DEL ENTREVISTADO
+
+Corrige `generateParticipantBookManuscriptWithAI` para que:
+
+1. Prepare el inventario documental.
+2. Planifique la estructura de capítulos.
+3. Genere contenido narrativo por lotes seguros.
+4. Combine correctamente los capítulos.
+5. Verifique cobertura y veracidad.
+6. Repare omisiones.
+7. Apruebe exclusivamente resultados validados.
+8. Entregue el manuscrito canónico para vista previa y PDF final.
+
+No utilices `expectedParagraphCount` como obligación de generar un párrafo por respuesta ni como límite fijo de la riqueza narrativa.
+
+Las unidades testimoniales originales deben actuar como fuentes, no como una plantilla rígida de capítulos.
+
+El servidor no deberá reducir arbitrariamente la extensión de una historia porque el contenido sea demasiado grande para una única llamada.
+
+### 11.1. MODOS DE VISTA PREVIA Y LIBRO COMPLETO
+
+La vista previa deberá derivarse del mismo manuscrito canónico que se utilizará para generar el PDF completo.
+
+Conserva la funcionalidad actual de mostrar las primeras páginas reales del libro.
+
+No generes una autobiografía abreviada independiente únicamente para la vista previa.
+
+Al guardar, no se debe sustituir el contenido por otro manuscrito que tenga diferencias narrativas inesperadas.
+
+Si el manuscrito original ya no coincide con las respuestas o la configuración vigente, deberá volver a verificarse o regenerarse mediante el flujo establecido.
+
+---
+
+## 12. COMPILADOR DEL PANEL ADMINISTRATIVO
+
+Revisa `generateManuscriptDraft` y `compileManuscript`.
+
+Actualmente existe un mecanismo de respaldo que puede producir bloques con encabezados similares a:
+
+```typescript
+markdownLines.push(`### ${item.pregunta}`);
+```
+
+Esta estructura genera una compilación testimonial mecánica.
+
+No debe confundirse con un manuscrito autobiográfico literariamente redactado.
+
+Corrige el generador administrativo para reutilizar, cuando sea técnicamente apropiado, el mismo motor de planificación, conservación y auditoría documental utilizado por el Estudio del Libro.
+
+No es obligatorio que ambos flujos tengan idéntica presentación o que se eliminen sus funciones administrativas.
+
+Pero ambos deben respetar los mismos principios de fidelidad y agrupación narrativa.
+
+### 12.1. ERRORES Y RESPALDOS
+
+Si el proveedor de IA falla:
+
+- Registra el error técnicamente.
+- Ejecuta los mecanismos permitidos de reintento o proveedor alternativo.
+- No ocultes el error mediante un manuscrito aparentemente satisfactorio.
+- No presentes una estructura pregunta-respuesta como autobiografía terminada.
+- No apruebes un respaldo que no cumpla las verificaciones obligatorias.
+
+Una compilación testimonial de respaldo puede mantenerse como material técnico o borrador identificado explícitamente, pero no debe hacerse pasar por un libro narrativo final.
+
+Conserva el funcionamiento y los permisos del Panel Administrativo.
+
+---
+
+## 13. PRUEBA GRATUITA `/demo`
+
+Revisa `src/server/demoGeminiService.ts` y `buildFaithfulFallbackManuscript`.
+
+El respaldo actual crea capítulos individualmente durante el recorrido de las preguntas.
+
+Corrige esta lógica.
+
+Los recuerdos deben agruparse en capítulos narrativos coherentes, incluso cuando el proveedor de IA no esté disponible.
+
+Si el respaldo determinista no puede producir un resultado que cumpla la calidad editorial exigida, debe identificarlo como borrador o resultado no aprobado, en lugar de presentarlo como una autobiografía completa.
+
+Conserva:
+
+- Preguntas y respuestas de la demostración.
+- Entrevistas individuales.
+- Modalidad compartida.
+- Restricciones y omisiones explícitas.
+- Formatos editoriales actuales.
+- Funcionalidad gratuita existente.
+
+No conviertas la demostración en un sistema nuevo.
+
+Su objetivo es seguir mostrando la experiencia de YouForever, pero sin reproducir automáticamente el error de un capítulo por pregunta.
+
+---
+
+# PARTE VI. CACHÉ, ESTADOS Y VERSIONES
+
+## 14. CORREGIR LA REUTILIZACIÓN DE MANUSCRITOS
+
+Revisa `manuscriptAiMemoryCache`, la caché persistente y las validaciones del manuscrito canónico.
+
+No debe reutilizarse un libro únicamente porque:
+
+- Exista una entrada de caché.
+- Coincidan las respuestas.
+- Coincida el prompt literario.
+- Tenga capítulos.
+- Tenga un valor anterior `generationStatus: 'approved'`.
+
+Una entrada reutilizable debe corresponder exactamente a las fuentes elegibles, configuraciones relevantes y versiones vigentes de generación y auditoría.
+
+La clave de caché deberá contemplar los factores que afecten el resultado, incluyendo:
+
+- Entrevista.
+- Contenido testimonial.
+- Profundizaciones.
+- Recuerdos adicionales.
+- Restricciones de inclusión.
+- Fotografías y contexto.
+- Estilo literario.
+- Versión del prompt literario activo.
+- Modo de estructura.
+- Versión del motor.
+- Versión de las reglas de auditoría.
+- Configuraciones relevantes para la narración.
+
+No incluyas datos sensibles directamente en identificadores de caché visibles.
+
+Utiliza hashes cuando corresponda.
+
+### 14.1. VALIDACIÓN DE ENTRADAS ANTIGUAS
+
+Los resultados aprobados mediante las reglas anteriores no deberán reutilizarse automáticamente como evidencia de cobertura válida.
+
+Actualiza `CANONICAL_AUDIT_RULES_VERSION` de forma consistente para invalidar la confianza en las auditorías anteriores dentro del nuevo flujo.
+
+No borres los registros históricos ni los archivos de caché existentes como parte de esta actualización.
+
+Simplemente evita considerar válidas las aprobaciones realizadas bajo reglas obsoletas.
+
+### 14.2. APROBACIÓN EXCLUSIVAMENTE EN EL SERVIDOR
+
+Revisa `ParticipantBookStudio.tsx`.
+
+La interfaz no debe asignar el estado `approved` a un manuscrito basándose únicamente en que la solicitud HTTP fue exitosa o devolvió capítulos.
+
+El estado aprobado debe proceder de una auditoría final efectiva en el servidor.
+
+El servidor tampoco debe confiar ciegamente en:
+
+- `generationStatus` recibido del navegador.
+- `documentaryAudit` enviado por el cliente.
+- Un manuscrito bloqueado desde la vista previa.
+- Identificadores documentales suministrados sin comprobación.
+
+Antes de guardar, verifica la integridad y correspondencia del manuscrito con las fuentes originales y la auditoría vigente.
+
+No permitas que una modificación del cuerpo de la petición omita estas comprobaciones.
+
+### 14.3. CONSERVACIÓN DE VERSIONES
+
+Las versiones anteriores permanecerán intactas.
+
+No las sustituyas automáticamente.
+
+Las generaciones posteriores deberán crear nuevas versiones siguiendo el sistema existente.
+
+Las generaciones fallidas no deberán consumir indebidamente cuotas de libros finalizados ni producir registros finales aparentes.
+
+---
+
+# PARTE VII. FOTOGRAFÍAS Y MAQUETACIÓN
+
+## 15. CONSERVAR EL CONTEXTO DE LAS FOTOGRAFÍAS
+
+Las fotografías deben aparecer junto al acontecimiento al que pertenecen.
+
+No deben agruparse arbitrariamente en un capítulo ni colocarse siempre al principio o al final del libro.
+
+Utiliza:
+
+- Identificador original de fotografía.
+- Respuesta asociada.
+- Pregunta original.
+- Descripción contextual.
+- Acontecimiento relacionado.
+- Capítulo correspondiente.
+- Párrafo correspondiente.
+
+Verifica las referencias `photoPlacements`, `chapterId`, `paragraphId` y `paragraphIndex`.
+
+Cuando se reescriba un capítulo, actualiza de manera consistente las ubicaciones de sus fotografías.
+
+No consideres correctamente colocada una fotografía por el simple hecho de tener un índice de párrafo válido.
+
+Debe existir una relación documental real entre la fotografía y la narración.
+
+Cuando esa relación no pueda verificarse, registra el problema y evita asignarla arbitrariamente a otro capítulo.
+
+No elimines fotografías originales.
+
+No agregues descripciones inventadas.
+
+---
+
+## 16. CONSERVAR LA MAQUETACIÓN EDITORIAL
+
+Mantén la regla existente:
+
+**Cada capítulo auténtico debe iniciar en una página nueva.**
+
+Sin embargo:
+
+- Cada pregunta no debe provocar un salto de página.
+- Cada respuesta no debe provocar un salto de página.
+- Cada recuerdo no debe considerarse automáticamente capítulo.
+- Los párrafos de un mismo capítulo deben fluir entre páginas.
+- No deben generarse espacios en blanco injustificados por fragmentación artificial.
+- No deben perderse párrafos por límites de paginación.
+- No deben truncarse capítulos largos silenciosamente.
+- El índice debe corresponder con la paginación real.
+- La vista previa debe corresponder con el libro completo.
+- Las fotografías deben mantener su ubicación contextual.
+
+Revisa los límites de contenido y los mecanismos de truncamiento de `composeBookPages` y del generador de PDF.
+
+Si un manuscrito supera un límite técnico de páginas, implementa una estrategia segura de procesamiento o informa de un bloqueo real. Nunca elimines contenido para forzarlo a caber.
+
+No modifiques las opciones existentes de tamaño de libro, tipografía, márgenes o estilos editoriales salvo que sea estrictamente necesario para evitar pérdida de contenido.
+
+---
+
+# PARTE VIII. PRUEBAS OBLIGATORIAS
+
+## 17. PRUEBAS UNITARIAS
+
+Crea o actualiza pruebas automatizadas para verificar:
+
+1. Extracción completa de respuestas principales.
+2. Conservación de profundizaciones.
+3. Identificación de múltiples hechos dentro de una respuesta.
+4. Conservación de recuerdos adicionales.
+5. Respeto de exclusiones explícitas.
+6. Preservación de incertidumbres.
+7. Agrupación correcta de episodios.
+8. Ausencia de capítulos creados mecánicamente por pregunta.
+9. Ausencia de duplicación injustificada.
+10. Detección de hechos omitidos.
+11. Detección de hechos inventados.
+12. Corrección del cálculo de cobertura.
+13. Consistencia de identificadores.
+14. Conservación de fotografías.
+15. Integridad de resultados por lotes.
+16. Invalidación de caché obsoleta.
+17. Rechazo de manuscritos incompletos.
+18. Conservación de versiones históricas.
+19. Validación real del servidor antes de guardar.
+20. Funcionamiento de los tres estilos literarios.
+
+Utiliza pruebas deterministas con proveedores simulados cuando sea posible.
+
+No hagas depender las pruebas unitarias de llamadas reales pagadas a Gemini u OpenAI.
+
+---
+
+## 18. PRUEBA DE DETECCIÓN DE OMISIONES
+
+Crea una entrevista de prueba con varios acontecimientos claramente diferenciados.
+
+Genera un manuscrito válido y elimina deliberadamente del texto narrativo uno de los acontecimientos.
+
+Después ejecuta la auditoría.
+
+Resultado obligatorio:
+
+- Debe detectar el acontecimiento omitido.
+- Debe identificar su fuente.
+- Debe informar dónde falta.
+- Debe producir una cobertura inferior al 100%.
+- Debe impedir el estado `approved`.
+- Debe activar la reparación cuando proceda.
+
+Si la auditoría continúa aprobando el manuscrito, la corrección es insuficiente.
+
+Repite la prueba con una omisión parcial: un episodio aparece en el libro, pero falta un detalle distintivo importante.
+
+También deberá detectarse.
+
+---
+
+## 19. PRUEBA DE ENTREVISTA CORTA
+
+Utiliza un conjunto de prueba equivalente a una entrevista de 46 respuestas:
+
+- 27 respuestas principales.
+- 19 profundizaciones.
+
+Incluye varios recuerdos dentro de una misma etapa biográfica.
+
+Verifica que:
+
+- Se integren todos los hechos y detalles únicos autorizados.
+- Se agrupen los recuerdos relacionados.
+- No exista un capítulo por respuesta.
+- No se comprima injustificadamente el contenido.
+- No se pierdan episodios entre lotes.
+- Se mantenga la información aportada por profundizaciones.
+- La auditoría produzca resultados respaldados por evidencia.
+
+No exijas un número fijo de capítulos ni párrafos.
+
+El objetivo es la cobertura documental y la coherencia narrativa.
+
+Utiliza datos sintéticos o copias aisladas para las pruebas. No modifiques la entrevista histórica real.
+
+---
+
+## 20. PRUEBA DE ENTREVISTA EXTENSA
+
+Crea una entrevista sintética con aproximadamente:
+
+- 230 preguntas principales respondidas.
+- Profundizaciones adicionales.
+- Recuerdos de distintas etapas de vida.
+- Respuestas extensas.
+- Recuerdos repetidos con detalles complementarios.
+- Fotografías asociadas.
+- Algunas incertidumbres.
+- Información explícitamente excluida.
+- Participantes diferenciados cuando corresponda.
+
+Verifica que:
+
+- Ningún lote se pierda.
+- Ningún capítulo se sobrescriba.
+- No existan cortes silenciosos de respuesta.
+- El sistema permita generar capítulos extensos.
+- No se creen artificialmente cientos de capítulos.
+- Los recuerdos se distribuyan cronológica y temáticamente.
+- La memoria y el tiempo de procesamiento sean manejados de forma controlada.
+- Se puedan recuperar etapas completadas ante fallos transitorios.
+- Las reparaciones no dupliquen información.
+- La cobertura sea verificable a nivel de hecho.
+- El libro completo pueda maquetarse sin eliminar contenido.
+
+No establezcas límites arbitrarios de extensión narrativa.
+
+El libro debe crecer según la cantidad y profundidad del material original.
+
+---
+
+## 21. PRUEBAS DE REGRESIÓN
+
+Ejecuta las pruebas existentes y agrega cobertura a los archivos de prueba relacionados, incluyendo, cuando corresponda:
+
+- `canonicalBookCorrection.test.ts`
+- `bookPreviewAndPhotoPlacement.test.ts`
+- `participantBookRules.test.ts`
+- `demoStoryRules.test.ts`
+
+Revisa también los contratos de API y pruebas del servidor.
+
+Verifica los siguientes escenarios:
+
+| Escenario | Resultado requerido |
+|---|---|
+| Una respuesta con cinco hechos | Los cinco hechos quedan representados |
+| Varias respuestas sobre un episodio | Un relato integrado que conserva los detalles |
+| Una etapa con muchas preguntas | Capítulos narrativos coherentes, no uno por pregunta |
+| Un recuerdo ausente | Auditoría fallida |
+| Una emoción omitida | Auditoría detecta la pérdida de significado |
+| Un hecho inventado | Auditoría lo identifica |
+| Recuerdo expresado con duda | Se conserva la incertidumbre |
+| Información excluida explícitamente | No aparece en el libro |
+| Error temporal de Gemini | Reintento o recuperación controlada |
+| Error temporal de OpenAI | Recuperación o fallo explícito |
+| Fallback administrativo | No simula un libro completo validado |
+| Fallback de demo | No crea un capítulo por pregunta |
+| Caché histórica | No se reutiliza como aprobada sin validación vigente |
+| Vista previa aprobada | Conserva el mismo contenido en el libro final |
+| Edición no autorizada de estado desde cliente | El servidor impide la aprobación |
+| Libro largo | No se pierden páginas ni párrafos |
+| Entrevista compartida | Se conserva la atribución de cada persona |
+| Fotografía contextual | Se ubica en el episodio correspondiente |
+
+No des por superada ninguna prueba si solo fue revisada visualmente o inferida.
+
+---
+
+# PARTE IX. IMPLEMENTACIÓN SEGURA
+
+## 22. ORDEN DE IMPLEMENTACIÓN
+
+Realiza las correcciones en el siguiente orden:
+
+**PRIMERO:** corregir el inventario documental, la cobertura y los criterios de aprobación.
+
+**SEGUNDO:** implementar la planificación editorial y la redacción por lotes, manteniendo los prompts literarios originales.
+
+**TERCERO:** implementar la reparación automática de omisiones.
+
+**CUARTO:** corregir la gestión de proveedores, errores y tiempos de espera.
+
+**QUINTO:** corregir los mecanismos de respaldo de Admin y demo.
+
+**SEXTO:** corregir caché, versiones de auditoría y reutilización de manuscritos.
+
+**SÉPTIMO:** reforzar la validación del servidor y la interfaz de guardado.
+
+**OCTAVO:** verificar fotografías, paginación y conservación completa del PDF.
+
+**NOVENO:** ejecutar pruebas unitarias, de integración y regresión.
+
+No cambies funcionalidades ajenas para resolver defectos localizados.
+
+Reutiliza las estructuras, interfaces, utilidades y servicios existentes cuando sea técnicamente apropiado.
+
+Evita duplicar motores de generación o crear arquitecturas paralelas innecesarias.
+
+Comparte lógica de cobertura, planificación y validación entre los distintos flujos cuando sus contratos lo permitan.
+
+Mantén la compatibilidad con los libros históricos.
+
+### 22.1. CONTROL DE CONCURRENCIA E INTEGRIDAD
+
+Evita que dos solicitudes simultáneas de generación o guardado para la misma entrevista:
+
+- Sobrescriban resultados.
+- Combinen lotes de versiones diferentes.
+- Reutilicen auditorías incorrectas.
+- Generen inconsistencias de numeración.
+- Dupliquen operaciones de guardado.
+- Actualicen cuotas indebidamente.
+
+Utiliza mecanismos de idempotencia, control de versiones o sincronización compatibles con la arquitectura actual.
+
+### 22.2. PROTECCIÓN DE DATOS
+
+No vuelques testimonios, fotografías, credenciales, códigos de acceso o transcripciones completas a registros de depuración.
+
+No alteres permisos ni mecanismos de autenticación.
+
+Los reportes documentales detallados deberán permanecer bajo los controles de acceso existentes.
+
+Los mensajes visibles para entrevistados deben ser claros y no exponer detalles internos de proveedores, bases de datos, estructuras JSON o arquitectura técnica.
+
+---
+
+# PARTE X. CRITERIOS FINALES DE ACEPTACIÓN
+
+## 23. CONDICIONES OBLIGATORIAS
+
+La implementación solamente podrá considerarse terminada cuando se cumplan las siguientes condiciones.
+
+### A. Fidelidad documental
+
+El sistema dispone de un inventario completo de unidades documentales elegibles y puede comprobar su representación en el libro.
+
+Los hechos, recuerdos, sentimientos y detalles únicos no se pierden por resumir respuestas o fusionar capítulos.
+
+### B. Estructura editorial
+
+Las preguntas y respuestas se agrupan en capítulos coherentes.
+
+La cantidad de capítulos depende de la narración y no del número de preguntas.
+
+### C. Integridad de los prompts
+
+Los prompts literarios A, B y C conservan exactamente su contenido original.
+
+### D. Auditoría confiable
+
+La cobertura se calcula respecto a las fuentes elegibles y se verifica contra el manuscrito real.
+
+Una omisión comprobada impide la aprobación.
+
+### E. Reparación automática
+
+El sistema intenta incorporar los recuerdos faltantes dentro de los capítulos correctos.
+
+Si no puede verificar la corrección, bloquea la aprobación.
+
+### F. Generación extensible
+
+El motor puede procesar entrevistas extensas sin depender de que el contenido completo quepa en una única respuesta de IA.
+
+### G. Funcionamiento de los tres flujos
+
+Estudio del Libro, Panel Administrativo y demo utilizan criterios coherentes de conservación testimonial y no producen capítulos mecánicos por pregunta.
+
+### H. Caché confiable
+
+Solamente se reutilizan resultados válidos para las fuentes y reglas vigentes.
+
+### I. Protección histórica
+
+Los libros, respuestas y archivos anteriores permanecen intactos.
+
+### J. Calidad del PDF
+
+No existen pérdidas silenciosas de contenido al paginar o generar el documento.
+
+Los capítulos verdaderos comienzan en páginas nuevas.
+
+### K. Pruebas verificadas
+
+Las pruebas automatizadas aplicables terminan correctamente, sin errores críticos pendientes.
+
+Cuando una comprobación no pueda ejecutarse en el entorno disponible, deberá indicarse expresamente y no presentarse como superada.
+
+---
+
+# PARTE XI. INFORME FINAL OBLIGATORIO
+
+## 24. DOCUMENTAR LOS CAMBIOS REALIZADOS
+
+Al finalizar, entrega un informe técnico completo con los siguientes apartados:
+
+### 24.1. Resumen ejecutivo
+
+Explica qué problemas fueron corregidos y cómo afectan a la generación de autobiografías.
+
+### 24.2. Archivos modificados
+
+Tabla con:
+
+- Archivo.
+- Funciones modificadas.
+- Problema corregido.
+- Solución implementada.
+- Riesgo de regresión.
+- Estado de verificación.
+
+### 24.3. Arquitectura final
+
+Describe el nuevo proceso desde las respuestas originales hasta la creación del PDF.
+
+### 24.4. Auditoría documental
+
+Explica:
+
+- Cómo se extraen los hechos.
+- Cómo se comprueba cada hecho.
+- Cómo se calcula la cobertura.
+- Cómo se identifican omisiones.
+- Cómo se reparan.
+- Cómo se bloquea un libro incompleto.
+
+### 24.5. Pruebas ejecutadas
+
+Indica:
+
+- Nombre de la prueba.
+- Resultado esperado.
+- Resultado obtenido.
+- Estado: superada, fallida o no ejecutada.
+- Evidencia disponible.
+
+### 24.6. Compatibilidad
+
+Confirma explícitamente que:
+
+- No se modificaron los prompts literarios.
+- No se alteraron testimonios históricos.
+- No se eliminaron versiones de libros.
+- No se modificaron funcionalidades ajenas.
+- Se mantuvieron los estilos A, B y C.
+- Se conservaron las modalidades individual y compartida.
+- Se preservaron los mecanismos de acceso y permisos.
+
+No afirmes estas condiciones sin verificarlas mediante revisión de cambios.
+
+### 24.7. Limitaciones pendientes
+
+Si existe alguna limitación técnica que impida alcanzar los criterios de aceptación, indícala de forma clara y concreta.
+
+No declares terminada la corrección mientras existan defectos críticos no resueltos.
+
+---
+
+# 25. INSTRUCCIÓN FINAL DE EJECUCIÓN
+
+**ESTÁS AUTORIZADO A MODIFICAR EL CÓDIGO FUENTE NECESARIO PARA IMPLEMENTAR TODAS ESTAS CORRECCIONES.**
+
+No estás autorizado a modificar los tres prompts literarios, los testimonios originales, los libros históricos ni funcionalidades ajenas.
+
+No entregues solamente un plan.
+
+No respondas únicamente con recomendaciones.
+
+No simules pruebas exitosas.
+
+No sustituyas verificaciones reales por declaraciones de cumplimiento.
+
+Implementa las correcciones en el código fuente, integra los cambios, ejecuta las pruebas posibles y entrega el informe técnico final.
+
+Utiliza un diseño robusto, mantenible y compatible con la aplicación existente.
+
+**PRINCIPIO IRRENUNCIABLE DE YOUFOREVER:**
+
+> Cada hecho, recuerdo, sentimiento y detalle único que una persona haya confiado a YouForever y autorizado para su autobiografía merece conservarse. La redacción puede mejorar la manera de contarlo, pero nunca debe hacerlo desaparecer, distorsionarlo ni sustituirlo por una historia inventada.
+
+La integridad testimonial es el criterio superior de todo el sistema.
+
+**No apruebes libros incompletos. No declares coberturas ficticias. No crees un capítulo por respuesta. No modifiques los prompts literarios originales. No alteres los datos históricos.**
+
+**REALIZA AHORA LA IMPLEMENTACIÓN INTEGRAL Y VERIFICA SUS RESULTADOS.**

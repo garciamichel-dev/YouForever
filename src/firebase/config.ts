@@ -1,7 +1,11 @@
 import { initializeApp, getApps, getApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider, signOut } from 'firebase/auth';
-import { getFirestore, doc, getDocFromServer, enableNetwork } from 'firebase/firestore';
+import { getFirestore, doc, getDocFromServer, enableNetwork, setLogLevel } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
+
+try {
+  setLogLevel('error');
+} catch {}
 
 const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);

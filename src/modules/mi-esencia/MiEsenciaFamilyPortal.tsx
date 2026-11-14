@@ -150,7 +150,7 @@ export const MiEsenciaFamilyPortal: React.FC<MiEsenciaFamilyPortalProps> = ({
       }
       setIsAuthenticated(true);
     } catch (err: any) {
-      setAuthError(err?.message || 'Error de conexión al validar tu código.');
+      setAuthError(err?.message || 'No pudimos verificar tu código en este momento. Inténtalo nuevamente.');
     } finally {
       setIsVerifying(false);
     }
@@ -457,7 +457,7 @@ export const MiEsenciaFamilyPortal: React.FC<MiEsenciaFamilyPortalProps> = ({
         setOpenContradictions((prev) => [...prev, json.data.contradictionCreated]);
       }
     } catch (err: any) {
-      setSendError(err?.message || 'Error de red al conversar con Mi Esencia.');
+      setSendError(err?.message || 'No pudimos enviar tu mensaje en este momento. Inténtalo nuevamente.');
     } finally {
       setIsSending(false);
     }
@@ -542,7 +542,7 @@ export const MiEsenciaFamilyPortal: React.FC<MiEsenciaFamilyPortalProps> = ({
               </div>
               <p className="text-stone-700 dark:text-stone-300">
                 Es la verdad biográfica original de la persona entrevistada, tomada directamente del{' '}
-                <strong>Compilado Testimonial Fidedigno</strong> con todas sus preguntas y respuestas reales.
+                <strong>registro original de la entrevista</strong> con todas sus preguntas y respuestas reales.
                 Es <strong>inmutable</strong>: ningún familiar ni conversación posterior puede borrar, alterar ni contradecir lo que dejó contado de viva voz.
               </p>
             </div>
@@ -565,7 +565,7 @@ export const MiEsenciaFamilyPortal: React.FC<MiEsenciaFamilyPortalProps> = ({
               </div>
               <p className="text-stone-700 dark:text-stone-300">
                 Son confidencias, desahogos o recuerdos personales que deseas que queden{' '}
-                <strong>exclusivamente entre tú y el avatar</strong>. Quedan aislados criptográficamente con tu código personal único y jamás se mencionan ni se revelan a ningún otro integrante de la familia.
+                <strong>exclusivamente entre tú y el avatar</strong>. Quedan protegidos únicamente con tu código personal y jamás se mencionan ni se revelan a ningún otro integrante de la familia.
               </p>
             </div>
 
@@ -624,7 +624,7 @@ export const MiEsenciaFamilyPortal: React.FC<MiEsenciaFamilyPortalProps> = ({
               <div className="flex items-center justify-between gap-2 flex-wrap">
                 <h3 className="font-semibold text-amber-900 dark:text-amber-200 text-sm flex items-center gap-2">
                   <MessageSquare className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
-                  <span>¿Deseas más mensajes diarios y/o aumentar tu cuota?</span>
+                  <span>¿Deseas más mensajes diarios en tu conversación?</span>
                 </h3>
                 {isAuthenticated && (
                   <span className="px-2.5 py-0.5 rounded-full bg-amber-500/15 border border-amber-500/30 text-[11px] font-semibold text-amber-800 dark:text-amber-300">
@@ -635,7 +635,7 @@ export const MiEsenciaFamilyPortal: React.FC<MiEsenciaFamilyPortalProps> = ({
               </div>
               <p className="text-stone-700 dark:text-stone-300">
                 Si deseas contar con <strong>más mensajes diarios</strong> y/o{' '}
-                <strong>aumentar tu cuota</strong> de conversación para ti o tu familia, por favor{' '}
+                <strong>ampliar tu límite de mensajes</strong> de conversación para ti o tu familia, por favor{' '}
                 <strong>ponte en contacto con YouForever</strong> para indicarte los{' '}
                 <strong>planes de mejoras y actualizaciones disponibles</strong>.
               </p>
@@ -716,7 +716,7 @@ export const MiEsenciaFamilyPortal: React.FC<MiEsenciaFamilyPortalProps> = ({
           <div className="space-y-4">
             <div>
               <label className="block text-xs font-medium text-stone-700 dark:text-stone-300 mb-1.5">
-                Tu Código Personal Criptográfico
+                Tu Código Personal de Acceso
               </label>
               <div className="relative">
                 <KeyRound className="w-4 h-4 text-amber-600 dark:text-amber-400 absolute left-3.5 top-3" />
@@ -748,7 +748,7 @@ export const MiEsenciaFamilyPortal: React.FC<MiEsenciaFamilyPortalProps> = ({
               {isVerifying ? (
                 <>
                   <RefreshCw className="w-4 h-4 animate-spin" />
-                  <span>Verificando credencial familiar...</span>
+                  <span>Verificando tu código...</span>
                 </>
               ) : (
                 <>
@@ -761,14 +761,14 @@ export const MiEsenciaFamilyPortal: React.FC<MiEsenciaFamilyPortalProps> = ({
 
           <div className="pt-4 border-t border-stone-200 dark:border-stone-800/80 text-[11px] text-stone-500 text-center space-y-1">
             <p>
-              Acceso exclusivo mediante enlace privado y código criptográfico individual por familiar.
+              Acceso privado para cada familiar mediante su enlace y código personal.
             </p>
             <p>Fidelidad biográfica estricta • Niveles de privacidad A, B y C</p>
           </div>
         </div>
 
         <footer className="text-center text-xs text-stone-500 dark:text-stone-600 py-2">
-          YouForever • Subsistema Mi Esencia (/miesencia)
+          YouForever • Mi Esencia
         </footer>
       </div>
     );
@@ -802,7 +802,7 @@ export const MiEsenciaFamilyPortal: React.FC<MiEsenciaFamilyPortalProps> = ({
             </h2>
             <p className="text-sm text-stone-700 dark:text-stone-300 leading-relaxed bg-stone-50 dark:bg-stone-950/80 p-4 rounded-xl border border-stone-200 dark:border-stone-800">
               {config?.transparencyNoticeText ||
-                'Estás por conversar con una recreación digital biográfica en Mi Esencia, construida estrictamente a partir del Compilado Testimonial Fidedigno de preguntas y respuestas reales.'}
+                'Estás por conversar con una recreación digital biográfica en Mi Esencia, construida fielmente a partir de los recuerdos reales compartidos en su entrevista.'}
             </p>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-2 text-xs">
               <div className="p-3 rounded-xl bg-stone-50 dark:bg-stone-950/60 border border-stone-200 dark:border-stone-800">
@@ -893,7 +893,7 @@ export const MiEsenciaFamilyPortal: React.FC<MiEsenciaFamilyPortalProps> = ({
             <button
               type="button"
               onClick={() => setShowFaqModal(true)}
-              title="Ver detalles de cuota diaria y cómo solicitar más mensajes a YouForever"
+              title="Ver cuántos mensajes tienes hoy y cómo solicitar más"
               className={`px-3 py-1.5 rounded-xl border text-xs font-medium transition flex items-center gap-2 cursor-pointer ${
                 dailyMessagesRemaining <= 5
                   ? 'bg-rose-950/60 hover:bg-rose-900/60 border-rose-700/60 text-rose-200'

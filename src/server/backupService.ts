@@ -32,26 +32,34 @@ const STAGE_LABELS: Record<string, string> = {
  * Extracts binary Buffer and clean extension from a Base64 data URL string.
  */
 function decodeDataUrlToBuffer(
-  dataUrl: string,
+  dataUrl: string | undefined | null,
   fallbackMime: string = 'application/octet-stream'
 ): { buffer: Buffer; mime: string; ext: string } {
-  let mime = fallbackMime;
-  let base64Part = dataUrl;
+  let mime = fallbackMime || 'application/octet-stream';
+  const rawStr = typeof dataUrl === 'string' ? dataUrl.trim() : '';
+  let base64Part = rawStr;
 
-  if (dataUrl.startsWith('data:')) {
-    const commaIdx = dataUrl.indexOf(',');
+  if (!rawStr || rawStr.startsWith('/') || rawStr.startsWith('http')) {
+    base64Part = '';
+  } else if (rawStr.startsWith('data:')) {
+    const commaIdx = rawStr.indexOf(',');
     if (commaIdx !== -1) {
-      const header = dataUrl.substring(0, commaIdx);
+      const header = rawStr.substring(0, commaIdx);
       const mimeMatch = header.match(/^data:([^;]+)/);
       if (mimeMatch && mimeMatch[1]) {
         mime = mimeMatch[1];
       }
-      base64Part = dataUrl.substring(commaIdx + 1);
+      base64Part = rawStr.substring(commaIdx + 1);
     }
   }
 
   const cleanBase64 = base64Part.replace(/\s+/g, '');
-  const buffer = Buffer.from(cleanBase64, 'base64');
+  let buffer: Buffer;
+  try {
+    buffer = cleanBase64 ? Buffer.from(cleanBase64, 'base64') : Buffer.alloc(0);
+  } catch {
+    buffer = Buffer.alloc(0);
+  }
 
   let ext = 'bin';
   if (mime.includes('webm')) ext = 'webm';
@@ -94,6 +102,11 @@ export function generateQACompilationMarkdown(params: {
   const photoMap = new Map(photos.map((p) => [p.id, p]));
   const audioMap = new Map(audios.map((a) => [a.id, a]));
 
+  const activeAnswerPhotosCount = answers.reduce(
+    (sum, a) => sum + (Array.isArray(a.photos) ? a.photos.filter(Boolean).length : 0),
+    0
+  );
+
   const lines: string[] = [
     `# COMPILADO TESTIMONIAL DE PREGUNTAS Y RESPUESTAS`,
     `## Respaldo Integral y Fidedigno del Entrevistado`,
@@ -103,7 +116,7 @@ export function generateQACompilationMarkdown(params: {
     `* **Fecha de generación de respaldo:** ${new Date().toLocaleDateString('es-ES', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`,
     `* **Participantes registrados:** ${participants.map((p) => `${p.name} (${p.relationship})`).join(', ')}`,
     `* **Total de respuestas archivadas:** ${answers.length}`,
-    `* **Total de fotografías adjuntas:** ${photos.length}`,
+    `* **Total de fotografías adjuntas:** ${activeAnswerPhotosCount}`,
     `* **Total de notas de voz registradas:** ${audios.length}`,
     `\n---\n`,
     `## Índice de Contenidos Testimoniales`,
@@ -156,15 +169,15 @@ export function generateQACompilationMarkdown(params: {
 
       if (ans.notRecalled) {
         lines.push(`> *El participante indicó formalmente: «No lo recuerdo».*`);
-      } else if (ans.answerText) {
+      } else if (ans.answerText && String(ans.answerText).trim().length > 0) {
         lines.push(`**Respuesta textual:**`);
-        lines.push(`> "${ans.answerText.replace(/\n/g, '\n> ')}"`);
+        lines.push(`> "${String(ans.answerText).replace(/\n/g, '\n> ')}"`);
       } else {
         lines.push(`> *(Sin texto escrito)*`);
       }
       lines.push('');
 
-      // Voice Audio Recordings
+      // Transcripciones de grabaciones de voz (sin insertar archivos ni enlaces de audio)
       const voiceList = (ans.audioRecordings && ans.audioRecordings.length > 0)
         ? ans.audioRecordings
         : ans.audio
@@ -172,27 +185,39 @@ export function generateQACompilationMarkdown(params: {
         : [];
 
       if (voiceList.length > 0) {
-        lines.push(`#### Archivos de Voz Asociados (${voiceList.length}):`);
-        voiceList.forEach((audioItem, aIdx) => {
-          const storedAudio = audioMap.get(audioItem.id) || audioItem;
-          const fileName = audioFileNamesMap?.get(storedAudio.id) || `audios/${storedAudio.id}.webm`;
-          lines.push(`* **Nota de voz #${aIdx + 1}:** \`${fileName}\` (${storedAudio.durationSeconds || 0} segundos)`);
-          if (storedAudio.transcription && storedAudio.transcription.trim().length > 0) {
-            lines.push(`  * **Transcripción literal:** "${storedAudio.transcription.trim()}"`);
-          }
-        });
-        lines.push('');
+        const transcriptions = voiceList
+          .map((audioItem) => {
+            if (!audioItem) return '';
+            const storedAudio = audioMap.get(audioItem.id) || audioItem;
+            return String(audioItem.transcription || storedAudio?.transcription || '').trim();
+          })
+          .filter((t) => t.length > 0);
+
+        if (transcriptions.length > 0) {
+          lines.push(`#### Transcripciones de Voz (${transcriptions.length}):`);
+          transcriptions.forEach((tr, aIdx) => {
+            lines.push(`* **Transcripción de voz #${aIdx + 1}:** "${tr}"`);
+          });
+          lines.push('');
+        }
       }
 
-      // Photographs attached
-      if (ans.photos && ans.photos.length > 0) {
-        lines.push(`#### Fotografías Adjuntas (${ans.photos.length}):`);
-        ans.photos.forEach((photoItem, pIdx) => {
-          const storedPhoto = photoMap.get(photoItem.id) || photoItem;
-          const fileName = photoFileNamesMap?.get(storedPhoto.id) || `fotos/${storedPhoto.id}.jpg`;
-          lines.push(`* **Fotografía #${pIdx + 1}:** \`${fileName}\``);
-          lines.push(`  * **Descripción y contexto proporcionado:** *«${storedPhoto.caption}»*`);
-          lines.push(`  * !${`[Fotografía #${pIdx + 1} - ${storedPhoto.caption}](${fileName})`}`);
+      // Photographs actively attached to this answer
+      const combinedPhotos = Array.isArray(ans.photos) ? ans.photos.filter(Boolean) : [];
+
+      if (combinedPhotos.length > 0) {
+        lines.push(`#### Fotografías Adjuntas (${combinedPhotos.length}):`);
+        combinedPhotos.forEach((photoItem, pIdx) => {
+          const storedPhoto = (photoItem?.id ? photoMap.get(photoItem.id) : undefined) || photoItem;
+          const fileName =
+            (storedPhoto?.id && photoFileNamesMap?.get(storedPhoto.id)) ||
+            (storedPhoto as any)?.dataUrl ||
+            storedPhoto?.imageUrl ||
+            `fotos/${storedPhoto?.id || pIdx + 1}.jpg`;
+          const captionText = String(storedPhoto?.caption || photoItem?.caption || 'Sin descripción registrada').trim();
+          lines.push(`* **Fotografía #${pIdx + 1}:**`);
+          lines.push(`  * **Descripción de fotografía:** *«${captionText}»*`);
+          lines.push(`  * ![Fotografía #${pIdx + 1} - ${captionText}](${fileName})`);
         });
         lines.push('');
       }
@@ -221,6 +246,7 @@ export function generateQACompilationHtml(params: {
   audios: InterviewAudioRecord[];
   audioFileNamesMap?: Map<string, string>;
   photoFileNamesMap?: Map<string, string>;
+  adminEmail?: string | null;
 }): string {
   const {
     interview,
@@ -231,7 +257,14 @@ export function generateQACompilationHtml(params: {
     audios,
     audioFileNamesMap,
     photoFileNamesMap,
+    adminEmail,
   } = params;
+
+  const cleanAdminEmail =
+    typeof adminEmail === 'string' && adminEmail.trim().length > 0 ? adminEmail.trim() : '';
+  const pdfHref = `/api/interviews/${encodeURIComponent(interview.id)}/backup/qa-pdf${
+    cleanAdminEmail ? `?admin=${encodeURIComponent(cleanAdminEmail)}` : ''
+  }`;
 
   const questionMap = new Map(questions.map((q) => [q.id, q]));
   const photoMap = new Map(photos.map((p) => [p.id, p]));
@@ -307,63 +340,62 @@ export function generateQACompilationHtml(params: {
             }
           </div>
 
-          ${
-            voiceList.length > 0
-              ? `
+          ${(() => {
+            const transcriptions = voiceList
+              .map((voiceItem) => {
+                if (!voiceItem) return '';
+                const fullAudio = audioMap.get(voiceItem.id) || voiceItem;
+                return String(voiceItem.transcription || fullAudio?.transcription || '').trim();
+              })
+              .filter((t) => t.length > 0);
+
+            if (transcriptions.length === 0) return '';
+            return `
               <div class="voice-section">
-                <h4 class="media-title">Archivos de Voz Grabados (${voiceList.length})</h4>
+                <h4 class="media-title">Transcripciones de Grabaciones de Voz (${transcriptions.length})</h4>
                 <div class="audios-grid">
-                  ${voiceList
-                    .map((voiceItem, vIdx) => {
-                      const fullAudio = audioMap.get(voiceItem.id) || voiceItem;
-                      const relativePath = audioFileNamesMap?.get(fullAudio.id) || `audios/${fullAudio.id}.webm`;
-                      const dataUrlFallback = fullAudio.audioDataUrl || '';
-                      return `
+                  ${transcriptions
+                    .map(
+                      (trText, vIdx) => `
                         <div class="audio-item">
-                          <div class="audio-header">
-                            <span class="audio-badge">Nota de voz #${vIdx + 1} (${fullAudio.durationSeconds || 0}s)</span>
-                            <span class="audio-filename">${escapeHtml(relativePath)}</span>
+                          <div class="transcription-card">
+                            <span class="transcription-label">Transcripción de voz #${vIdx + 1}:</span>
+                            <p class="transcription-text">«${escapeHtml(trText)}»</p>
                           </div>
-                          <audio controls preload="metadata" class="native-audio" src="${escapeHtml(relativePath)}" data-fallback="${escapeHtml(dataUrlFallback)}">
-                            ${dataUrlFallback ? `<source src="${escapeHtml(dataUrlFallback)}" type="${fullAudio.mimeType || 'audio/webm'}">` : ''}
-                            Tu navegador no soporta el reproductor de audio nativo.
-                          </audio>
-                          ${
-                            fullAudio.transcription && fullAudio.transcription.trim().length > 0
-                              ? `
-                              <div class="transcription-card">
-                                <span class="transcription-label">Transcripción literal con IA:</span>
-                                <p class="transcription-text">«${escapeHtml(fullAudio.transcription.trim())}»</p>
-                              </div>
-                              `
-                              : ''
-                          }
                         </div>
-                      `;
-                    })
+                      `
+                    )
                     .join('')}
                 </div>
               </div>
-            `
-              : ''
-          }
+            `;
+          })()}
 
-          ${
-            ans.photos && ans.photos.length > 0
-              ? `
+          ${(() => {
+            const combinedPhotos = Array.isArray(ans.photos) ? ans.photos.filter(Boolean) : [];
+            if (combinedPhotos.length === 0) return '';
+            return `
               <div class="photos-section">
-                <h4 class="media-title">Fotografías Aportadas (${ans.photos.length})</h4>
+                <h4 class="media-title">Fotografías Asociadas (${combinedPhotos.length})</h4>
                 <div class="photos-grid">
-                  ${ans.photos
+                  ${combinedPhotos
                     .map((photoItem, pIdx) => {
-                      const fullPhoto = photoMap.get(photoItem.id) || photoItem;
-                      const relativePath = photoFileNamesMap?.get(fullPhoto.id) || `fotos/${fullPhoto.id}.jpg`;
-                      const dataUrlFallback = (fullPhoto as any).dataUrl || fullPhoto.imageUrl || '';
+                      const fullPhoto = (photoItem?.id ? photoMap.get(photoItem.id) : undefined) || photoItem;
+                      const dataUrlFallback =
+                        (fullPhoto as any)?.dataUrl ||
+                        fullPhoto?.imageUrl ||
+                        (fullPhoto?.id ? `/api/photos/${fullPhoto.id}` : '');
+                      const primarySrc = photoFileNamesMap
+                        ? (photoFileNamesMap.get(fullPhoto.id) || dataUrlFallback)
+                        : dataUrlFallback;
+                      const captionText = String(
+                        fullPhoto?.caption || photoItem?.caption || 'Sin descripción registrada'
+                      ).trim();
                       return `
                         <div class="photo-card">
-                          <img src="${escapeHtml(relativePath)}" data-fallback="${escapeHtml(dataUrlFallback)}" alt="${escapeHtml(fullPhoto.caption)}" class="photo-img" onerror="if(this.dataset.fallback && this.src!==this.dataset.fallback){this.src=this.dataset.fallback;}" />
+                          <img src="${escapeHtml(primarySrc)}" data-fallback="${escapeHtml(dataUrlFallback)}" alt="${escapeHtml(captionText)}" class="photo-img" onerror="if(this.dataset.fallback && this.src!==this.dataset.fallback){this.src=this.dataset.fallback;}" />
                           <div class="photo-caption">
-                            <strong>Foto #${pIdx + 1}:</strong> ${escapeHtml(fullPhoto.caption)}
+                            <strong>Fotografía #${pIdx + 1}:</strong> ${escapeHtml(captionText)}
                           </div>
                         </div>
                       `;
@@ -371,9 +403,8 @@ export function generateQACompilationHtml(params: {
                     .join('')}
                 </div>
               </div>
-            `
-              : ''
-          }
+            `;
+          })()}
         </article>
       `);
 
@@ -748,7 +779,13 @@ export function generateQACompilationHtml(params: {
   <div class="container">
     <div class="top-bar">
       <span style="font-size: 12px; font-weight: 600; color: #64748b;">Dossier Testimonial de Respaldo - YouForever</span>
-      <button class="btn btn-print" onclick="window.print()">Imprimir / Guardar como PDF</button>
+      <a
+        id="qa-pdf-download-link"
+        class="btn btn-print"
+        href="${escapeHtml(pdfHref)}"
+        download="Compilado_Testimonial_Fidedigno_${encodeURIComponent(interview.id)}.pdf"
+        style="text-decoration: none; display: inline-flex; align-items: center; gap: 6px;"
+      >Imprimir / Guardar como PDF</a>
     </div>
 
     <header class="header-hero">
@@ -765,7 +802,7 @@ export function generateQACompilationHtml(params: {
         <div class="meta-item"><strong>Participantes:</strong> ${participants.map((p) => escapeHtml(p.name)).join(', ')}</div>
         <div class="meta-item"><strong>Respuestas Totales:</strong> ${answers.length} registradas</div>
         <div class="meta-item"><strong>Archivos de Voz:</strong> ${audios.length} grabaciones</div>
-        <div class="meta-item"><strong>Fotografías:</strong> ${photos.length} imágenes</div>
+        <div class="meta-item"><strong>Fotografías:</strong> ${answers.reduce((sum, a) => sum + (Array.isArray(a.photos) ? a.photos.filter(Boolean).length : 0), 0)} imágenes</div>
         <div class="meta-item"><strong>Fecha de Exportación:</strong> ${new Date().toLocaleDateString('es-ES')}</div>
       </div>
     </header>
@@ -790,6 +827,28 @@ export function generateQACompilationHtml(params: {
   </div>
 
   <script>
+    (function() {
+      const pdfLink = document.getElementById('qa-pdf-download-link');
+      if (pdfLink) {
+        try {
+          const urlParams = new URLSearchParams(window.location.search || '');
+          const urlAdmin = urlParams.get('admin') || urlParams.get('adminEmail') || urlParams.get('token');
+          const rawHref = pdfLink.getAttribute('href') || '';
+          if (urlAdmin && rawHref.indexOf('admin=') === -1) {
+            const sep = rawHref.indexOf('?') === -1 ? '?' : '&';
+            pdfLink.setAttribute('href', rawHref + sep + 'admin=' + encodeURIComponent(urlAdmin));
+          }
+          pdfLink.addEventListener('click', function(ev) {
+            if (window.location.protocol === 'file:') {
+              ev.preventDefault();
+              window.print();
+              return;
+            }
+          });
+        } catch (_e) {}
+      }
+    })();
+
     // Fallback handler for audio files if opened outside the ZIP folder
     document.querySelectorAll('audio').forEach(audio => {
       audio.addEventListener('error', () => {
@@ -843,14 +902,15 @@ export async function buildInterviewBackupZip(
   // 1. Pack Audio Files
   for (let i = 0; i < audios.length; i++) {
     const aud = audios[i];
+    if (!aud) continue;
     const { buffer, ext } = decodeDataUrlToBuffer(aud.audioDataUrl, aud.mimeType || 'audio/webm');
-    const sanitizedTitle = (aud.questionText || 'audio')
+    const sanitizedTitle = String(aud.questionText || 'audio')
       .toLowerCase()
       .replace(/[^a-z0-9]/g, '_')
       .substring(0, 30);
     const fileName = `aud_${String(i + 1).padStart(2, '0')}_${sanitizedTitle}.${ext}`;
 
-    if (audiosFolder) {
+    if (audiosFolder && buffer.length > 0) {
       audiosFolder.file(fileName, buffer);
     }
     audioFileNamesMap.set(aud.id, `audios/${fileName}`);
@@ -859,15 +919,16 @@ export async function buildInterviewBackupZip(
   // 2. Pack Photo Files
   for (let i = 0; i < photos.length; i++) {
     const photo = photos[i];
-    const dataUrl = photo.dataUrl || photo.imageUrl || '';
+    if (!photo) continue;
+    const dataUrl = photo.dataUrl || '';
     const { buffer, ext } = decodeDataUrlToBuffer(dataUrl, photo.mimeType || 'image/jpeg');
-    const sanitizedCaption = (photo.caption || 'foto')
+    const sanitizedCaption = String(photo.caption || 'foto')
       .toLowerCase()
       .replace(/[^a-z0-9]/g, '_')
       .substring(0, 30);
     const fileName = `foto_${String(i + 1).padStart(2, '0')}_${sanitizedCaption}.${ext}`;
 
-    if (photosFolder) {
+    if (photosFolder && buffer.length > 0) {
       photosFolder.file(fileName, buffer);
     }
     photoFileNamesMap.set(photo.id, `fotos/${fileName}`);

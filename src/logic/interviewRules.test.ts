@@ -21,6 +21,11 @@ import {
   deriveDeterministicAccessCode,
   extractCleanTokenOrCode,
   matchTokenRecord,
+  mergeVoiceTranscriptText,
+  shouldAutoAdvanceAfterVoiceSubmit,
+  resolvePostSaveFeedbackNotice,
+  mergeInterviewRecordNonDestructive,
+  mergeAnswerRecordNonDestructive,
   PrivacyConsentRecord,
   InterviewRecord,
   AnswerRecord,
@@ -958,6 +963,221 @@ test('26. Normalización y coincidencia flexible de códigos de acceso YF-XXXXX,
   assert.equal(extractCleanTokenOrCode('Código: yf-8f4a2'), 'YF-8F4A2');
   assert.equal(extractCleanTokenOrCode('Código: leg-8f4a'), 'LEG-8F4A');
 });
+
+test('27. Combinación determinista de transcripción de voz y validación para avance automático', () => {
+  assert.equal(
+    mergeVoiceTranscriptText('', 'Nací en Oaxaca en 1962.'),
+    'Nací en Oaxaca en 1962.'
+  );
+  assert.equal(
+    mergeVoiceTranscriptText('No aplica a mi historia.', 'Recuerdo la casa de los abuelos.'),
+    'Recuerdo la casa de los abuelos.'
+  );
+  assert.equal(
+    mergeVoiceTranscriptText('Texto previo.', 'Nota nueva.'),
+    'Texto previo.\n\n[Nota de voz]: Nota nueva.'
+  );
+  // Idempotent if same transcript already merged
+  assert.equal(
+    mergeVoiceTranscriptText('Texto previo.\n\n[Nota de voz]: Nota nueva.', 'Nota nueva.'),
+    'Texto previo.\n\n[Nota de voz]: Nota nueva.'
+  );
+
+  // Auto-advance gate
+  assert.equal(
+    shouldAutoAdvanceAfterVoiceSubmit({ transcript: 'Recuerdo claro', audioQuality: 'clear' }),
+    true
+  );
+  assert.equal(
+    shouldAutoAdvanceAfterVoiceSubmit({ transcript: 'Recuerdo claro', audioQuality: undefined }),
+    true
+  );
+  assert.equal(
+    shouldAutoAdvanceAfterVoiceSubmit({ transcript: '', audioQuality: 'clear' }),
+    false
+  );
+  assert.equal(
+    shouldAutoAdvanceAfterVoiceSubmit({ transcript: 'Texto parcial', audioQuality: 'noisy' }),
+    false
+  );
+  assert.equal(
+    shouldAutoAdvanceAfterVoiceSubmit({ transcript: '...', audioQuality: 'unintelligible' }),
+    false
+  );
+  assert.equal(
+    shouldAutoAdvanceAfterVoiceSubmit({ transcript: '', audioQuality: 'silent' }),
+    false
+  );
+});
+
+test('28. Fusión no destructiva de entrevistas y respuestas desde Firestore (preserva registros remotos de www.youforever.app)', () => {
+  const localOlder: InterviewRecord = {
+    ...mockBaseInterview,
+    id: 'int_remote_sync',
+    title: 'Historia Original Local',
+    status: 'open',
+    userDeclaredComplete: false,
+    openedAt: '2026-10-01T10:00:00.000Z',
+    completedQuestionCount: 12,
+    bookGeneratedCount: 1,
+    layoutEditsUsed: 0,
+    layoutEditsAllowed: 1,
+  };
+
+  const remoteNewer: InterviewRecord = {
+    ...mockBaseInterview,
+    id: 'int_remote_sync',
+    title: 'Historia Actualizada en www.youforever.app',
+    status: 'completed',
+    userDeclaredComplete: true,
+    openedAt: '2026-10-01T10:00:00.000Z',
+    closedAt: '2026-11-10T15:00:00.000Z',
+    completedQuestionCount: 45,
+    bookGeneratedCount: 2,
+    layoutEditsUsed: 1,
+    layoutEditsAllowed: 3,
+  };
+
+  const merged = mergeInterviewRecordNonDestructive(localOlder, remoteNewer);
+  assert.equal(merged.title, 'Historia Actualizada en www.youforever.app');
+  assert.equal(merged.status, 'completed');
+  assert.equal(merged.userDeclaredComplete, true);
+  assert.equal(merged.completedQuestionCount, 45);
+  assert.equal(merged.bookGeneratedCount, 2);
+  assert.equal(merged.layoutEditsAllowed, 3);
+
+  // If local was reopened AFTER remote closure, reopen remains active while keeping higher counters
+  const localReopened: InterviewRecord = {
+    ...localOlder,
+    status: 'open',
+    userDeclaredComplete: false,
+    reopenedAt: '2026-11-11T12:00:00.000Z',
+  };
+  const mergedReopen = mergeInterviewRecordNonDestructive(localReopened, remoteNewer);
+  assert.equal(mergedReopen.status, 'open');
+  assert.equal(mergedReopen.userDeclaredComplete, false);
+  assert.equal(mergedReopen.bookGeneratedCount, 2);
+
+  // Answer non-destructive media union
+  const localAns: AnswerRecord = {
+    id: 'ans_1',
+    interviewId: 'int_remote_sync',
+    questionId: 'q_1',
+    questionText: 'Pregunta 1',
+    participantId: 'p_1',
+    participantName: 'Ana',
+    answerText: 'Borrador local',
+    notRecalled: false,
+    isFollowUp: false,
+    isAdditionalMemory: false,
+    idempotencyKey: 'k1',
+    photos: [
+      {
+        id: 'ph_local',
+        interviewId: 'int_remote_sync',
+        questionId: 'q_1',
+        participantId: 'p_1',
+        participantName: 'Ana',
+        fileName: 'local.jpg',
+        mimeType: 'image/jpeg',
+        imageUrl: '/ph/1',
+        caption: 'Foto local',
+        createdAt: '2026-10-01T10:00:00.000Z',
+      },
+    ],
+    audioRecordings: [],
+    createdAt: '2026-10-01T10:00:00.000Z',
+    updatedAt: '2026-10-01T10:05:00.000Z',
+  };
+  const remoteAns: AnswerRecord = {
+    ...localAns,
+    answerText: 'Respuesta completada desde producción',
+    photos: [
+      {
+        id: 'ph_remote',
+        interviewId: 'int_remote_sync',
+        questionId: 'q_1',
+        participantId: 'p_1',
+        participantName: 'Ana',
+        fileName: 'remote.jpg',
+        mimeType: 'image/jpeg',
+        imageUrl: '/ph/2',
+        caption: 'Foto remota',
+        createdAt: '2026-11-10T14:00:00.000Z',
+      },
+    ],
+    audioRecordings: [
+      {
+        id: 'aud_remote',
+        interviewId: 'int_remote_sync',
+        questionId: 'q_1',
+        questionText: 'Pregunta 1',
+        participantId: 'p_1',
+        participantName: 'Ana',
+        audioUrl: '/aud/1',
+        transcription: 'Respuesta completada desde producción',
+        durationSeconds: 12,
+        mimeType: 'audio/webm',
+        createdAt: '2026-11-10T14:00:00.000Z',
+      },
+    ],
+    updatedAt: '2026-11-10T14:00:00.000Z',
+  };
+
+  const mergedAns = mergeAnswerRecordNonDestructive(localAns, remoteAns);
+  assert.equal(mergedAns.answerText, 'Respuesta completada desde producción');
+  assert.equal(mergedAns.photos?.length, 2);
+  assert.equal(mergedAns.audioRecordings?.length, 1);
+});
+
+test('29. Mensajes de confirmación tras completar transcripción, guardado y avance de pregunta', () => {
+  // Base question with voice that advances directly to next question
+  const voiceAdvance = resolvePostSaveFeedbackNotice({
+    flowType: 'base',
+    hasAdaptiveFollowUp: false,
+    hasVoiceAudio: true,
+    hasPhotos: false,
+    notRecalled: false,
+  });
+  assert.equal(voiceAdvance.message, 'Archivos de voz y transcripción guardados con éxito');
+  assert.equal(voiceAdvance.durationMs, 3500);
+
+  // Base question with voice that triggers a deepening question
+  const opensDeepening = resolvePostSaveFeedbackNotice({
+    flowType: 'base',
+    hasAdaptiveFollowUp: true,
+    hasVoiceAudio: true,
+    hasPhotos: false,
+    notRecalled: false,
+  });
+  assert.equal(
+    opensDeepening.message,
+    'Respuesta guardada. Hemos preparado una pregunta para profundizar en este recuerdo.'
+  );
+  assert.equal(opensDeepening.durationMs, 4000);
+
+  // Adaptive deepening answer saved (whether advancing to next base question or next deepening)
+  const adaptiveSaved = resolvePostSaveFeedbackNotice({
+    flowType: 'adaptive',
+    hasAdaptiveFollowUp: false,
+    hasVoiceAudio: true,
+    hasPhotos: false,
+    notRecalled: false,
+  });
+  assert.equal(adaptiveSaved.message, 'Profundización guardada e integrada a tu historia.');
+  assert.equal(adaptiveSaved.durationMs, 3500);
+
+  // Base question skipped / notRecalled ignores stale voice flag
+  const skipped = resolvePostSaveFeedbackNotice({
+    flowType: 'base',
+    hasAdaptiveFollowUp: false,
+    hasVoiceAudio: true,
+    hasPhotos: true,
+    notRecalled: true,
+  });
+  assert.equal(skipped.message, 'Respuesta guardada con éxito en la base de datos.');
+});
+
 
 
 

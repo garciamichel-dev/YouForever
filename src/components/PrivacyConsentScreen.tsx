@@ -50,7 +50,9 @@ export const PrivacyConsentScreen: React.FC<PrivacyConsentScreenProps> = ({
     try {
       await onAccept();
     } catch (err: any) {
-      setErrorMsg(err.message || 'Error al guardar el consentimiento en el servidor.');
+      setErrorMsg(
+        err.message || 'No pudimos guardar tu confirmación en este momento. Inténtalo nuevamente.'
+      );
       setIsSubmitting(false);
     }
   };
@@ -168,7 +170,7 @@ export const PrivacyConsentScreen: React.FC<PrivacyConsentScreenProps> = ({
               Nombre del participante: <span className="text-amber-950 underline">{participantName}</span>
             </div>
             <div className="text-xs text-stone-500 mt-0.5">
-              Entrevista: {interviewTitle} • Autenticación segura vinculada
+              Entrevista: {interviewTitle} • Acceso personal protegido
             </div>
           </div>
         </div>
@@ -230,7 +232,7 @@ export const PrivacyConsentScreen: React.FC<PrivacyConsentScreenProps> = ({
             {isSubmitting ? (
               <>
                 <RefreshCw className="w-4 h-4 animate-spin" />
-                <span>Guardando en Firebase...</span>
+                <span>Guardando tu confirmación...</span>
               </>
             ) : (
               <>

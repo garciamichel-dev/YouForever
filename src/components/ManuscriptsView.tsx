@@ -86,6 +86,10 @@ export const ManuscriptsView: React.FC<ManuscriptsViewProps> = ({
   const [versionToDelete, setVersionToDelete] = useState<EnrichedParticipantBookVersion | null>(null);
   const [restoreQuotaOnDelete, setRestoreQuotaOnDelete] = useState<boolean>(false);
   const [deletingVersion, setDeletingVersion] = useState<boolean>(false);
+  const [manuscriptToDelete, setManuscriptToDelete] = useState<EnrichedManuscript | null>(null);
+  const [deletingManuscript, setDeletingManuscript] = useState<boolean>(false);
+
+  const resolvedAdminEmail = (adminEmail || '').trim() || 'garcia.michel@gmail.com';
 
   const fetchAllManuscripts = async (preferredInterviewId?: string | null) => {
     try {
@@ -93,7 +97,7 @@ export const ManuscriptsView: React.FC<ManuscriptsViewProps> = ({
       const [res, resBookVers] = await Promise.all([
         apiFetch<EnrichedManuscript[]>('/api/manuscripts', {
           headers: {
-            'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
+            'x-admin-user': resolvedAdminEmail,
           },
           retries: 2,
         }),
@@ -130,7 +134,7 @@ export const ManuscriptsView: React.FC<ManuscriptsViewProps> = ({
         }
       }
     } catch (err) {
-      console.error('Error fetching manuscripts:', err);
+      console.warn('[ManuscriptsView] Notice fetching manuscripts:', err);
     } finally {
       setLoading(false);
     }
@@ -148,6 +152,7 @@ export const ManuscriptsView: React.FC<ManuscriptsViewProps> = ({
         editorialConfig: ver.editorialConfig,
         coverPhoto: ver.coverPhoto || null,
         chapterPhotos: ver.chapterPhotos || {},
+        allPhotosById: (ver as any).allPhotosById || {},
         customClosingPageText: ver.closingPageText || undefined,
         maxContentPages: 500,
       });
@@ -166,15 +171,18 @@ export const ManuscriptsView: React.FC<ManuscriptsViewProps> = ({
         },
       });
 
+      const formatSuffix = ver.editorialConfig?.bookFormatId
+        ? `_Formato_${ver.editorialConfig.bookFormatId}`
+        : '_Formato_6x9';
       const link = document.createElement('a');
       link.href = blobUrl;
-      link.download = ver.fileName || `YouForever_${ver.interviewId}_v${ver.versionNumber}.pdf`;
+      link.download = ver.fileName || `YouForever_${ver.interviewId}_v${ver.versionNumber}${formatSuffix}.pdf`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
       setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
     } catch (err) {
-      console.error('Error generating participant PDF:', err);
+      console.warn('[ManuscriptsView] Notice generating participant PDF:', err);
     } finally {
       setDownloadingPdfVerId(null);
     }
@@ -182,29 +190,49 @@ export const ManuscriptsView: React.FC<ManuscriptsViewProps> = ({
 
   const handleUpdateQuota = async () => {
     if (!quotaEditTarget) return;
+    const targetId = quotaEditTarget.interviewId;
+    const cleanRemaining = Math.max(0, Math.floor(Number(quotaEditTarget.remainingEdits) || 0));
+
     try {
       setSavingQuota(true);
-      const res = await fetch(`/api/interviews/${quotaEditTarget.interviewId}/layout-quota`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
-        },
-        body: JSON.stringify({
-          remainingEdits: Math.max(0, quotaEditTarget.remainingEdits),
-        }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        setQuotaEditTarget(null);
-        await fetchAllManuscripts(filterInterviewId === 'all' ? null : filterInterviewId);
-        setQuotaNotice(
-          `Cuota de edición actualizada a ${quotaEditTarget.remainingEdits} cambio(s) permitido(s).`
-        );
-        setTimeout(() => setQuotaNotice(null), 4000);
+      let res: Response | null = null;
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          res = await fetch(`/api/interviews/${targetId}/layout-quota`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
+            },
+            body: JSON.stringify({
+              remainingEdits: cleanRemaining,
+            }),
+          });
+          if (res.ok) break;
+        } catch (fetchErr) {
+          if (attempt === 2) throw fetchErr;
+          await new Promise((resolve) => setTimeout(resolve, 800));
+        }
       }
+
+      if (res && res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          setQuotaEditTarget(null);
+          await fetchAllManuscripts(filterInterviewId === 'all' ? null : filterInterviewId);
+          setQuotaNotice(
+            `Cuota de edición actualizada a ${cleanRemaining} cambio(s) permitido(s).`
+          );
+          setTimeout(() => setQuotaNotice(null), 4000);
+          return;
+        }
+      }
+      setQuotaNotice('No fue posible actualizar la cuota en el servidor. Intenta de nuevo.');
+      setTimeout(() => setQuotaNotice(null), 4000);
     } catch (err) {
-      console.error('Error updating quota:', err);
+      console.warn('[LayoutQuota] Notice updating quota:', err);
+      setQuotaNotice('No se pudo conectar temporalmente con el servidor. Verifica tu conexión e intenta de nuevo.');
+      setTimeout(() => setQuotaNotice(null), 5000);
     } finally {
       setSavingQuota(false);
     }
@@ -230,8 +258,39 @@ export const ManuscriptsView: React.FC<ManuscriptsViewProps> = ({
           const cachedRaw = localStorage.getItem('foreveryou_book_versions_cache');
           if (cachedRaw) {
             const parsed: ParticipantBookVersionRecord[] = JSON.parse(cachedRaw);
-            const filtered = parsed.filter((v) => v.id !== versionToDelete.id);
+            const filtered = parsed.filter(
+              (v) =>
+                v.id !== versionToDelete.id &&
+                !(
+                  v.interviewId === versionToDelete.interviewId &&
+                  v.versionNumber === versionToDelete.versionNumber
+                )
+            );
             localStorage.setItem('foreveryou_book_versions_cache', JSON.stringify(filtered));
+          }
+          const cachedIntRaw = localStorage.getItem('foreveryou_interviews_cache');
+          if (cachedIntRaw) {
+            const parsedInts = JSON.parse(cachedIntRaw);
+            if (Array.isArray(parsedInts)) {
+              const updatedInts = parsedInts.map((item: any) => {
+                if (!item || item.id !== versionToDelete.interviewId) return item;
+                const filteredVers = Array.isArray(item.bookVersions)
+                  ? item.bookVersions.filter(
+                      (v: any) =>
+                        v &&
+                        v.id !== versionToDelete.id &&
+                        v.versionNumber !== versionToDelete.versionNumber
+                    )
+                  : [];
+                return {
+                  ...item,
+                  bookVersions: filteredVers,
+                  bookVersionsCount: filteredVers.length,
+                  bookGeneratedCount: filteredVers.length,
+                };
+              });
+              localStorage.setItem('foreveryou_interviews_cache', JSON.stringify(updatedInts));
+            }
           }
         } catch (_e) {
           // ignore
@@ -247,10 +306,41 @@ export const ManuscriptsView: React.FC<ManuscriptsViewProps> = ({
         alert(data.error || 'Error al eliminar la versión PDF.');
       }
     } catch (err) {
-      console.error('Error deleting participant book version:', err);
+      console.warn('[ManuscriptsView] Notice deleting participant book version:', err);
       alert('Error de red al eliminar la versión PDF.');
     } finally {
       setDeletingVersion(false);
+    }
+  };
+
+  const handleConfirmDeleteManuscript = async () => {
+    if (!manuscriptToDelete) return;
+    try {
+      setDeletingManuscript(true);
+      const res = await fetch(`/api/manuscripts/${encodeURIComponent(manuscriptToDelete.id)}`, {
+        method: 'DELETE',
+        headers: {
+          'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
+        },
+      });
+      const data = await res.json();
+      if (data.success) {
+        setManuscripts((prev) => prev.filter((m) => m.id !== manuscriptToDelete.id));
+        if (selectedManuscript?.id === manuscriptToDelete.id) {
+          const remaining = manuscripts.filter((m) => m.id !== manuscriptToDelete.id);
+          setSelectedManuscript(remaining.length > 0 ? remaining[0] : null);
+        }
+        setQuotaNotice(`El manuscrito v${manuscriptToDelete.version} fue eliminado permanentemente.`);
+        setTimeout(() => setQuotaNotice(null), 4000);
+        setManuscriptToDelete(null);
+      } else {
+        alert(data.error || 'Error al eliminar el manuscrito guardado.');
+      }
+    } catch (err) {
+      console.warn('[ManuscriptsView] Notice deleting manuscript:', err);
+      alert('Error de red al eliminar el manuscrito guardado.');
+    } finally {
+      setDeletingManuscript(false);
     }
   };
 
@@ -288,7 +378,7 @@ export const ManuscriptsView: React.FC<ManuscriptsViewProps> = ({
         await fetchAllManuscripts(targetInterviewId);
       }
     } catch (err) {
-      console.error('Error compiling manuscript:', err);
+      console.warn('[ManuscriptsView] Notice compiling manuscript:', err);
     } finally {
       setCompiling(false);
     }
@@ -342,7 +432,7 @@ export const ManuscriptsView: React.FC<ManuscriptsViewProps> = ({
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
     } catch (err) {
-      console.error('Error downloading backup zip:', err);
+      console.warn('[ManuscriptsView] Notice downloading backup zip:', err);
       alert('No se pudo generar el archivo de respaldo ZIP.');
     } finally {
       setDownloadingZip(false);
@@ -395,13 +485,53 @@ export const ManuscriptsView: React.FC<ManuscriptsViewProps> = ({
 
   const handleDownloadQaHtml = () => {
     if (!selectedManuscript) return;
-    const adminParam = adminEmail ? `&admin=${encodeURIComponent(adminEmail)}` : '';
+    const adminParam = `&admin=${encodeURIComponent(resolvedAdminEmail)}`;
     window.open(`/api/interviews/${selectedManuscript.interviewId}/backup/qa-html?download=true${adminParam}`, '_blank');
+  };
+
+  const handleDownloadQaPdf = async () => {
+    if (!selectedManuscript) return;
+    try {
+      const adminParam = `?admin=${encodeURIComponent(resolvedAdminEmail)}`;
+      const res = await fetch(
+        `/api/interviews/${selectedManuscript.interviewId}/backup/qa-pdf${adminParam}`,
+        {
+          headers: {
+            'x-admin-user': resolvedAdminEmail,
+          },
+        }
+      );
+      if (!res.ok) {
+        let errText = 'No se pudo descargar el PDF del Compilado Testimonial.';
+        try {
+          const errJson = await res.json();
+          if (errJson?.error) errText = errJson.error;
+        } catch {
+          // ignore
+        }
+        setQuotaNotice(errText);
+        setTimeout(() => setQuotaNotice(null), 5000);
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `Compilado_Testimonial_Fidedigno_${selectedManuscript.interviewId}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.warn('[ManuscriptsView] Error downloading QA PDF:', err);
+      setQuotaNotice('Error de red al descargar el Compilado Testimonial en PDF.');
+      setTimeout(() => setQuotaNotice(null), 5000);
+    }
   };
 
   const handleDownloadQaMarkdown = () => {
     if (!selectedManuscript) return;
-    const adminParam = adminEmail ? `?admin=${encodeURIComponent(adminEmail)}` : '';
+    const adminParam = `?admin=${encodeURIComponent(resolvedAdminEmail)}`;
     window.open(`/api/interviews/${selectedManuscript.interviewId}/backup/qa-markdown${adminParam}`, '_blank');
   };
 
@@ -409,7 +539,7 @@ export const ManuscriptsView: React.FC<ManuscriptsViewProps> = ({
     try {
       setLoadingQa(true);
       const res = await fetch(`/api/interviews/${interviewId}/backup/qa-html`, {
-        headers: { 'x-admin-user': adminEmail || '' },
+        headers: { 'x-admin-user': resolvedAdminEmail },
       });
       if (res.ok) {
         const text = await res.text();
@@ -418,7 +548,7 @@ export const ManuscriptsView: React.FC<ManuscriptsViewProps> = ({
         setQaHtmlBlobUrl(url);
       }
     } catch (err) {
-      console.error('Error loading QA preview:', err);
+      console.warn('[ManuscriptsView] Notice loading QA preview:', err);
     } finally {
       setLoadingQa(false);
     }
@@ -967,43 +1097,56 @@ export const ManuscriptsView: React.FC<ManuscriptsViewProps> = ({
             </h4>
             <div className="space-y-2 max-h-[600px] overflow-y-auto pr-1">
               {displayedManuscripts.map((m) => (
-                <button
-                  key={m.id}
-                  onClick={() => setSelectedManuscript(m)}
-                  className={`w-full text-left p-3 rounded-lg border text-xs transition ${
-                    selectedManuscript?.id === m.id
-                      ? 'bg-amber-50 border-amber-300 text-amber-900 font-semibold shadow-xs'
-                      : 'bg-white border-stone-200 text-stone-700 hover:bg-stone-50'
-                  }`}
-                >
-                  <div className="font-serif font-bold text-stone-900 truncate mb-1">
-                    {m.interviewTitle || m.title}
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="px-1.5 py-0.5 rounded bg-stone-100 text-stone-700 text-[10px] font-semibold">
-                      Versión {m.version}
-                    </span>
-                    <div className="flex items-center space-x-1.5">
-                      {m.photos && m.photos.length > 0 && (
-                        <span className="inline-flex items-center space-x-0.5 px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 text-[10px] font-semibold">
-                          <Camera className="w-2.5 h-2.5 mr-0.5" />
-                          <span>{m.photos.length}</span>
-                        </span>
-                      )}
-                      <span className="text-[10px] text-stone-400">
-                        {new Date(m.generatedAt).toLocaleDateString('es-MX', {
-                          month: 'short',
-                          day: 'numeric',
-                          hour: '2-digit',
-                          minute: '2-digit',
-                        })}
-                      </span>
+                <div key={m.id} className="relative group">
+                  <button
+                    onClick={() => setSelectedManuscript(m)}
+                    className={`w-full text-left p-3 pr-8 rounded-lg border text-xs transition cursor-pointer ${
+                      selectedManuscript?.id === m.id
+                        ? 'bg-amber-50 border-amber-300 text-amber-900 font-semibold shadow-xs'
+                        : 'bg-white border-stone-200 text-stone-700 hover:bg-stone-50'
+                    }`}
+                  >
+                    <div className="font-serif font-bold text-stone-900 truncate mb-1">
+                      {m.interviewTitle || m.title}
                     </div>
-                  </div>
-                  <div className="text-[11px] text-stone-500 mt-1 truncate">
-                    Por: {m.generatedBy}
-                  </div>
-                </button>
+                    <div className="flex items-center justify-between">
+                      <span className="px-1.5 py-0.5 rounded bg-stone-100 text-stone-700 text-[10px] font-semibold">
+                        Versión {m.version}
+                      </span>
+                      <div className="flex items-center space-x-1.5">
+                        {m.photos && m.photos.length > 0 && (
+                          <span className="inline-flex items-center space-x-0.5 px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 text-[10px] font-semibold">
+                            <Camera className="w-2.5 h-2.5 mr-0.5" />
+                            <span>{m.photos.length}</span>
+                          </span>
+                        )}
+                        <span className="text-[10px] text-stone-400">
+                          {new Date(m.generatedAt).toLocaleDateString('es-MX', {
+                            month: 'short',
+                            day: 'numeric',
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          })}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="text-[11px] text-stone-500 mt-1 truncate">
+                      Por: {m.generatedBy}
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setManuscriptToDelete(m);
+                    }}
+                    className="absolute top-2.5 right-2 p-1.5 rounded-md text-stone-400 hover:text-rose-700 hover:bg-rose-50 transition opacity-80 group-hover:opacity-100 cursor-pointer"
+                    title="Eliminar este manuscrito guardado"
+                    data-testid={`btn-delete-manuscript-${m.id}`}
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               ))}
             </div>
 
@@ -1079,6 +1222,15 @@ export const ManuscriptsView: React.FC<ManuscriptsViewProps> = ({
                       <>
                         <button
                           type="button"
+                          onClick={handleDownloadQaPdf}
+                          className="inline-flex items-center space-x-1 px-2.5 py-1.5 bg-amber-700 hover:bg-amber-800 text-white rounded-lg text-xs font-semibold transition shadow-xs"
+                          title="Descargar directamente el archivo PDF del Compilado Testimonial Fidedigno"
+                        >
+                          <Download className="w-3 h-3" />
+                          <span>Imprimir / Guardar como PDF</span>
+                        </button>
+                        <button
+                          type="button"
                           onClick={handleDownloadQaHtml}
                           className="inline-flex items-center space-x-1 px-2.5 py-1.5 bg-amber-50 hover:bg-amber-100 border border-amber-300 text-amber-900 rounded-lg text-xs font-semibold transition"
                           title="Descargar dossier interactivo offline de preguntas y respuestas"
@@ -1096,7 +1248,7 @@ export const ManuscriptsView: React.FC<ManuscriptsViewProps> = ({
                           <span>Compilado .md</span>
                         </button>
                         <a
-                          href={`/api/interviews/${selectedManuscript.interviewId}/backup/qa-html?admin=${encodeURIComponent(adminEmail || '')}`}
+                          href={`/api/interviews/${selectedManuscript.interviewId}/backup/qa-html?admin=${encodeURIComponent(resolvedAdminEmail)}`}
                           target="_blank"
                           rel="noreferrer"
                           className="inline-flex items-center space-x-1 px-2.5 py-1.5 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-lg text-xs font-semibold transition"
@@ -1116,6 +1268,16 @@ export const ManuscriptsView: React.FC<ManuscriptsViewProps> = ({
                     >
                       <Archive className="w-3.5 h-3.5" />
                       <span>{downloadingZip ? 'Generando ZIP...' : 'Descargar Respaldo (ZIP)'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setManuscriptToDelete(selectedManuscript)}
+                      className="inline-flex items-center space-x-1.5 px-2.5 py-1.5 bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-800 rounded-lg text-xs font-semibold transition cursor-pointer"
+                      title="Eliminar este manuscrito guardado"
+                      data-testid="btn-delete-current-manuscript"
+                    >
+                      <Trash2 className="w-3.5 h-3.5 text-rose-600" />
+                      <span>Eliminar</span>
                     </button>
                   </div>
                 </div>
@@ -1311,7 +1473,7 @@ export const ManuscriptsView: React.FC<ManuscriptsViewProps> = ({
 
                     <div className="border border-stone-200 rounded-xl overflow-hidden shadow-xs bg-white">
                       <iframe
-                        src={`/api/interviews/${selectedManuscript.interviewId}/backup/qa-html?admin=${encodeURIComponent(adminEmail || '')}`}
+                        src={`/api/interviews/${selectedManuscript.interviewId}/backup/qa-html?admin=${encodeURIComponent(resolvedAdminEmail)}`}
                         title="Compilado de Preguntas y Respuestas con Audios y Fotografías"
                         className="w-full h-[760px] border-0"
                       />
@@ -1320,6 +1482,50 @@ export const ManuscriptsView: React.FC<ManuscriptsViewProps> = ({
                 )}
               </>
             )}
+          </div>
+        </div>
+      )}
+      {/* Modal: Confirm Delete Saved Manuscript */}
+      {manuscriptToDelete && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl max-w-md w-full p-6 shadow-2xl border-2 border-rose-200 text-xs">
+            <div className="flex items-center space-x-3 text-rose-600 mb-3">
+              <div className="p-3 bg-rose-100 rounded-xl">
+                <Trash2 className="w-6 h-6 text-rose-600" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-stone-900">
+                  ¿Eliminar manuscrito guardado (v{manuscriptToDelete.version})?
+                </h3>
+                <p className="text-xs text-rose-600 font-semibold">
+                  Alerta: Este manuscrito se eliminará permanentemente
+                </p>
+              </div>
+            </div>
+
+            <p className="text-stone-600 leading-relaxed mb-3">
+              Estás a punto de eliminar el borrador de manuscrito <strong>Versión {manuscriptToDelete.version}</strong> de «{manuscriptToDelete.interviewTitle || manuscriptToDelete.title}». Esta acción borrará únicamente este borrador, conservando intactos todos los testimonios y respuestas de la entrevista.
+            </p>
+
+            <div className="flex items-center justify-end space-x-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setManuscriptToDelete(null)}
+                disabled={deletingManuscript}
+                className="px-4 py-2 border border-stone-300 rounded-lg text-stone-700 hover:bg-stone-50 font-semibold transition cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDeleteManuscript}
+                disabled={deletingManuscript}
+                className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-lg font-semibold transition inline-flex items-center space-x-1.5 cursor-pointer disabled:opacity-50"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>{deletingManuscript ? 'Eliminando...' : 'Eliminar permanentemente'}</span>
+              </button>
+            </div>
           </div>
         </div>
       )}

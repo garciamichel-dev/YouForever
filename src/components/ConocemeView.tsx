@@ -251,7 +251,7 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
       {
         id: 'ai-init-followup',
         sender: 'ai',
-        roleLabel: 'Entrevistador IA · Pregunta de Profundización Contextual',
+        roleLabel: 'Entrevista guiada · Pregunta para profundizar',
         text: followUp.followUpQuestion,
         isFollowUp: true,
         detectedMotifs: followUp.detectedMotifs,
@@ -330,7 +330,7 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
       {
         id: `ai-followup-${stageId}-${mode}`,
         sender: 'ai',
-        roleLabel: 'Entrevistador IA · Pregunta de Profundización Contextual',
+        roleLabel: 'Entrevista guiada · Pregunta para profundizar',
         text: followUp.followUpQuestion,
         isFollowUp: true,
         detectedMotifs: followUp.detectedMotifs,
@@ -370,7 +370,7 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
       const aiReply: SimuladorChatMessage = {
         id: `ai-followup-${Date.now()}`,
         sender: 'ai',
-        roleLabel: 'Entrevistador IA · Pregunta de Profundización Contextual',
+        roleLabel: 'Entrevista guiada · Pregunta para profundizar',
         text: result.followUpQuestion,
         isFollowUp: true,
         detectedMotifs: result.detectedMotifs,
@@ -453,7 +453,7 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
               onClick={() => scrollToSection('mi-esencia-ecosistema')}
               className="hover:text-stone-900 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
-              Mi Esencia IA
+              Mi Esencia
             </button>
             <button
               type="button"
@@ -518,7 +518,7 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
                   <span aria-hidden="true">·</span>
                   <span>Libro Editorial Imprimible</span>
                   <span aria-hidden="true">·</span>
-                  <span>Mi Esencia (IA Conversacional)</span>
+                  <span>Mi Esencia (Conversación Familiar)</span>
                 </div>
 
                 <h1
@@ -586,7 +586,7 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
                   <span aria-hidden="true">·</span>
                   <span>100% fiel a sus palabras</span>
                   <span aria-hidden="true">·</span>
-                  <span>Paquete descargable (.ZIP) + Mi Esencia</span>
+                  <span>Carpeta descargable de recuerdos + Mi Esencia</span>
                 </div>
               </div>
             </div>
@@ -641,21 +641,21 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
               <div className="text-xs text-amber-900 font-medium">02 · Acceso Seguro</div>
               <div className="font-serif text-lg font-bold text-stone-900">Código YF-XXXXX</div>
               <p className="text-xs text-stone-600 mt-0.5">
-                Alfanumérico sin contraseñas complejas y con protección anti-fuerza bruta.
+                Código sencillo sin contraseñas difíciles, pensado para usarse con seguridad y facilidad.
               </p>
             </div>
             <div>
               <div className="text-xs text-amber-900 font-medium">03 · Estudio Editorial</div>
               <div className="font-serif text-lg font-bold text-stone-900 tabular-nums">Libro de Autor</div>
               <p className="text-xs text-stone-600 mt-0.5">
-                Maquetación profesional en PDF, fotos comentadas y paquete completo en .ZIP.
+                Diseño editorial listo para imprimir o conservar, fotos comentadas y respaldo completo de tus audios y fotos.
               </p>
             </div>
             <div>
               <div className="text-xs text-amber-900 font-medium">04 · Legado Conversacional</div>
-              <div className="font-serif text-lg font-bold text-stone-900">Mi Esencia IA</div>
+              <div className="font-serif text-lg font-bold text-stone-900">Mi Esencia</div>
               <p className="text-xs text-stone-600 mt-0.5">
-                Tus hijos y nietos conversan con tu Compilado Testimonial Fidedigno (Niveles A, B y C).
+                Tus hijos y nietos conversan con una recreación basada fielmente en tus recuerdos originales.
               </p>
             </div>
           </div>
@@ -670,13 +670,13 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
             <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
               <div className="space-y-1.5 max-w-2xl">
                 <div className="text-xs font-medium text-amber-900">
-                  Demostración Interactiva en Memoria · Sin Guardar Datos en Firestore
+                  Demostración Interactiva · Sin Guardar Datos Personales
                 </div>
                 <h2 className="font-serif text-2xl sm:text-3xl font-bold text-stone-900 tracking-tight">
                   Simulador de Entrevista
                 </h2>
                 <p className="text-sm text-stone-600">
-                  Conversa con el entrevistador IA: responde a la pregunta inicial y observa cómo genera al instante una pregunta de profundización contextual basada en tus palabras.
+                  Prueba nuestra entrevista guiada: responde la pregunta inicial y observa cómo surge al instante una nueva pregunta basada en tus propias palabras.
                 </p>
               </div>
 
@@ -734,7 +734,7 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
                   <div className="flex items-center gap-2">
                     <Sparkles className="w-4 h-4 text-amber-800" />
                     <span className="text-xs font-semibold text-stone-900">
-                      Chat de Entrevista IA · {currentStagePreset.label}
+                      Entrevista guiada · {currentStagePreset.label}
                     </span>
                   </div>
                   <button
@@ -789,7 +789,7 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
 
                   {isTypingAi && (
                     <div className="text-xs text-stone-500 italic px-2">
-                      El entrevistador IA está analizando tu recuerdo para profundizar...
+                      Preparando una nueva pregunta sobre tu recuerdo...
                     </div>
                   )}
                 </div>
@@ -1220,7 +1220,7 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
                 </div>
 
                 <h3 className="font-serif text-xl font-bold text-stone-900">
-                  Estudio Editorial + Paquete (.ZIP) + Mi Esencia
+                  Diseño de Libro + Carpeta de Recuerdos + Mi Esencia
                 </h3>
 
                 <div className="space-y-2.5 text-xs">
@@ -1237,17 +1237,17 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
                   <div className="p-3.5 bg-white rounded-xl border border-stone-200/80">
                     <div className="font-semibold text-stone-900 flex items-center gap-2">
                       <FileText className="w-3.5 h-3.5 text-amber-800 shrink-0" />
-                      <span>2. Compilado Testimonial Fidedigno</span>
+                      <span>2. Tus Recuerdos Originales</span>
                     </div>
                     <p className="text-stone-600 mt-1 text-[11px]">
-                      Todas las preguntas y respuestas literales por etapa de vida que alimentan la memoria inmutable.
+                      Todas tus preguntas y respuestas fieles, organizadas por cada etapa de tu vida.
                     </p>
                   </div>
 
                   <div className="p-3.5 bg-white rounded-xl border border-stone-200/80">
                     <div className="font-semibold text-stone-900 flex items-center gap-2">
                       <Volume2 className="w-3.5 h-3.5 text-amber-800 shrink-0" />
-                      <span>3. Carpetas /audios y /fotografias en .ZIP</span>
+                      <span>3. Tus Grabaciones y Fotografías</span>
                     </div>
                     <p className="text-stone-600 mt-1 text-[11px]">
                       Grabaciones de voz originales y fotografías familiares en alta resolución.
@@ -1257,7 +1257,7 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
                   <div className="p-3.5 bg-amber-50/80 rounded-xl border border-amber-300/80">
                     <div className="font-semibold text-amber-950 flex items-center gap-2">
                       <Sparkles className="w-3.5 h-3.5 text-amber-800 shrink-0" />
-                      <span>4. Avatar Familiar en Mi Esencia (/miesencia)</span>
+                      <span>4. Espacio Familiar en Mi Esencia</span>
                     </div>
                     <p className="text-stone-700 mt-1 text-[11px]">
                       Conversación viva para hijos y nietos mediante códigos personales seguros <code>YF-XXXXX</code>.
@@ -1287,13 +1287,13 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
               <div className="space-y-2 max-w-3xl">
                 <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-300 text-xs font-semibold">
                   <Sparkles className="w-3.5 h-3.5" />
-                  <span>Nuevo en YouForever • Mi Esencia (/miesencia)</span>
+                  <span>Nuevo en YouForever • Mi Esencia</span>
                 </div>
                 <h2 className="font-serif text-2xl sm:text-3xl font-bold text-white tracking-tight">
                   Más que un libro: conversa para siempre con la esencia de quienes amas.
                 </h2>
                 <p className="text-sm text-stone-300 leading-relaxed">
-                  A partir de la entrevista biográfica, <strong>Mi Esencia</strong> crea una recreación testimonial fiel con la que hijos, nietos y familiares autorizados pueden conversar en cualquier momento mediante su propio código alfanumérico <code>YF-XXXXX</code>.
+                  A partir de la entrevista biográfica, <strong>Mi Esencia</strong> crea una recreación testimonial fiel con la que hijos, nietos y familiares autorizados pueden conversar en cualquier momento mediante su propio código de acceso <code>YF-XXXXX</code>.
                 </p>
               </div>
 
@@ -1302,7 +1302,7 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
                 className="px-5 py-3 rounded-xl bg-amber-500 hover:bg-amber-400 text-stone-950 text-xs font-bold inline-flex items-center gap-2 whitespace-nowrap self-start shrink-0 transition"
               >
                 <KeyRound className="w-4 h-4" />
-                <span>Conocer Portal Familiar (/miesencia)</span>
+                <span>Conocer Portal Familiar</span>
               </a>
             </div>
 
@@ -1313,8 +1313,8 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
                   <span>Nivel A • Inmutable</span>
                 </div>
                 <p className="text-xs text-stone-300 leading-relaxed">
-                  Es la verdad biográfica original de la persona entrevistada, tomada directamente del{' '}
-                  <strong className="text-white">Compilado Testimonial Fidedigno</strong> con todas sus preguntas y respuestas reales. Ningún familiar ni conversación posterior puede alterar lo que dejó contado de viva voz.
+                  Es la historia original de la persona entrevistada, tomada directamente de{' '}
+                  <strong className="text-white">sus recuerdos y respuestas reales</strong>. Ningún familiar ni conversación posterior puede alterar lo que dejó contado de viva voz.
                 </p>
               </div>
 
@@ -1334,7 +1334,7 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
                   <span>Nivel C • Privado por Código YF-XXXXX</span>
                 </div>
                 <p className="text-xs text-stone-300 leading-relaxed">
-                  Cada familiar recibe un código alfanumérico único (<code>YF-XXXXX</code>) que aísla criptográficamente sus confidencias personales con el avatar, sin revelarlas jamás a otros integrantes de la familia.
+                  Cada familiar recibe un código personal único (<code>YF-XXXXX</code>) que mantiene sus confidencias personales en total privacidad, sin mostrarlas jamás a otros integrantes de la familia.
                 </p>
               </div>
             </div>
@@ -1366,7 +1366,7 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
                   Enlace o código YF-XXXXX
                 </h3>
                 <p className="text-xs text-stone-600 leading-relaxed">
-                  Entran desde su celular, tableta o computadora con su enlace directo o código alfanumérico corto protegido.
+                  Entran desde su celular, tableta o computadora con su enlace directo o código personal sencillo y seguro.
                 </p>
               </div>
 
@@ -1393,10 +1393,10 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
               <div className="bg-white border border-stone-200/90 rounded-2xl p-5 space-y-2">
                 <div className="text-xs font-semibold text-amber-900">04. Legado Eterno</div>
                 <h3 className="font-serif text-lg font-bold text-stone-900">
-                  Libro, .ZIP y Mi Esencia
+                  Libro, Recuerdos y Mi Esencia
                 </h3>
                 <p className="text-xs text-stone-600 leading-relaxed">
-                  Recibes el Libro Biográfico, el archivo maestro .ZIP con audios/fotos y el acceso familiar a Mi Esencia.
+                  Recibes el Libro Biográfico, el respaldo completo con tus audios y fotos, y el acceso familiar a Mi Esencia.
                 </p>
               </div>
             </div>

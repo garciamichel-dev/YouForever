@@ -1,19 +1,34 @@
 import fs from 'fs';
 import path from 'path';
+import zlib from 'zlib';
 import { initializeApp, getApps, getApp } from 'firebase/app';
 import {
   getFirestore,
   collection,
   doc,
-  getDoc,
   getDocs,
-  setDoc,
-  deleteDoc,
+  query,
+  where,
+  setLogLevel,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
+import { firestoreTelemetry } from './firestoreTelemetry.ts';
+import {
+  detectChangedInterviewIds,
+  computeIncrementalCursorWithOverlap,
+  type FirestoreSyncFreshness,
+} from '../logic/firestoreQuota.ts';
 import {
   AppConfig,
   INITIAL_APP_CONFIG,
+  BookAiProvider,
+  BookStructureMode,
+  LiteraryPromptStyleId,
+  LiteraryPromptVersion,
+  LiteraryStylePromptConfig,
+  DEFAULT_LITERARY_PROMPTS_TEXT,
+  DEFAULT_LITERARY_PROMPT_VERSIONS,
+  DEFAULT_LITERARY_PROMPTS_CONFIG,
   InterviewRecord,
   ParticipantRecord,
   InterviewTokenRecord,
@@ -41,7 +56,14 @@ import {
   isSufficiencyThresholdMet,
   validatePhotoAttachments,
   ensurePhotosPlacedInManuscript,
+  buildDefaultAdminCopyNote,
+  sortInterviewsWithCopies,
+  mergeInterviewRecordNonDestructive,
+  mergeAnswerRecordNonDestructive,
 } from '../logic/interviewRules.ts';
+import {
+  validateCompilationPdfRecord,
+} from '../logic/miEsenciaRules.ts';
 import {
   ComposedChapterSectionBlock,
   DemoEditorialConfig,
@@ -49,10 +71,12 @@ import {
   DemoManuscript,
   DemoNarrativeStyleId,
   ParticipantBookVersionRecord,
+  auditAndApproveBookManuscript,
   buildSafeDemoPdfFilename,
   buildParticipantInitialManuscriptFromAnswers,
   composeBookPages,
   hasUpdatedAnswersSinceBookVersion,
+  repairManuscriptOmissions,
 } from '../logic/demoStoryRules.ts';
 import {
   PrivacyConsentRecord,
@@ -73,6 +97,12 @@ import {
   SIMPLIFIED_PRIVACY_NOTICE,
   COMPREHENSIVE_PRIVACY_NOTICE,
 } from '../logic/privacyNoticeContent.ts';
+import {
+  FreeRegistrationPayload,
+  validateFreeRegistrationPayload,
+  AdminParticipantRegistrationUpdate,
+  validateAdminRegistrationUpdates,
+} from '../logic/freeRegistration.ts';
 import { DEFAULT_QUESTIONS } from './seedData.ts';
 import { buildCompleteTestStories } from './seedStories.ts';
 import {
@@ -84,8 +114,14 @@ import {
   AudioQualityStatus,
 } from './geminiService.ts';
 
+try {
+  setLogLevel('error');
+} catch {
+  // Ignore in case setLogLevel is not supported in current environment
+}
+
 const firebaseApp = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
-const serverDb = getFirestore(firebaseApp, firebaseConfig.firestoreDatabaseId);
+export const serverDb = getFirestore(firebaseApp, firebaseConfig.firestoreDatabaseId);
 
 function sanitizeForFirestore<T>(obj: T): T {
   return JSON.parse(JSON.stringify(obj));
@@ -150,14 +186,67 @@ class StorageManager {
   private postMortemInstructions: Map<string, PostMortemInstructionRecord> = new Map();
   private arcoRequests: Map<string, ArcoRequestRecord> = new Map();
   private participantBookVersions: Map<string, ParticipantBookVersionRecord> = new Map();
+  private deletedBookVersionIds: Set<string> = new Set();
 
   private initialized = false;
   private initPromise: Promise<void> | null = null;
+  private coreSyncPromise: Promise<void> | null = null;
+  private activeSyncPromise: Promise<void> | null = null;
   private listenersAttached = false;
+  private lastFirestoreCoreSyncMs = 0;
+  private syncWatermarks: {
+    fullBaselineSyncedAt: string | null;
+    answersUpdatedAtCursor: string | null;
+    questionsSyncedAt: string | null;
+    auditLogsCursor: string | null;
+    lastSyncMode: 'incremental' | 'full' | null;
+  } = {
+    fullBaselineSyncedAt: null,
+    answersUpdatedAtCursor: null,
+    questionsSyncedAt: null,
+    auditLogsCursor: null,
+    lastSyncMode: null,
+  };
+  private firestoreSyncStatus: {
+    lastAttemptAt: string | null;
+    lastSuccessAt: string | null;
+    lastError: string | null;
+    quotaExhausted: boolean;
+    quotaExhaustedAtMs: number;
+    source: 'firestore' | 'disk_cache';
+    syncedRemoteInterviewsCount: number;
+  } = {
+    lastAttemptAt: null,
+    lastSuccessAt: null,
+    lastError: null,
+    quotaExhausted: false,
+    quotaExhaustedAtMs: 0,
+    source: 'disk_cache',
+    syncedRemoteInterviewsCount: 0,
+  };
 
   public isAdmin(email: string | null | undefined): boolean {
     if (!email) return false;
     return this.admins.has(email.toLowerCase().trim());
+  }
+
+  public isInitialized(): boolean {
+    return this.initialized;
+  }
+
+  public getFirestoreSyncStatus(): FirestoreSyncFreshness {
+    return {
+      lastAttemptAt: this.firestoreSyncStatus.lastAttemptAt,
+      lastSuccessAt: this.firestoreSyncStatus.lastSuccessAt,
+      lastError: this.firestoreSyncStatus.lastError,
+      quotaExhausted: this.firestoreSyncStatus.quotaExhausted,
+      source: this.firestoreSyncStatus.source,
+      syncedRemoteInterviewsCount: this.firestoreSyncStatus.syncedRemoteInterviewsCount,
+      localInterviewsCount: this.interviews.size,
+      lastSyncMode: this.syncWatermarks.lastSyncMode,
+      answersCursor: this.syncWatermarks.answersUpdatedAtCursor,
+      questionsSyncedAt: this.syncWatermarks.questionsSyncedAt,
+    };
   }
 
   public getAdmins(): string[] {
@@ -223,10 +312,23 @@ class StorageManager {
         interviews: Array.from(this.interviews.values()),
         participants: Array.from(this.participants.values()),
         tokens: Array.from(this.tokens.values()),
-        answers: Array.from(this.answers.values()),
+        answers: Array.from(this.answers.values()).map((a) => ({
+          ...a,
+          photos: Array.isArray(a.photos)
+            ? a.photos.map((p) => {
+                const rawUrl = (p as any).dataUrl;
+                return {
+                  ...p,
+                  ...(typeof rawUrl === 'string' && rawUrl.length < 30_000
+                    ? { dataUrl: rawUrl }
+                    : {}),
+                };
+              })
+            : a.photos,
+        })),
         photos: Array.from(this.photos.values()).map((p) => ({
           ...p,
-          dataUrl: p.dataUrl && p.dataUrl.length < 50_000 ? p.dataUrl : '',
+          dataUrl: p.dataUrl && p.dataUrl.length < 750_000 ? p.dataUrl : '',
         })),
         audios: Array.from(this.audios.values()).map((a) => ({
           ...a,
@@ -241,6 +343,8 @@ class StorageManager {
         postMortemInstructions: Array.from(this.postMortemInstructions.values()),
         arcoRequests: Array.from(this.arcoRequests.values()),
         participantBookVersions: Array.from(this.participantBookVersions.values()),
+        deletedBookVersionIds: Array.from(this.deletedBookVersionIds),
+        syncWatermarks: this.syncWatermarks,
       };
       fs.writeFileSync(filePath, JSON.stringify(snapshot, null, 2), 'utf-8');
     } catch (err) {
@@ -257,7 +361,19 @@ class StorageManager {
       if (!parsed || typeof parsed !== 'object') return false;
 
       if (parsed.config) {
-        this.config = { ...INITIAL_APP_CONFIG, ...parsed.config };
+        this.config = {
+          ...INITIAL_APP_CONFIG,
+          ...parsed.config,
+          literaryPrompts: {
+            ...DEFAULT_LITERARY_PROMPTS_CONFIG,
+            ...(parsed.config.literaryPrompts || {}),
+          },
+          literaryPromptVersions:
+            Array.isArray(parsed.config.literaryPromptVersions) &&
+            parsed.config.literaryPromptVersions.length > 0
+              ? parsed.config.literaryPromptVersions
+              : [...DEFAULT_LITERARY_PROMPT_VERSIONS],
+        };
       }
       if (Array.isArray(parsed.questions)) {
         for (const q of parsed.questions) {
@@ -332,10 +448,33 @@ class StorageManager {
           if (ar && ar.id) this.arcoRequests.set(ar.id, ar);
         }
       }
+      if (Array.isArray(parsed.deletedBookVersionIds)) {
+        for (const delId of parsed.deletedBookVersionIds) {
+          if (typeof delId === 'string' && delId.trim()) {
+            this.deletedBookVersionIds.add(delId.trim());
+          }
+        }
+      }
       if (Array.isArray(parsed.participantBookVersions)) {
         for (const bv of parsed.participantBookVersions) {
-          if (bv && bv.id) this.participantBookVersions.set(bv.id, bv);
+          if (
+            bv &&
+            bv.id &&
+            !this.deletedBookVersionIds.has(bv.id) &&
+            !this.deletedBookVersionIds.has(`pbv_${bv.interviewId}_v${bv.versionNumber}`)
+          ) {
+            this.participantBookVersions.set(bv.id, bv);
+          }
         }
+      }
+      if (parsed.syncWatermarks && typeof parsed.syncWatermarks === 'object') {
+        this.syncWatermarks = {
+          fullBaselineSyncedAt: parsed.syncWatermarks.fullBaselineSyncedAt || null,
+          answersUpdatedAtCursor: parsed.syncWatermarks.answersUpdatedAtCursor || null,
+          questionsSyncedAt: parsed.syncWatermarks.questionsSyncedAt || null,
+          auditLogsCursor: parsed.syncWatermarks.auditLogsCursor || null,
+          lastSyncMode: parsed.syncWatermarks.lastSyncMode || null,
+        };
       }
       return true;
     } catch (err) {
@@ -348,6 +487,7 @@ class StorageManager {
     this.saveStateToDisk();
     try {
       const sanitized = this.sanitizeDocForFirestore(data);
+      (sanitized as Record<string, unknown>)._syncedAt = new Date().toISOString();
       const serialized = JSON.stringify(sanitized);
       const byteSize = Buffer.byteLength(serialized, 'utf8');
 
@@ -360,14 +500,23 @@ class StorageManager {
         return;
       }
 
-      await setDoc(doc(serverDb, collectionName, docId), sanitized as Record<string, unknown>);
+      const setPromise = firestoreTelemetry.trackedSetDoc(
+        serverDb,
+        doc(serverDb, collectionName, docId),
+        sanitized as Record<string, unknown>,
+        'storage'
+      );
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Firestore write timed out (retained on disk)')), 2500)
+      );
+      await Promise.race([setPromise, timeoutPromise]);
     } catch (err: any) {
       if (err?.message?.includes('Quota limit exceeded') || err?.code === 'resource-exhausted') {
         console.warn(`[Firestore Quota] Write skipped for ${collectionName}/${docId} due to daily limit. Stored in memory and disk.`);
       } else if (err?.message?.includes('exceeds the limit') || err?.code === 3) {
         console.warn(`[Firestore Payload Warning] Write skipped for ${collectionName}/${docId} due to size limit (${err?.message}). Retained safely on server.`);
       } else {
-        console.warn(`[Firestore Persistence Warning] Could not save ${collectionName}/${docId}:`, err?.message || err);
+        console.warn(`[Firestore Persistence Note] Document ${collectionName}/${docId} saved locally:`, err?.message || err);
       }
     }
   }
@@ -375,12 +524,20 @@ class StorageManager {
   private async removeDoc(collectionName: string, docId: string): Promise<void> {
     this.saveStateToDisk();
     try {
-      await deleteDoc(doc(serverDb, collectionName, docId));
+      const delPromise = firestoreTelemetry.trackedDeleteDoc(
+        serverDb,
+        doc(serverDb, collectionName, docId),
+        'storage'
+      );
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Firestore delete timed out (removed from disk)')), 2500)
+      );
+      await Promise.race([delPromise, timeoutPromise]);
     } catch (err: any) {
       if (err?.message?.includes('Quota limit exceeded') || err?.code === 'resource-exhausted') {
         console.warn(`[Firestore Quota] Delete skipped for ${collectionName}/${docId} due to daily limit. Removed from memory and disk.`);
       } else {
-        console.warn(`[Firestore Delete Warning] Could not delete ${collectionName}/${docId}:`, err?.message || err);
+        console.warn(`[Firestore Delete Note] Document ${collectionName}/${docId} removed locally:`, err?.message || err);
       }
     }
   }
@@ -846,6 +1003,20 @@ class StorageManager {
           this.interviews.set(interviewData.id, interviewData as InterviewRecord);
           restoredCount++;
         } else {
+          // Never overwrite fresher server/Firestore interview data with older browser localStorage cache
+          const serverNewestMs = Math.max(
+            existingInterview.reopenedAt ? new Date(existingInterview.reopenedAt).getTime() : 0,
+            existingInterview.closedAt ? new Date(existingInterview.closedAt).getTime() : 0,
+            existingInterview.openedAt ? new Date(existingInterview.openedAt).getTime() : 0
+          );
+          const clientNewestMs = Math.max(
+            interviewData.reopenedAt ? new Date(interviewData.reopenedAt).getTime() : 0,
+            interviewData.closedAt ? new Date(interviewData.closedAt).getTime() : 0,
+            interviewData.openedAt ? new Date(interviewData.openedAt).getTime() : 0
+          );
+          if (serverNewestMs > clientNewestMs && this.firestoreSyncStatus.source === 'firestore') {
+            continue;
+          }
           // Merge any newer closure or book generation counters from client cache
           let updated = false;
           if (interviewData.userDeclaredComplete && !existingInterview.userDeclaredComplete) {
@@ -870,7 +1041,10 @@ class StorageManager {
               updated = true;
             }
           }
-          if ((interviewData.bookGeneratedCount ?? 0) > (existingInterview.bookGeneratedCount ?? 0)) {
+          if (
+            (interviewData.bookGeneratedCount ?? 0) > (existingInterview.bookGeneratedCount ?? 0) &&
+            !Array.from(this.deletedBookVersionIds).some((id) => id.includes(existingInterview.id))
+          ) {
             existingInterview.bookGeneratedCount = interviewData.bookGeneratedCount;
             updated = true;
           }
@@ -893,7 +1067,15 @@ class StorageManager {
 
         if (Array.isArray(itemBookVersions)) {
           for (const bv of itemBookVersions) {
-            if (bv && bv.id && bv.interviewId && bv.manuscript && !this.participantBookVersions.has(bv.id)) {
+            if (
+              bv &&
+              bv.id &&
+              bv.interviewId &&
+              bv.manuscript &&
+              !this.participantBookVersions.has(bv.id) &&
+              !this.deletedBookVersionIds.has(bv.id) &&
+              !this.deletedBookVersionIds.has(`pbv_${bv.interviewId}_v${bv.versionNumber}`)
+            ) {
               this.participantBookVersions.set(bv.id, bv as ParticipantBookVersionRecord);
               restoredCount++;
             }
@@ -963,7 +1145,15 @@ class StorageManager {
 
     if (Array.isArray(cachedBookVersions) && cachedBookVersions.length > 0) {
       for (const bv of cachedBookVersions) {
-        if (bv && bv.id && bv.interviewId && bv.manuscript && !this.participantBookVersions.has(bv.id)) {
+        if (
+          bv &&
+          bv.id &&
+          bv.interviewId &&
+          bv.manuscript &&
+          !this.participantBookVersions.has(bv.id) &&
+          !this.deletedBookVersionIds.has(bv.id) &&
+          !this.deletedBookVersionIds.has(`pbv_${bv.interviewId}_v${bv.versionNumber}`)
+        ) {
           this.participantBookVersions.set(bv.id, bv);
           const inv = this.interviews.get(bv.interviewId);
           if (inv) {
@@ -985,261 +1175,1123 @@ class StorageManager {
     return restoredCount;
   }
 
+  private isQuotaError(err: any): boolean {
+    const msg = String(err?.message || err || '');
+    return (
+      err?.code === 'resource-exhausted' ||
+      msg.includes('Quota limit exceeded') ||
+      msg.includes('RESOURCE_EXHAUSTED')
+    );
+  }
+
+  private async raceDocsWithTimeout(
+    queries: Array<Promise<any>>,
+    timeoutMs: number,
+    phaseLabel: string
+  ): Promise<{ results: Array<PromiseSettledResult<any>>; timedOut: boolean }> {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const fetchPromise = Promise.allSettled(queries).then((results) => ({
+      results,
+      timedOut: false,
+    }));
+    const timeoutPromise = new Promise<{ results: Array<PromiseSettledResult<any>>; timedOut: boolean }>(
+      (resolve) => {
+        timer = setTimeout(() => {
+          console.warn(
+            `[StorageManager] Firestore ${phaseLabel} fetch took > ${timeoutMs}ms; keeping non-destructive local state while sync settles.`
+          );
+          resolve({ results: [], timedOut: true });
+        }, timeoutMs);
+        if (timer && typeof timer.unref === 'function') {
+          timer.unref();
+        }
+      }
+    );
+    const outcome = await Promise.race([fetchPromise, timeoutPromise]);
+    if (timer) clearTimeout(timer);
+    return outcome;
+  }
+
+  private applyConfigSnap(docSnap: any): void {
+    if (!docSnap || !docSnap.exists?.()) return;
+    const rawCfg = docSnap.data() as AppConfig;
+    this.config = {
+      ...INITIAL_APP_CONFIG,
+      ...rawCfg,
+      literaryPrompts: {
+        ...DEFAULT_LITERARY_PROMPTS_CONFIG,
+        ...(rawCfg?.literaryPrompts || {}),
+      },
+      literaryPromptVersions:
+        Array.isArray(rawCfg?.literaryPromptVersions) &&
+        rawCfg.literaryPromptVersions.length > 0
+          ? rawCfg.literaryPromptVersions
+          : [...DEFAULT_LITERARY_PROMPT_VERSIONS],
+    };
+  }
+
+  private applyHeavySnapshots(results: Array<PromiseSettledResult<any>>): void {
+    const unwrapHeavy = (idx: number) => {
+      const r = results[idx];
+      return r && r.status === 'fulfilled' ? r.value : null;
+    };
+
+    const photosSnap = unwrapHeavy(0);
+    const audiosSnap = unwrapHeavy(1);
+    const manuscriptsSnap = unwrapHeavy(2);
+    const logsSnap = unwrapHeavy(3);
+    const sharesSnap = unwrapHeavy(4);
+    const deliveriesSnap = unwrapHeavy(5);
+    const secondarySnap = unwrapHeavy(6);
+    const postMortemSnap = unwrapHeavy(7);
+    const arcoSnap = unwrapHeavy(8);
+    const bookVersionsSnap = unwrapHeavy(9);
+
+    if (photosSnap) {
+      photosSnap.forEach((docSnap: any) => {
+        const photo = docSnap.data() as InterviewPhotoRecord;
+        if (photo && photo.id) {
+          const prevMem = this.photos.get(photo.id);
+          if ((!photo.dataUrl || !photo.dataUrl.startsWith('data:image/')) && prevMem?.dataUrl) {
+            photo.dataUrl = prevMem.dataUrl;
+          }
+          this.photos.set(photo.id, photo);
+        }
+      });
+    }
+
+    if (audiosSnap) {
+      audiosSnap.forEach((docSnap: any) => {
+        const aud = docSnap.data() as InterviewAudioRecord;
+        if (aud && aud.id) {
+          this.audios.set(aud.id, aud);
+        }
+      });
+    }
+
+    if (manuscriptsSnap) {
+      manuscriptsSnap.forEach((docSnap: any) => {
+        const manu = docSnap.data() as ManuscriptRecord;
+        if (manu && manu.id) {
+          this.manuscripts.set(manu.id, manu);
+        }
+      });
+    }
+
+    if (logsSnap) {
+      const loadedLogs: AuditLogRecord[] = [];
+      logsSnap.forEach((docSnap: any) => {
+        const log = docSnap.data() as AuditLogRecord;
+        if (log && log.id) {
+          loadedLogs.push(log);
+        }
+      });
+      if (loadedLogs.length > 0) {
+        const logMap = new Map(this.auditLogs.map((l) => [l.id, l]));
+        for (const l of loadedLogs) {
+          logMap.set(l.id, l);
+        }
+        const mergedLogs = Array.from(logMap.values());
+        mergedLogs.sort(
+          (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+        );
+        this.auditLogs = mergedLogs;
+      }
+    }
+
+    if (sharesSnap) {
+      sharesSnap.forEach((docSnap: any) => {
+        const s = docSnap.data() as BookShareRecord;
+        if (s && s.id) {
+          this.bookShares.set(s.id, s);
+        }
+      });
+    }
+
+    if (deliveriesSnap) {
+      deliveriesSnap.forEach((docSnap: any) => {
+        const d = docSnap.data() as ScheduledDeliveryRecord;
+        if (d && d.id) {
+          this.scheduledDeliveries.set(d.id, d);
+        }
+      });
+    }
+
+    if (secondarySnap) {
+      secondarySnap.forEach((docSnap: any) => {
+        const sa = docSnap.data() as SecondaryAccessRecord;
+        if (sa && sa.id) {
+          this.secondaryAccess.set(sa.id, sa);
+        }
+      });
+    }
+
+    if (postMortemSnap) {
+      postMortemSnap.forEach((docSnap: any) => {
+        const pmi = docSnap.data() as PostMortemInstructionRecord;
+        if (pmi && pmi.id) {
+          this.postMortemInstructions.set(pmi.id, pmi);
+        }
+      });
+    }
+
+    if (arcoSnap) {
+      arcoSnap.forEach((docSnap: any) => {
+        const ar = docSnap.data() as ArcoRequestRecord;
+        if (ar && ar.id) {
+          this.arcoRequests.set(ar.id, ar);
+        }
+      });
+    }
+
+    if (bookVersionsSnap) {
+      bookVersionsSnap.forEach((docSnap: any) => {
+        const bv = docSnap.data() as ParticipantBookVersionRecord;
+        if (
+          bv &&
+          bv.id &&
+          !this.deletedBookVersionIds.has(bv.id) &&
+          !this.deletedBookVersionIds.has(`pbv_${bv.interviewId}_v${bv.versionNumber}`)
+        ) {
+          this.participantBookVersions.set(bv.id, bv);
+        }
+      });
+    }
+  }
+
+  private applyCoreSnapshots(results: Array<PromiseSettledResult<any>>): {
+    anySuccess: boolean;
+    quotaError: string | null;
+    remoteInterviewsCount: number;
+  } {
+    let anySuccess = false;
+    let quotaError: string | null = null;
+    let remoteInterviewsCount = 0;
+
+    for (const r of results) {
+      if (r.status === 'fulfilled') {
+        anySuccess = true;
+      } else if (this.isQuotaError(r.reason)) {
+        quotaError =
+          'Se alcanzó el límite diario gratuito de lecturas de Cloud Firestore; mostrando instantánea local segura sin pérdida de datos.';
+      }
+    }
+
+    const unwrapSnap = (idx: number) => {
+      const r = results[idx];
+      return r && r.status === 'fulfilled' ? r.value : null;
+    };
+
+    const settingsSnap = unwrapSnap(0);
+    const questionsSnap = unwrapSnap(1);
+    const versionsSnap = unwrapSnap(2);
+    const interviewsSnap = unwrapSnap(3);
+    const participantsSnap = unwrapSnap(4);
+    const tokensSnap = unwrapSnap(5);
+    const answersSnap = unwrapSnap(6);
+    const consentsSnap = unwrapSnap(7);
+
+    if (settingsSnap) {
+      settingsSnap.forEach((docSnap: any) => {
+        if (docSnap.id === 'appConfig') {
+          this.applyConfigSnap(docSnap);
+        }
+      });
+    }
+
+    if (questionsSnap && !questionsSnap.empty) {
+      questionsSnap.forEach((docSnap: any) => {
+        const q = docSnap.data() as QuestionRecord;
+        if (q && q.id) {
+          this.questions.set(q.id, q);
+        }
+      });
+    }
+
+    if (versionsSnap && !versionsSnap.empty) {
+      versionsSnap.forEach((docSnap: any) => {
+        const v = docSnap.data() as QuestionnaireVersionDoc;
+        if (v && v.id && Array.isArray(v.questions)) {
+          this.questionnaireVersions.set(v.id, v.questions);
+        }
+      });
+    }
+
+    if (interviewsSnap) {
+      remoteInterviewsCount = interviewsSnap.size || 0;
+      interviewsSnap.forEach((docSnap: any) => {
+        const inv = docSnap.data() as InterviewRecord;
+        if (inv && inv.id) {
+          const merged = mergeInterviewRecordNonDestructive(this.interviews.get(inv.id), inv);
+          this.interviews.set(inv.id, merged);
+        }
+      });
+    }
+
+    if (participantsSnap) {
+      participantsSnap.forEach((docSnap: any) => {
+        const part = docSnap.data() as ParticipantRecord;
+        if (part && part.id) {
+          const existing = this.participants.get(part.id);
+          this.participants.set(part.id, existing ? { ...existing, ...part } : part);
+        }
+      });
+    }
+
+    if (tokensSnap) {
+      tokensSnap.forEach((docSnap: any) => {
+        const tok = docSnap.data() as PersistedTokenRecord;
+        if (tok && tok.tokenHash) {
+          this.registerTokenInMemory(tok);
+        }
+      });
+    }
+
+    if (answersSnap) {
+      answersSnap.forEach((docSnap: any) => {
+        const ans = docSnap.data() as AnswerRecord;
+        if (ans && ans.id) {
+          const merged = mergeAnswerRecordNonDestructive(this.answers.get(ans.id), ans);
+          this.answers.set(ans.id, merged);
+        }
+      });
+    }
+
+    if (consentsSnap) {
+      consentsSnap.forEach((docSnap: any) => {
+        const c = docSnap.data() as PrivacyConsentRecord;
+        if (c && c.id) {
+          this.privacyConsents.set(c.id, c);
+        }
+      });
+    }
+
+    return { anySuccess, quotaError, remoteInterviewsCount };
+  }
+
+  private advanceSyncWatermarks(mode: 'incremental' | 'full', updatedQuestions: boolean): void {
+    const nowIso = new Date().toISOString();
+    const answerTimestamps: Array<string | undefined | null> = [nowIso];
+    for (const ans of this.answers.values()) {
+      answerTimestamps.push(ans.updatedAt, ans.createdAt);
+    }
+    const nextAnswersCursor = computeIncrementalCursorWithOverlap(answerTimestamps, 3);
+    if (nextAnswersCursor) {
+      this.syncWatermarks.answersUpdatedAtCursor = nextAnswersCursor;
+    } else if (!this.syncWatermarks.answersUpdatedAtCursor) {
+      this.syncWatermarks.answersUpdatedAtCursor = new Date(Date.now() - 3 * 60_000).toISOString();
+    }
+
+    const latestLogTs = this.auditLogs[0]?.timestamp;
+    if (latestLogTs) {
+      this.syncWatermarks.auditLogsCursor = latestLogTs;
+    }
+
+    if (updatedQuestions || !this.syncWatermarks.questionsSyncedAt) {
+      this.syncWatermarks.questionsSyncedAt = new Date().toISOString();
+    }
+    if (mode === 'full' || !this.syncWatermarks.fullBaselineSyncedAt) {
+      this.syncWatermarks.fullBaselineSyncedAt = new Date().toISOString();
+    }
+    this.syncWatermarks.lastSyncMode = mode;
+  }
+
+  private async pullScopedCollectionsForInterviews(interviewIds: string[]): Promise<boolean> {
+    if (interviewIds.length === 0) return true;
+
+    if (interviewIds.length > 10) {
+      const bulkOutcome = await this.raceDocsWithTimeout(
+        [
+          firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'participants'), 'storage'),
+          firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'interviewTokens'), 'storage'),
+          firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'privacyConsents'), 'storage'),
+          firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'manuscripts'), 'storage'),
+          firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'participantBookVersions'), 'storage'),
+          firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'interviewPhotos'), 'storage'),
+          firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'interviewAudio'), 'storage'),
+        ],
+        10_000,
+        'scoped-bulk-fallback'
+      );
+
+      const unwrap = (i: number) =>
+        bulkOutcome.results[i]?.status === 'fulfilled' ? (bulkOutcome.results[i] as any).value : null;
+
+      unwrap(0)?.forEach((d: any) => {
+        const part = d.data() as ParticipantRecord;
+        if (part?.id) {
+          const prev = this.participants.get(part.id);
+          this.participants.set(part.id, prev ? { ...prev, ...part } : part);
+        }
+      });
+      unwrap(1)?.forEach((d: any) => {
+        const tok = d.data() as PersistedTokenRecord;
+        if (tok?.tokenHash) this.registerTokenInMemory(tok);
+      });
+      unwrap(2)?.forEach((d: any) => {
+        const c = d.data() as PrivacyConsentRecord;
+        if (c?.id) this.privacyConsents.set(c.id, c);
+      });
+      unwrap(3)?.forEach((d: any) => {
+        const m = d.data() as ManuscriptRecord;
+        if (m?.id) this.manuscripts.set(m.id, m);
+      });
+      unwrap(4)?.forEach((d: any) => {
+        const bv = d.data() as ParticipantBookVersionRecord;
+        if (
+          bv?.id &&
+          !this.deletedBookVersionIds.has(bv.id) &&
+          !this.deletedBookVersionIds.has(`pbv_${bv.interviewId}_v${bv.versionNumber}`)
+        ) {
+          this.participantBookVersions.set(bv.id, bv);
+        }
+      });
+      unwrap(5)?.forEach((d: any) => {
+        const ph = d.data() as InterviewPhotoRecord;
+        if (ph?.id) {
+          const prevMem = this.photos.get(ph.id);
+          if ((!ph.dataUrl || !ph.dataUrl.startsWith('data:image/')) && prevMem?.dataUrl) {
+            ph.dataUrl = prevMem.dataUrl;
+          }
+          this.photos.set(ph.id, ph);
+        }
+      });
+      unwrap(6)?.forEach((d: any) => {
+        const aud = d.data() as InterviewAudioRecord;
+        if (aud?.id) this.audios.set(aud.id, aud);
+      });
+      return bulkOutcome.results.some((r) => r.status === 'fulfilled');
+    }
+
+    let anyOk = false;
+    for (const id of interviewIds) {
+      const scopedOutcome = await this.raceDocsWithTimeout(
+        [
+          firestoreTelemetry.trackedGetDocs(
+            serverDb,
+            query(collection(serverDb, 'participants'), where('interviewId', '==', id)),
+            'storage'
+          ),
+          firestoreTelemetry.trackedGetDocs(
+            serverDb,
+            query(collection(serverDb, 'interviewTokens'), where('interviewId', '==', id)),
+            'storage'
+          ),
+          firestoreTelemetry.trackedGetDocs(
+            serverDb,
+            query(collection(serverDb, 'privacyConsents'), where('interviewId', '==', id)),
+            'storage'
+          ),
+          firestoreTelemetry.trackedGetDocs(
+            serverDb,
+            query(collection(serverDb, 'manuscripts'), where('interviewId', '==', id)),
+            'storage'
+          ),
+          firestoreTelemetry.trackedGetDocs(
+            serverDb,
+            query(collection(serverDb, 'participantBookVersions'), where('interviewId', '==', id)),
+            'storage'
+          ),
+          firestoreTelemetry.trackedGetDocs(
+            serverDb,
+            query(collection(serverDb, 'interviewPhotos'), where('interviewId', '==', id)),
+            'storage'
+          ),
+          firestoreTelemetry.trackedGetDocs(
+            serverDb,
+            query(collection(serverDb, 'interviewAudio'), where('interviewId', '==', id)),
+            'storage'
+          ),
+          firestoreTelemetry.trackedGetDocs(
+            serverDb,
+            query(collection(serverDb, 'bookShares'), where('interviewId', '==', id)),
+            'storage'
+          ),
+          firestoreTelemetry.trackedGetDocs(
+            serverDb,
+            query(collection(serverDb, 'scheduledDeliveries'), where('interviewId', '==', id)),
+            'storage'
+          ),
+          firestoreTelemetry.trackedGetDocs(
+            serverDb,
+            query(collection(serverDb, 'secondaryAccess'), where('interviewId', '==', id)),
+            'storage'
+          ),
+          firestoreTelemetry.trackedGetDocs(
+            serverDb,
+            query(collection(serverDb, 'postMortemInstructions'), where('interviewId', '==', id)),
+            'storage'
+          ),
+          firestoreTelemetry.trackedGetDocs(
+            serverDb,
+            query(collection(serverDb, 'arcoRequests'), where('interviewId', '==', id)),
+            'storage'
+          ),
+        ],
+        8_000,
+        `scoped-${id}`
+      );
+
+      for (const r of scopedOutcome.results) {
+        if (r.status === 'fulfilled') anyOk = true;
+      }
+
+      const unwrap = (i: number) =>
+        scopedOutcome.results[i]?.status === 'fulfilled' ? (scopedOutcome.results[i] as any).value : null;
+
+      unwrap(0)?.forEach((d: any) => {
+        const part = d.data() as ParticipantRecord;
+        if (part?.id) {
+          const prev = this.participants.get(part.id);
+          this.participants.set(part.id, prev ? { ...prev, ...part } : part);
+        }
+      });
+      unwrap(1)?.forEach((d: any) => {
+        const tok = d.data() as PersistedTokenRecord;
+        if (tok?.tokenHash) this.registerTokenInMemory(tok);
+      });
+      unwrap(2)?.forEach((d: any) => {
+        const c = d.data() as PrivacyConsentRecord;
+        if (c?.id) this.privacyConsents.set(c.id, c);
+      });
+      unwrap(3)?.forEach((d: any) => {
+        const m = d.data() as ManuscriptRecord;
+        if (m?.id) this.manuscripts.set(m.id, m);
+      });
+      unwrap(4)?.forEach((d: any) => {
+        const bv = d.data() as ParticipantBookVersionRecord;
+        if (
+          bv?.id &&
+          !this.deletedBookVersionIds.has(bv.id) &&
+          !this.deletedBookVersionIds.has(`pbv_${bv.interviewId}_v${bv.versionNumber}`)
+        ) {
+          this.participantBookVersions.set(bv.id, bv);
+        }
+      });
+      unwrap(5)?.forEach((d: any) => {
+        const ph = d.data() as InterviewPhotoRecord;
+        if (ph?.id) {
+          const prevMem = this.photos.get(ph.id);
+          if ((!ph.dataUrl || !ph.dataUrl.startsWith('data:image/')) && prevMem?.dataUrl) {
+            ph.dataUrl = prevMem.dataUrl;
+          }
+          this.photos.set(ph.id, ph);
+        }
+      });
+      unwrap(6)?.forEach((d: any) => {
+        const aud = d.data() as InterviewAudioRecord;
+        if (aud?.id) this.audios.set(aud.id, aud);
+      });
+      unwrap(7)?.forEach((d: any) => {
+        const s = d.data() as BookShareRecord;
+        if (s?.id) this.bookShares.set(s.id, s);
+      });
+      unwrap(8)?.forEach((d: any) => {
+        const del = d.data() as ScheduledDeliveryRecord;
+        if (del?.id) this.scheduledDeliveries.set(del.id, del);
+      });
+      unwrap(9)?.forEach((d: any) => {
+        const sa = d.data() as SecondaryAccessRecord;
+        if (sa?.id) this.secondaryAccess.set(sa.id, sa);
+      });
+      unwrap(10)?.forEach((d: any) => {
+        const pmi = d.data() as PostMortemInstructionRecord;
+        if (pmi?.id) this.postMortemInstructions.set(pmi.id, pmi);
+      });
+      unwrap(11)?.forEach((d: any) => {
+        const ar = d.data() as ArcoRequestRecord;
+        if (ar?.id) this.arcoRequests.set(ar.id, ar);
+      });
+    }
+
+    return anyOk;
+  }
+
+  private async runIncrementalFirestoreSync(): Promise<{
+    anySuccess: boolean;
+    quotaError: string | null;
+    remoteInterviewsCount: number;
+  }> {
+    const readsBefore = firestoreTelemetry.getReport(this.getFirestoreSyncStatus()).metrics.reads.used;
+    const prevInterviewsMap = new Map(this.interviews);
+    const prevAnswersCount = this.answers.size;
+    const prevParticipantsCount = this.participants.size;
+    const prevBookVersionsCount = this.participantBookVersions.size;
+
+    const shouldRefreshQuestions =
+      !this.syncWatermarks.questionsSyncedAt ||
+      Date.now() - new Date(this.syncWatermarks.questionsSyncedAt).getTime() > 12 * 3600_000;
+
+    const answersQuery = this.syncWatermarks.answersUpdatedAtCursor
+      ? query(
+          collection(serverDb, 'answers'),
+          where('updatedAt', '>=', this.syncWatermarks.answersUpdatedAtCursor)
+        )
+      : collection(serverDb, 'answers');
+
+    const logsQuery = this.syncWatermarks.auditLogsCursor
+      ? query(
+          collection(serverDb, 'auditLogs'),
+          where('timestamp', '>', this.syncWatermarks.auditLogsCursor)
+        )
+      : query(collection(serverDb, 'auditLogs'));
+
+    const queries: Array<Promise<any>> = [
+      firestoreTelemetry.trackedGetDoc(serverDb, doc(serverDb, 'settings', 'appConfig'), 'storage'),
+      firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'interviews'), 'storage'),
+      firestoreTelemetry.trackedGetDocs(serverDb, answersQuery, 'storage'),
+      firestoreTelemetry.trackedGetCount(serverDb, collection(serverDb, 'answers'), 'storage'),
+      firestoreTelemetry.trackedGetCount(serverDb, collection(serverDb, 'participants'), 'storage'),
+      firestoreTelemetry.trackedGetCount(serverDb, collection(serverDb, 'participantBookVersions'), 'storage'),
+      firestoreTelemetry.trackedGetDocs(serverDb, logsQuery, 'storage'),
+    ];
+
+    if (shouldRefreshQuestions) {
+      queries.push(
+        firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'questions'), 'storage'),
+        firestoreTelemetry.trackedGetDocs(
+          serverDb,
+          collection(serverDb, 'questionnaireVersions'),
+          'storage'
+        )
+      );
+    }
+
+    const outcome = await this.raceDocsWithTimeout(queries, 10_000, 'incremental-sync');
+
+    let anySuccess = false;
+    let quotaError: string | null = null;
+    for (const r of outcome.results) {
+      if (r.status === 'fulfilled') anySuccess = true;
+      else if (this.isQuotaError(r.reason)) {
+        quotaError =
+          'Se alcanzó el límite diario gratuito de lecturas de Cloud Firestore; mostrando instantánea local segura sin pérdida de datos.';
+      }
+    }
+
+    if (!anySuccess) {
+      return { anySuccess: false, quotaError, remoteInterviewsCount: 0 };
+    }
+
+    const unwrap = (idx: number) =>
+      outcome.results[idx]?.status === 'fulfilled' ? (outcome.results[idx] as any).value : null;
+
+    const configDocSnap = unwrap(0);
+    const interviewsSnap = unwrap(1);
+    const answersSnap = unwrap(2);
+    const remoteAnswersCount = typeof unwrap(3) === 'number' ? (unwrap(3) as number) : 0;
+    const remoteParticipantsCount = typeof unwrap(4) === 'number' ? (unwrap(4) as number) : 0;
+    const remoteBookVersionsCount = typeof unwrap(5) === 'number' ? (unwrap(5) as number) : 0;
+    const logsSnap = unwrap(6);
+    const questionsSnap = shouldRefreshQuestions ? unwrap(7) : null;
+    const versionsSnap = shouldRefreshQuestions ? unwrap(8) : null;
+
+    if (configDocSnap) {
+      this.applyConfigSnap(configDocSnap);
+    }
+
+    if (questionsSnap && !questionsSnap.empty) {
+      questionsSnap.forEach((docSnap: any) => {
+        const q = docSnap.data() as QuestionRecord;
+        if (q?.id) this.questions.set(q.id, q);
+      });
+    }
+    if (versionsSnap && !versionsSnap.empty) {
+      versionsSnap.forEach((docSnap: any) => {
+        const v = docSnap.data() as QuestionnaireVersionDoc;
+        if (v?.id && Array.isArray(v.questions)) {
+          this.questionnaireVersions.set(v.id, v.questions);
+        }
+      });
+    }
+
+    const dirtyInterviewIds = new Set<string>();
+    const remoteInterviews: InterviewRecord[] = [];
+    if (interviewsSnap) {
+      interviewsSnap.forEach((docSnap: any) => {
+        const inv = docSnap.data() as InterviewRecord;
+        if (inv?.id) {
+          remoteInterviews.push(inv);
+          const merged = mergeInterviewRecordNonDestructive(this.interviews.get(inv.id), inv);
+          this.interviews.set(inv.id, merged);
+        }
+      });
+      for (const id of detectChangedInterviewIds(prevInterviewsMap, remoteInterviews)) {
+        dirtyInterviewIds.add(id);
+      }
+    }
+
+    if (answersSnap) {
+      answersSnap.forEach((docSnap: any) => {
+        const ans = docSnap.data() as AnswerRecord;
+        if (ans?.id) {
+          const prevAns = this.answers.get(ans.id);
+          const changed =
+            !prevAns ||
+            (ans.updatedAt || '') > (prevAns.updatedAt || '') ||
+            (ans.answerText || '') !== (prevAns.answerText || '') ||
+            (ans.photos?.length || 0) !== (prevAns.photos?.length || 0) ||
+            (ans.audioRecordings?.length || 0) !== (prevAns.audioRecordings?.length || 0);
+          const merged = mergeAnswerRecordNonDestructive(prevAns, ans);
+          this.answers.set(ans.id, merged);
+          if (changed && ans.interviewId) {
+            dirtyInterviewIds.add(ans.interviewId);
+          }
+        }
+      });
+    }
+
+    // Safety fallback if remote answer/participant/book counts exceed local cache without dirty interviews
+    if (
+      remoteAnswersCount > prevAnswersCount &&
+      (!answersSnap || answersSnap.size === 0)
+    ) {
+      const safetyAnswersSnap = await firestoreTelemetry
+        .trackedGetDocs(serverDb, collection(serverDb, 'answers'), 'storage')
+        .catch(() => null);
+      safetyAnswersSnap?.forEach((docSnap: any) => {
+        const ans = docSnap.data() as AnswerRecord;
+        if (ans?.id) {
+          const merged = mergeAnswerRecordNonDestructive(this.answers.get(ans.id), ans);
+          this.answers.set(ans.id, merged);
+        }
+      });
+    }
+
+    if (
+      remoteParticipantsCount > prevParticipantsCount &&
+      dirtyInterviewIds.size === 0
+    ) {
+      const allPartsSnap = await firestoreTelemetry
+        .trackedGetDocs(serverDb, collection(serverDb, 'participants'), 'storage')
+        .catch(() => null);
+      allPartsSnap?.forEach((docSnap: any) => {
+        const p = docSnap.data() as ParticipantRecord;
+        if (p?.id) {
+          const prev = this.participants.get(p.id);
+          this.participants.set(p.id, prev ? { ...prev, ...p } : p);
+          if (p.interviewId) dirtyInterviewIds.add(p.interviewId);
+        }
+      });
+    }
+
+    if (
+      remoteBookVersionsCount > prevBookVersionsCount &&
+      dirtyInterviewIds.size === 0
+    ) {
+      const allBvSnap = await firestoreTelemetry
+        .trackedGetDocs(serverDb, collection(serverDb, 'participantBookVersions'), 'storage')
+        .catch(() => null);
+      allBvSnap?.forEach((docSnap: any) => {
+        const bv = docSnap.data() as ParticipantBookVersionRecord;
+        if (
+          bv?.id &&
+          !this.deletedBookVersionIds.has(bv.id) &&
+          !this.deletedBookVersionIds.has(`pbv_${bv.interviewId}_v${bv.versionNumber}`)
+        ) {
+          this.participantBookVersions.set(bv.id, bv);
+        }
+      });
+    }
+
+    if (logsSnap) {
+      const loadedLogs: AuditLogRecord[] = [];
+      logsSnap.forEach((docSnap: any) => {
+        const l = docSnap.data() as AuditLogRecord;
+        if (l?.id) loadedLogs.push(l);
+      });
+      if (loadedLogs.length > 0) {
+        const logMap = new Map(this.auditLogs.map((l) => [l.id, l]));
+        for (const l of loadedLogs) logMap.set(l.id, l);
+        this.auditLogs = Array.from(logMap.values()).sort(
+          (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+        );
+      }
+    }
+
+    if (dirtyInterviewIds.size > 0) {
+      await this.pullScopedCollectionsForInterviews(Array.from(dirtyInterviewIds));
+    }
+
+    this.ensureParticipantTokensConsistent();
+    this.advanceSyncWatermarks('incremental', shouldRefreshQuestions);
+    this.saveStateToDisk();
+
+    const readsAfter = firestoreTelemetry.getReport(this.getFirestoreSyncStatus()).metrics.reads.used;
+    const actualReads = Math.max(0, readsAfter - readsBefore);
+    const estimatedFullScanReads = Math.max(
+      actualReads,
+      this.answers.size +
+        this.questions.size +
+        this.interviews.size +
+        this.participants.size +
+        this.tokens.size +
+        this.audios.size +
+        this.participantBookVersions.size +
+        this.auditLogs.length +
+        80
+    );
+    if (estimatedFullScanReads > actualReads) {
+      firestoreTelemetry.recordReadsSaved(estimatedFullScanReads - actualReads);
+    }
+
+    return {
+      anySuccess: true,
+      quotaError: null,
+      remoteInterviewsCount: remoteInterviews.length,
+    };
+  }
+
+  private async runFullBaselineFirestoreSync(): Promise<{
+    anySuccess: boolean;
+    quotaError: string | null;
+    remoteInterviewsCount: number;
+  }> {
+    const coreOutcome = await this.raceDocsWithTimeout(
+      [
+        firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'settings'), 'storage'),
+        firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'questions'), 'storage'),
+        firestoreTelemetry.trackedGetDocs(
+          serverDb,
+          collection(serverDb, 'questionnaireVersions'),
+          'storage'
+        ),
+        firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'interviews'), 'storage'),
+        firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'participants'), 'storage'),
+        firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'interviewTokens'), 'storage'),
+        firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'answers'), 'storage'),
+        firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'privacyConsents'), 'storage'),
+      ],
+      10_000,
+      'full-core'
+    );
+
+    const { anySuccess, quotaError, remoteInterviewsCount } = this.applyCoreSnapshots(
+      coreOutcome.results
+    );
+
+    if (anySuccess && !quotaError) {
+      const heavyOutcome = await this.raceDocsWithTimeout(
+        [
+          firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'interviewPhotos'), 'storage'),
+          firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'interviewAudio'), 'storage'),
+          firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'manuscripts'), 'storage'),
+          firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'auditLogs'), 'storage'),
+          firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'bookShares'), 'storage'),
+          firestoreTelemetry.trackedGetDocs(
+            serverDb,
+            collection(serverDb, 'scheduledDeliveries'),
+            'storage'
+          ),
+          firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'secondaryAccess'), 'storage'),
+          firestoreTelemetry.trackedGetDocs(
+            serverDb,
+            collection(serverDb, 'postMortemInstructions'),
+            'storage'
+          ),
+          firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'arcoRequests'), 'storage'),
+          firestoreTelemetry.trackedGetDocs(
+            serverDb,
+            collection(serverDb, 'participantBookVersions'),
+            'storage'
+          ),
+        ],
+        14_000,
+        'full-heavy'
+      );
+      this.applyHeavySnapshots(heavyOutcome.results);
+      this.ensureParticipantTokensConsistent();
+      this.advanceSyncWatermarks('full', true);
+      this.saveStateToDisk();
+    }
+
+    return { anySuccess, quotaError, remoteInterviewsCount };
+  }
+
   public async ensureInitialized(): Promise<void> {
     if (this.initialized) return;
-    if (this.initPromise) return this.initPromise;
+    // Hydrate local disk snapshot first for zero-data-loss resilience
+    this.loadStateFromDisk();
+    if (!this.initPromise) {
+      this.initPromise = this.loadFromFirestore();
+    }
+    // Always give Phase 1 core Firestore collections (interviews, participants, tokens, answers)
+    // a fair window to sync remote records (e.g. from www.youforever.app) even when disk cache exists.
+    await Promise.race([
+      this.coreSyncPromise || this.initPromise,
+      new Promise<void>((resolve) => setTimeout(resolve, 4500)),
+    ]);
+  }
 
-    this.initPromise = this.loadFromFirestore();
-    await this.initPromise;
+  public async syncFromFirestore(
+    force = false,
+    mode: 'incremental' | 'full' = 'incremental'
+  ): Promise<{
+    synced: boolean;
+    quotaExhausted: boolean;
+    mode: 'incremental' | 'full';
+    message: string;
+    status: FirestoreSyncFreshness;
+  }> {
+    const nowMs = Date.now();
+    // Respect quota backoff (2 minutes) unless explicitly forced
+    if (
+      !force &&
+      this.firestoreSyncStatus.quotaExhausted &&
+      nowMs - this.firestoreSyncStatus.quotaExhaustedAtMs < 2 * 60 * 1000
+    ) {
+      return {
+        synced: false,
+        quotaExhausted: true,
+        mode: this.syncWatermarks.lastSyncMode || 'incremental',
+        message:
+          this.firestoreSyncStatus.lastError ||
+          'Cuota diaria gratuita de Firestore alcanzada temporalmente; usando caché local segura.',
+        status: this.getFirestoreSyncStatus(),
+      };
+    }
+
+    // Short cooldown guard (20 seconds) for incremental calls to keep multi-site live & reads minimal
+    if (!force && mode !== 'full' && nowMs - this.lastFirestoreCoreSyncMs < 20_000) {
+      return {
+        synced: this.firestoreSyncStatus.source === 'firestore',
+        quotaExhausted: this.firestoreSyncStatus.quotaExhausted,
+        mode: this.syncWatermarks.lastSyncMode || 'incremental',
+        message: 'Sincronización reciente ya aplicada.',
+        status: this.getFirestoreSyncStatus(),
+      };
+    }
+
+    if (this.activeSyncPromise) {
+      await this.activeSyncPromise;
+      return {
+        synced: this.firestoreSyncStatus.source === 'firestore',
+        quotaExhausted: this.firestoreSyncStatus.quotaExhausted,
+        mode: this.syncWatermarks.lastSyncMode || 'incremental',
+        message: this.firestoreSyncStatus.lastError || 'Sincronización completada.',
+        status: this.getFirestoreSyncStatus(),
+      };
+    }
+
+    const effectiveMode: 'incremental' | 'full' =
+      mode === 'full' || !this.syncWatermarks.fullBaselineSyncedAt || this.interviews.size === 0
+        ? 'full'
+        : 'incremental';
+
+    this.activeSyncPromise = (async () => {
+      this.firestoreSyncStatus.lastAttemptAt = new Date().toISOString();
+      this.lastFirestoreCoreSyncMs = Date.now();
+      try {
+        const result =
+          effectiveMode === 'full'
+            ? await this.runFullBaselineFirestoreSync()
+            : await this.runIncrementalFirestoreSync();
+
+        if (result.anySuccess && !result.quotaError) {
+          this.ensureParticipantTokensConsistent();
+          this.saveStateToDisk();
+          this.firestoreSyncStatus.lastSuccessAt = new Date().toISOString();
+          this.firestoreSyncStatus.lastError = null;
+          this.firestoreSyncStatus.quotaExhausted = false;
+          this.firestoreSyncStatus.source = 'firestore';
+          this.firestoreSyncStatus.syncedRemoteInterviewsCount = result.remoteInterviewsCount;
+        } else if (result.quotaError) {
+          this.firestoreSyncStatus.quotaExhausted = true;
+          this.firestoreSyncStatus.quotaExhaustedAtMs = Date.now();
+          this.firestoreSyncStatus.lastError = result.quotaError;
+        }
+      } catch (err: any) {
+        if (this.isQuotaError(err)) {
+          this.firestoreSyncStatus.quotaExhausted = true;
+          this.firestoreSyncStatus.quotaExhaustedAtMs = Date.now();
+          this.firestoreSyncStatus.lastError =
+            'Cuota diaria gratuita de Cloud Firestore alcanzada temporalmente.';
+        } else {
+          this.firestoreSyncStatus.lastError = err?.message || 'Error al sincronizar con Firestore.';
+        }
+      } finally {
+        this.activeSyncPromise = null;
+      }
+    })();
+
+    await this.activeSyncPromise;
+    return {
+      synced: !this.firestoreSyncStatus.quotaExhausted && !this.firestoreSyncStatus.lastError,
+      quotaExhausted: this.firestoreSyncStatus.quotaExhausted,
+      mode: this.syncWatermarks.lastSyncMode || effectiveMode,
+      message:
+        this.firestoreSyncStatus.lastError ||
+        `Sincronización ${effectiveMode === 'incremental' ? 'incremental' : 'completa'} completada (${this.firestoreSyncStatus.syncedRemoteInterviewsCount} entrevistas en Firestore).`,
+      status: this.getFirestoreSyncStatus(),
+    };
   }
 
   public async loadFromFirestore(): Promise<void> {
-    // 0. Always hydrate from local disk snapshot first so restarts survive Firestore quota limits
+    // 0. Hydrate from local disk snapshot first so restarts survive network latency or Firestore quota limits
     this.loadStateFromDisk();
+    this.firestoreSyncStatus.lastAttemptAt = new Date().toISOString();
+    this.lastFirestoreCoreSyncMs = Date.now();
 
-    try {
-      const results = await Promise.allSettled([
-        getDocs(collection(serverDb, 'settings')),
-        getDocs(collection(serverDb, 'questions')),
-        getDocs(collection(serverDb, 'questionnaireVersions')),
-        getDocs(collection(serverDb, 'interviews')),
-        getDocs(collection(serverDb, 'participants')),
-        getDocs(collection(serverDb, 'interviewTokens')),
-        getDocs(collection(serverDb, 'answers')),
-        getDocs(collection(serverDb, 'interviewPhotos')),
-        getDocs(collection(serverDb, 'interviewAudio')),
-        getDocs(collection(serverDb, 'manuscripts')),
-        getDocs(collection(serverDb, 'auditLogs')),
-        getDocs(collection(serverDb, 'privacyConsents')),
-        getDocs(collection(serverDb, 'bookShares')),
-        getDocs(collection(serverDb, 'scheduledDeliveries')),
-        getDocs(collection(serverDb, 'secondaryAccess')),
-        getDocs(collection(serverDb, 'postMortemInstructions')),
-        getDocs(collection(serverDb, 'arcoRequests')),
-        getDocs(collection(serverDb, 'participantBookVersions')),
-      ]);
+    const useIncrementalStartup =
+      Boolean(this.syncWatermarks.fullBaselineSyncedAt) && this.interviews.size > 0;
 
-      const unwrapSnap = (idx: number) => {
-        const r = results[idx];
-        return r && r.status === 'fulfilled' ? r.value : null;
-      };
-
-      const settingsSnap = unwrapSnap(0);
-      const questionsSnap = unwrapSnap(1);
-      const versionsSnap = unwrapSnap(2);
-      const interviewsSnap = unwrapSnap(3);
-      const participantsSnap = unwrapSnap(4);
-      const tokensSnap = unwrapSnap(5);
-      const answersSnap = unwrapSnap(6);
-      const photosSnap = unwrapSnap(7);
-      const audiosSnap = unwrapSnap(8);
-      const manuscriptsSnap = unwrapSnap(9);
-      const logsSnap = unwrapSnap(10);
-      const consentsSnap = unwrapSnap(11);
-      const sharesSnap = unwrapSnap(12);
-      const deliveriesSnap = unwrapSnap(13);
-      const secondarySnap = unwrapSnap(14);
-      const postMortemSnap = unwrapSnap(15);
-      const arcoSnap = unwrapSnap(16);
-      const bookVersionsSnap = unwrapSnap(17);
-
-      // 1. Settings
-      if (settingsSnap) {
-        settingsSnap.forEach((docSnap) => {
-          if (docSnap.id === 'appConfig') {
-            this.config = { ...INITIAL_APP_CONFIG, ...(docSnap.data() as AppConfig) };
+    const runCorePhase = async () => {
+      try {
+        if (useIncrementalStartup) {
+          const inc = await this.runIncrementalFirestoreSync();
+          if (inc.anySuccess && !inc.quotaError) {
+            this.firestoreSyncStatus.lastSuccessAt = new Date().toISOString();
+            this.firestoreSyncStatus.lastError = null;
+            this.firestoreSyncStatus.quotaExhausted = false;
+            this.firestoreSyncStatus.source = 'firestore';
+            this.firestoreSyncStatus.syncedRemoteInterviewsCount = inc.remoteInterviewsCount;
+          } else if (inc.quotaError) {
+            this.firestoreSyncStatus.quotaExhausted = true;
+            this.firestoreSyncStatus.quotaExhaustedAtMs = Date.now();
+            this.firestoreSyncStatus.lastError = inc.quotaError;
           }
-        });
-      }
+          return;
+        }
 
-      // 2. Questions
-      if (questionsSnap && !questionsSnap.empty) {
-        questionsSnap.forEach((docSnap) => {
-          const q = docSnap.data() as QuestionRecord;
-          if (q && q.id) {
-            this.questions.set(q.id, q);
-          }
-        });
-      }
+        // Phase 1 baseline: Lightweight core metadata & testimonials
+        const coreOutcome = await this.raceDocsWithTimeout(
+          [
+            firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'settings'), 'storage'),
+            firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'questions'), 'storage'),
+            firestoreTelemetry.trackedGetDocs(
+              serverDb,
+              collection(serverDb, 'questionnaireVersions'),
+              'storage'
+            ),
+            firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'interviews'), 'storage'),
+            firestoreTelemetry.trackedGetDocs(
+              serverDb,
+              collection(serverDb, 'participants'),
+              'storage'
+            ),
+            firestoreTelemetry.trackedGetDocs(
+              serverDb,
+              collection(serverDb, 'interviewTokens'),
+              'storage'
+            ),
+            firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, 'answers'), 'storage'),
+            firestoreTelemetry.trackedGetDocs(
+              serverDb,
+              collection(serverDb, 'privacyConsents'),
+              'storage'
+            ),
+          ],
+          10_000,
+          'core-init'
+        );
 
-      // 3. Questionnaire Versions
-      if (versionsSnap && !versionsSnap.empty) {
-        versionsSnap.forEach((docSnap) => {
-          const v = docSnap.data() as QuestionnaireVersionDoc;
-          if (v && v.id && Array.isArray(v.questions)) {
-            this.questionnaireVersions.set(v.id, v.questions);
-          }
-        });
-      }
+        const { anySuccess, quotaError, remoteInterviewsCount } = this.applyCoreSnapshots(
+          coreOutcome.results
+        );
 
-      // 4. Interviews
-      if (interviewsSnap) {
-        interviewsSnap.forEach((docSnap) => {
-          const inv = docSnap.data() as InterviewRecord;
-          if (inv && inv.id) {
-            this.interviews.set(inv.id, inv);
-          }
-        });
-      }
-
-      // 5. Participants
-      if (participantsSnap) {
-        participantsSnap.forEach((docSnap) => {
-          const part = docSnap.data() as ParticipantRecord;
-          if (part && part.id) {
-            this.participants.set(part.id, part);
-          }
-        });
-      }
-
-      // 6. Tokens
-      if (tokensSnap) {
-        tokensSnap.forEach((docSnap) => {
-          const tok = docSnap.data() as PersistedTokenRecord;
-          if (tok && tok.tokenHash) {
-            this.registerTokenInMemory(tok);
-          }
-        });
-      }
-
-      // 7. Answers
-      if (answersSnap) {
-        answersSnap.forEach((docSnap) => {
-          const ans = docSnap.data() as AnswerRecord;
-          if (ans && ans.id) {
-            this.answers.set(ans.id, ans);
-          }
-        });
-      }
-
-      // 7b. Interview Photos
-      if (photosSnap) {
-        photosSnap.forEach((docSnap) => {
-          const photo = docSnap.data() as InterviewPhotoRecord;
-          if (photo && photo.id) {
-            this.photos.set(photo.id, photo);
-          }
-        });
-      }
-
-      // 7c. Interview Voice Audio Recordings & Transcriptions
-      if (audiosSnap) {
-        audiosSnap.forEach((docSnap) => {
-          const aud = docSnap.data() as InterviewAudioRecord;
-          if (aud && aud.id) {
-            this.audios.set(aud.id, aud);
-          }
-        });
-      }
-
-      // 8. Manuscripts
-      if (manuscriptsSnap) {
-        manuscriptsSnap.forEach((docSnap) => {
-          const manu = docSnap.data() as ManuscriptRecord;
-          if (manu && manu.id) {
-            this.manuscripts.set(manu.id, manu);
-          }
-        });
-      }
-
-      // 9. Audit Logs
-      if (logsSnap) {
-        const loadedLogs: AuditLogRecord[] = [];
-        logsSnap.forEach((docSnap) => {
-          const log = docSnap.data() as AuditLogRecord;
-          if (log && log.id) {
-            loadedLogs.push(log);
-          }
-        });
-        if (loadedLogs.length > 0) {
-          loadedLogs.sort(
-            (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+        if (anySuccess) {
+          this.firestoreSyncStatus.lastSuccessAt = new Date().toISOString();
+          this.firestoreSyncStatus.lastError = null;
+          this.firestoreSyncStatus.quotaExhausted = false;
+          this.firestoreSyncStatus.source = 'firestore';
+          this.firestoreSyncStatus.syncedRemoteInterviewsCount = remoteInterviewsCount;
+        } else if (quotaError) {
+          this.firestoreSyncStatus.quotaExhausted = true;
+          this.firestoreSyncStatus.quotaExhaustedAtMs = Date.now();
+          this.firestoreSyncStatus.lastError = quotaError;
+        }
+      } catch (err: any) {
+        if (this.isQuotaError(err)) {
+          this.firestoreSyncStatus.quotaExhausted = true;
+          this.firestoreSyncStatus.quotaExhaustedAtMs = Date.now();
+          this.firestoreSyncStatus.lastError =
+            'Cuota diaria gratuita de Cloud Firestore alcanzada temporalmente.';
+        } else {
+          console.warn(
+            '[StorageManager] Note during Phase 1 Firestore load:',
+            err?.message || err
           );
-          this.auditLogs = loadedLogs;
         }
       }
+    };
 
-      // 10. Privacy Consents
-      if (consentsSnap) {
-        consentsSnap.forEach((docSnap) => {
-          const c = docSnap.data() as PrivacyConsentRecord;
-          if (c && c.id) {
-            this.privacyConsents.set(c.id, c);
-          }
-        });
-      }
+    this.coreSyncPromise = runCorePhase();
+    await this.coreSyncPromise;
 
-      // 11. Book Shares
-      if (sharesSnap) {
-        sharesSnap.forEach((docSnap) => {
-          const s = docSnap.data() as BookShareRecord;
-          if (s && s.id) {
-            this.bookShares.set(s.id, s);
-          }
-        });
-      }
+    // Phase 2 baseline only runs on cold baseline initialization when incremental startup did not run
+    if (!useIncrementalStartup && !this.firestoreSyncStatus.quotaExhausted) {
+      try {
+        const heavyOutcome = await this.raceDocsWithTimeout(
+          [
+            firestoreTelemetry.trackedGetDocs(
+              serverDb,
+              collection(serverDb, 'interviewPhotos'),
+              'storage'
+            ),
+            firestoreTelemetry.trackedGetDocs(
+              serverDb,
+              collection(serverDb, 'interviewAudio'),
+              'storage'
+            ),
+            firestoreTelemetry.trackedGetDocs(
+              serverDb,
+              collection(serverDb, 'manuscripts'),
+              'storage'
+            ),
+            firestoreTelemetry.trackedGetDocs(
+              serverDb,
+              collection(serverDb, 'auditLogs'),
+              'storage'
+            ),
+            firestoreTelemetry.trackedGetDocs(
+              serverDb,
+              collection(serverDb, 'bookShares'),
+              'storage'
+            ),
+            firestoreTelemetry.trackedGetDocs(
+              serverDb,
+              collection(serverDb, 'scheduledDeliveries'),
+              'storage'
+            ),
+            firestoreTelemetry.trackedGetDocs(
+              serverDb,
+              collection(serverDb, 'secondaryAccess'),
+              'storage'
+            ),
+            firestoreTelemetry.trackedGetDocs(
+              serverDb,
+              collection(serverDb, 'postMortemInstructions'),
+              'storage'
+            ),
+            firestoreTelemetry.trackedGetDocs(
+              serverDb,
+              collection(serverDb, 'arcoRequests'),
+              'storage'
+            ),
+            firestoreTelemetry.trackedGetDocs(
+              serverDb,
+              collection(serverDb, 'participantBookVersions'),
+              'storage'
+            ),
+          ],
+          14_000,
+          'media-and-versions'
+        );
 
-      // 12. Scheduled Deliveries
-      if (deliveriesSnap) {
-        deliveriesSnap.forEach((docSnap) => {
-          const d = docSnap.data() as ScheduledDeliveryRecord;
-          if (d && d.id) {
-            this.scheduledDeliveries.set(d.id, d);
-          }
-        });
+        this.applyHeavySnapshots(heavyOutcome.results);
+        this.advanceSyncWatermarks('full', true);
+      } catch (err: any) {
+        console.warn(
+          '[StorageManager] Note during Phase 2 Firestore load (operating with disk & memory state):',
+          err?.message || err
+        );
       }
-
-      // 13. Secondary Access
-      if (secondarySnap) {
-        secondarySnap.forEach((docSnap) => {
-          const sa = docSnap.data() as SecondaryAccessRecord;
-          if (sa && sa.id) {
-            this.secondaryAccess.set(sa.id, sa);
-          }
-        });
-      }
-
-      // 14. Post Mortem Instructions
-      if (postMortemSnap) {
-        postMortemSnap.forEach((docSnap) => {
-          const pmi = docSnap.data() as PostMortemInstructionRecord;
-          if (pmi && pmi.id) {
-            this.postMortemInstructions.set(pmi.id, pmi);
-          }
-        });
-      }
-
-      // 15. ARCO Requests
-      if (arcoSnap) {
-        arcoSnap.forEach((docSnap) => {
-          const ar = docSnap.data() as ArcoRequestRecord;
-          if (ar && ar.id) {
-            this.arcoRequests.set(ar.id, ar);
-          }
-        });
-      }
-
-      // 16. Participant Book Versions
-      if (bookVersionsSnap) {
-        bookVersionsSnap.forEach((docSnap) => {
-          const bv = docSnap.data() as ParticipantBookVersionRecord;
-          if (bv && bv.id) {
-            this.participantBookVersions.set(bv.id, bv);
-          }
-        });
-      }
-    } catch (err: any) {
-      console.warn(
-        '[StorageManager] Note during initial Firestore load (operating with disk & memory state):',
-        err?.message || err
-      );
     }
 
     // Ensure all participants have registered tokens and access codes
     this.ensureParticipantTokensConsistent();
 
-    // If no interviews exist yet (e.g. fresh environment or Firestore read quota reached before first disk save),
-    // seed deterministic default interviews so Admin Panel and Participant Portal always have valid interviews & codes
+    // Seed defaults ONLY if empty (never overwrite existing Firestore or disk records)
     if (this.interviews.size === 0) {
       this.seedDefaultInterviewsInMemory();
     } else {
@@ -1248,6 +2300,8 @@ class StorageManager {
       }
       this.saveStateToDisk();
     }
+
+    await this.purgeOrphanedPhotosAndSyncCompilations();
 
     this.initialized = true;
   }
@@ -1288,6 +2342,73 @@ class StorageManager {
 
     if (typeof newConfig.allowAdditionalMemories === 'boolean') {
       this.config.allowAdditionalMemories = newConfig.allowAdditionalMemories;
+    }
+
+    if (newConfig.bookAiProvider === 'gemini' || newConfig.bookAiProvider === 'openai') {
+      this.config.bookAiProvider = newConfig.bookAiProvider;
+    }
+
+    if (typeof newConfig.bookAiGeminiModel === 'string' && newConfig.bookAiGeminiModel.trim().length > 0) {
+      this.config.bookAiGeminiModel = newConfig.bookAiGeminiModel.trim();
+    }
+
+    if (typeof newConfig.bookAiOpenAiModel === 'string' && newConfig.bookAiOpenAiModel.trim().length > 0) {
+      this.config.bookAiOpenAiModel = newConfig.bookAiOpenAiModel.trim();
+    }
+
+    if (
+      newConfig.bookStructureMode === 'prompt_autonomous' ||
+      newConfig.bookStructureMode === 'fixed_five_stages'
+    ) {
+      this.config.bookStructureMode = newConfig.bookStructureMode;
+    }
+
+    if (newConfig.literaryPrompts && typeof newConfig.literaryPrompts === 'object') {
+      const currentPrompts = this.config.literaryPrompts || { ...DEFAULT_LITERARY_PROMPTS_CONFIG };
+      const styles: LiteraryPromptStyleId[] = [
+        'first_person_simple',
+        'first_person_literary',
+        'third_person_biography',
+      ];
+      const nextPrompts: Record<LiteraryPromptStyleId, LiteraryStylePromptConfig> = {
+        ...DEFAULT_LITERARY_PROMPTS_CONFIG,
+        ...currentPrompts,
+      };
+      for (const st of styles) {
+        const incoming = newConfig.literaryPrompts[st];
+        if (incoming && typeof incoming.promptText === 'string' && incoming.promptText.trim().length > 0) {
+          nextPrompts[st] = {
+            styleId: st,
+            styleLabel:
+              incoming.styleLabel ||
+              nextPrompts[st]?.styleLabel ||
+              DEFAULT_LITERARY_PROMPTS_CONFIG[st].styleLabel,
+            activeVersionId: incoming.activeVersionId || nextPrompts[st]?.activeVersionId || `lpv_${st}_${Date.now()}`,
+            promptText: incoming.promptText.trim(),
+            updatedAt: new Date().toISOString(),
+            updatedBy: performedBy,
+          };
+        }
+      }
+      this.config.literaryPrompts = nextPrompts;
+    }
+
+    if (Array.isArray(newConfig.literaryPromptVersions)) {
+      const cleanedVersions: LiteraryPromptVersion[] = newConfig.literaryPromptVersions
+        .filter((v) => v && typeof v.id === 'string' && typeof v.promptText === 'string' && v.promptText.trim().length > 0)
+        .map((v) => ({
+          id: v.id,
+          name: (v.name || 'Versión de Prompt').trim(),
+          styleId: v.styleId || v.createdForStyleId || 'first_person_literary',
+          createdForStyleId: v.createdForStyleId || v.styleId || 'first_person_literary',
+          promptText: v.promptText.trim(),
+          createdAt: v.createdAt || new Date().toISOString(),
+          updatedAt: v.updatedAt || new Date().toISOString(),
+          createdBy: v.createdBy || performedBy,
+        }));
+      if (cleanedVersions.length > 0) {
+        this.config.literaryPromptVersions = cleanedVersions;
+      }
     }
 
     this.config.updatedAt = new Date().toISOString();
@@ -1431,9 +2552,7 @@ class StorageManager {
 
   // --- Interviews ---
   public getInterviews(): InterviewRecord[] {
-    return Array.from(this.interviews.values()).sort(
-      (a, b) => new Date(b.openedAt).getTime() - new Date(a.openedAt).getTime()
-    );
+    return sortInterviewsWithCopies(Array.from(this.interviews.values()));
   }
 
   public getInterviewById(id: string): InterviewRecord | undefined {
@@ -1449,13 +2568,28 @@ class StorageManager {
     title: string;
     storyMode: 'individual' | 'compartida';
     storyType: string;
-    participants: Array<{ name: string; relationship: string; role: 'primary' | 'contributor'; email?: string }>;
+    participants: Array<{
+      name: string;
+      relationship: string;
+      role: 'primary' | 'contributor';
+      email?: string;
+      age?: number | null;
+      city?: string;
+      privacyAcceptedAt?: string;
+      privacyVersion?: string;
+    }>;
     customOpenDays?: number;
     customSufficiencyThreshold?: number;
     performedBy: string;
+    registrationSource?: 'admin' | 'self_register_free';
   }): Promise<{
     interview: InterviewRecord;
-    participantTokens: Array<{ participant: ParticipantRecord; plainToken: string; inviteUrl: string }>;
+    participantTokens: Array<{
+      participant: ParticipantRecord;
+      plainToken: string;
+      accessCode: string;
+      inviteUrl: string;
+    }>;
   }> {
     const {
       title,
@@ -1465,6 +2599,7 @@ class StorageManager {
       customOpenDays,
       customSufficiencyThreshold,
       performedBy,
+      registrationSource,
     } = params;
 
     if (!title || title.trim().length === 0) {
@@ -1517,13 +2652,19 @@ class StorageManager {
       questionnaireVersionId: versionId,
       createdById: performedBy,
       createdByName: performedBy,
+      registrationSource: registrationSource || 'admin',
     };
 
     this.interviews.set(interviewId, newInterview);
     await this.persistDoc('interviews', interviewId, newInterview);
 
     // Create participants & cryptographic tokens
-    const createdTokens: Array<{ participant: ParticipantRecord; plainToken: string; inviteUrl: string }> = [];
+    const createdTokens: Array<{
+      participant: ParticipantRecord;
+      plainToken: string;
+      accessCode: string;
+      inviteUrl: string;
+    }> = [];
 
     for (let i = 0; i < partInputs.length; i++) {
       const pInput = partInputs[i];
@@ -1535,7 +2676,11 @@ class StorageManager {
         relationship: pInput.relationship || (pInput.role === 'primary' ? 'Titular' : 'Colaborador'),
         role: pInput.role,
         status: 'invited',
-        email: pInput.email,
+        email: pInput.email ? pInput.email.trim() : undefined,
+        age: typeof pInput.age === 'number' ? pInput.age : null,
+        city: pInput.city ? pInput.city.trim() : undefined,
+        privacyAcceptedAt: pInput.privacyAcceptedAt,
+        privacyVersion: pInput.privacyVersion,
         joinedAt: undefined,
       };
       this.participants.set(partId, participant);
@@ -1559,7 +2704,7 @@ class StorageManager {
       await this.persistDoc('interviewTokens', tokenDoc.id, tokenDoc);
 
       const inviteUrl = `/interview?token=${plainToken}`;
-      createdTokens.push({ participant, plainToken, inviteUrl });
+      createdTokens.push({ participant, plainToken, accessCode, inviteUrl });
     }
 
     await this.addAuditLog('CREATE_INTERVIEW', 'interview', interviewId, performedBy, {
@@ -1568,9 +2713,569 @@ class StorageManager {
       participantsCount: partInputs.length,
       openDays,
       threshold,
+      registrationSource: registrationSource || 'admin',
     });
 
     return { interview: newInterview, participantTokens: createdTokens };
+  }
+
+  public async createFreeSelfRegisteredInterview(params: {
+    payload: FreeRegistrationPayload;
+    userAgent?: string;
+  }): Promise<{
+    interview: InterviewRecord;
+    participantTokens: Array<{
+      participant: ParticipantRecord;
+      plainToken: string;
+      accessCode: string;
+      inviteUrl: string;
+    }>;
+  }> {
+    const validation = validateFreeRegistrationPayload(params.payload);
+    if (!validation.valid || !validation.normalized) {
+      throw new Error(validation.error || 'Los datos de registro no son válidos.');
+    }
+
+    const { storyMode, storyTitle, participants } = validation.normalized;
+    const acceptedAtIso = new Date().toISOString();
+    const primaryEmail = participants[0]?.email || 'self_register_free';
+
+    const result = await this.createInterview({
+      title: storyTitle,
+      storyMode,
+      storyType: storyMode === 'compartida' ? 'biografia_familiar' : 'biografia_personal',
+      participants: participants.map((p) => ({
+        name: p.name,
+        email: p.email,
+        age: p.age,
+        city: p.city,
+        relationship: p.relationship,
+        role: p.role,
+        privacyAcceptedAt: acceptedAtIso,
+        privacyVersion: PRIVACY_NOTICE_VERSION,
+      })),
+      performedBy: `Autorregistro /free (${primaryEmail})`,
+      registrationSource: 'self_register_free',
+    });
+
+    // Register official privacy consent from /free acceptance so participants enter straight into questions
+    for (const item of result.participantTokens) {
+      await this.recordPrivacyConsent(item.plainToken, true, params.userAgent || 'self_register_free');
+    }
+
+    await this.addAuditLog('SELF_REGISTER_FREE', 'interview', result.interview.id, primaryEmail, {
+      storyMode,
+      title: result.interview.title,
+      participantsCount: result.participantTokens.length,
+      privacyVersion: PRIVACY_NOTICE_VERSION,
+    });
+
+    return result;
+  }
+
+  public async updateInterviewParticipantRegistrations(params: {
+    interviewId: string;
+    interviewTitle?: string;
+    participants: AdminParticipantRegistrationUpdate[];
+    performedBy: string;
+  }): Promise<{
+    interview: InterviewRecord;
+    participants: Array<ParticipantRecord & { plainToken?: string; accessCode?: string; inviteUrl?: string }>;
+  }> {
+    const interview = this.interviews.get(params.interviewId);
+    if (!interview) {
+      throw new Error('Entrevista no encontrada.');
+    }
+
+    const validation = validateAdminRegistrationUpdates({
+      interviewTitle: params.interviewTitle,
+      participants: params.participants,
+    });
+    if (!validation.valid || !validation.participants) {
+      throw new Error(validation.error || 'Datos de registro inválidos.');
+    }
+
+    const nowIso = new Date().toISOString();
+
+    if (validation.interviewTitle && validation.interviewTitle !== interview.title) {
+      interview.title = validation.interviewTitle;
+      interview.lastActivityAt = nowIso;
+      this.interviews.set(interview.id, interview);
+      await this.persistDoc('interviews', interview.id, interview);
+    }
+
+    const existingParts = Array.from(this.participants.values()).filter(
+      (p) => p.interviewId === interview.id
+    );
+    const existingMap = new Map(existingParts.map((p) => [p.id, p]));
+
+    for (const upd of validation.participants) {
+      const target = existingMap.get(upd.participantId);
+      if (!target) {
+        throw new Error(`El participante ${upd.participantId} no pertenece a esta entrevista.`);
+      }
+
+      const updatedParticipant: ParticipantRecord = {
+        ...target,
+        name: upd.name,
+        email: upd.email ? upd.email : undefined,
+        age: upd.age,
+        city: upd.city ? upd.city : undefined,
+        relationship: upd.relationship,
+        role: upd.role,
+      };
+
+      this.participants.set(updatedParticipant.id, updatedParticipant);
+      await this.persistDoc('participants', updatedParticipant.id, updatedParticipant);
+    }
+
+    await this.addAuditLog(
+      'UPDATE_REGISTRATION_DATA',
+      'interview',
+      interview.id,
+      params.performedBy,
+      {
+        updatedParticipantIds: validation.participants.map((p) => p.participantId),
+        interviewTitle: interview.title,
+      }
+    );
+
+    return {
+      interview,
+      participants: this.getParticipantsForInterview(interview.id),
+    };
+  }
+
+  public async duplicateInterview(
+    sourceInterviewId: string,
+    performedBy: string
+  ): Promise<{
+    interview: InterviewRecord;
+    participantTokens: Array<{ participant: ParticipantRecord; plainToken: string; accessCode: string; inviteUrl: string }>;
+  }> {
+    const source = this.interviews.get(sourceInterviewId);
+    if (!source) {
+      throw new Error('La entrevista original no fue encontrada.');
+    }
+
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const suffix = Math.random().toString(36).substring(2, 7);
+    const newInterviewId = `int_${Date.now()}_${suffix}`;
+
+    const sourceParticipants = Array.from(this.participants.values()).filter(
+      (p) => p.interviewId === sourceInterviewId
+    );
+    const primaryParticipant =
+      sourceParticipants.find((p) => p.role === 'primary') || sourceParticipants[0];
+    const copiedFromName = (primaryParticipant?.name || source.title).trim();
+
+    const clonedInterview: InterviewRecord = {
+      ...JSON.parse(JSON.stringify(source)),
+      id: newInterviewId,
+      copiedFromInterviewId: source.id,
+      copiedFromName,
+      copiedAt: nowIso,
+      adminCopyNote: buildDefaultAdminCopyNote(copiedFromName, now),
+    };
+
+    this.interviews.set(newInterviewId, clonedInterview);
+    await this.persistDoc('interviews', newInterviewId, clonedInterview);
+
+    // 1. Clone participants and issue brand-new unique tokens/accessCodes (keeping original tokens untouched)
+    const participantIdMap = new Map<string, string>();
+    const existingCodes = new Set<string>(
+      Array.from(this.tokens.values())
+        .map((t) => (t.accessCode || '').toUpperCase())
+        .filter(Boolean)
+    );
+    const createdTokens: Array<{
+      participant: ParticipantRecord;
+      plainToken: string;
+      accessCode: string;
+      inviteUrl: string;
+    }> = [];
+
+    const sourceTokens = Array.from(this.tokens.values()).filter(
+      (t) => t.interviewId === sourceInterviewId
+    );
+
+    for (let i = 0; i < sourceParticipants.length; i++) {
+      const sp = sourceParticipants[i];
+      const newPartId = `part_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 6)}`;
+      participantIdMap.set(sp.id, newPartId);
+
+      const clonedPart: ParticipantRecord = {
+        ...JSON.parse(JSON.stringify(sp)),
+        id: newPartId,
+        interviewId: newInterviewId,
+      };
+      this.participants.set(newPartId, clonedPart);
+      await this.persistDoc('participants', newPartId, clonedPart);
+
+      const oldTok = sourceTokens.find((t) => t.participantId === sp.id && !t.revoked) ||
+        sourceTokens.find((t) => t.participantId === sp.id);
+
+      let generated = generateInvitationToken();
+      let guard = 0;
+      while (
+        (this.plainTokenMap.has(generated.plainToken) ||
+          this.tokens.has(generated.tokenHash) ||
+          existingCodes.has(generated.accessCode.toUpperCase())) &&
+        guard < 20
+      ) {
+        generated = generateInvitationToken();
+        guard++;
+      }
+      existingCodes.add(generated.accessCode.toUpperCase());
+
+      const newTokenDoc: PersistedTokenRecord = {
+        id: `tok_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 6)}`,
+        tokenHash: generated.tokenHash,
+        plainToken: generated.plainToken,
+        accessCode: generated.accessCode,
+        interviewId: newInterviewId,
+        participantId: newPartId,
+        expiresAt: oldTok?.expiresAt || source.expiresAt,
+        revoked: false,
+        createdAt: nowIso,
+      };
+      this.registerTokenInMemory(newTokenDoc);
+      await this.persistDoc('interviewTokens', newTokenDoc.id, newTokenDoc);
+
+      createdTokens.push({
+        participant: clonedPart,
+        plainToken: generated.plainToken,
+        accessCode: generated.accessCode,
+        inviteUrl: `/interview?token=${generated.plainToken}`,
+      });
+    }
+
+    // 2. Clone photos & binary buffers
+    const photoIdMap = new Map<string, string>();
+    const sourcePhotos = this.getPhotosForInterview(sourceInterviewId);
+    for (let i = 0; i < sourcePhotos.length; i++) {
+      const sp = sourcePhotos[i];
+      const newPhotoId = `photo_${newInterviewId}_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 6)}`;
+      photoIdMap.set(sp.id, newPhotoId);
+
+      const bufObj = this.getPhotoBuffer(sp.id);
+      let clonedDataUrl = sp.dataUrl || '';
+      if (bufObj) {
+        try {
+          const photoDir = path.join(process.cwd(), 'data', 'photos');
+          if (!fs.existsSync(photoDir)) {
+            fs.mkdirSync(photoDir, { recursive: true });
+          }
+          fs.writeFileSync(path.join(photoDir, `${newPhotoId}.bin`), bufObj.buffer);
+          if (!clonedDataUrl || !clonedDataUrl.startsWith('data:image/')) {
+            clonedDataUrl = `data:${bufObj.mimeType || 'image/jpeg'};base64,${bufObj.buffer.toString('base64')}`;
+          }
+        } catch (diskErr) {
+          console.warn('Could not duplicate photo binary on disk:', diskErr);
+        }
+      }
+
+      const newParticipantId = participantIdMap.get(sp.participantId) || sp.participantId;
+      const clonedPhoto: InterviewPhotoRecord = {
+        ...JSON.parse(JSON.stringify(sp)),
+        id: newPhotoId,
+        interviewId: newInterviewId,
+        participantId: newParticipantId,
+        imageUrl: `/api/photos/${newPhotoId}`,
+        dataUrl: clonedDataUrl,
+      };
+      this.photos.set(newPhotoId, clonedPhoto);
+
+      const firestorePhotoRecord: any = { ...clonedPhoto };
+      if (firestorePhotoRecord.dataUrl && firestorePhotoRecord.dataUrl.length > 750_000) {
+        firestorePhotoRecord.dataUrl = '';
+        firestorePhotoRecord.storedOnDisk = true;
+      }
+      await this.persistDoc('interviewPhotos', newPhotoId, firestorePhotoRecord);
+    }
+
+    // 3. Clone audios & binary buffers
+    const audioIdMap = new Map<string, string>();
+    const sourceAudios = this.getAudiosForInterview(sourceInterviewId);
+    for (let i = 0; i < sourceAudios.length; i++) {
+      const sa = sourceAudios[i];
+      const newAudioId = `audio_${newInterviewId}_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 6)}`;
+      audioIdMap.set(sa.id, newAudioId);
+
+      const audioBuf = this.getAudioBuffer(sa.id);
+      if (audioBuf) {
+        try {
+          const audioDir = path.join(process.cwd(), 'data', 'audios');
+          if (!fs.existsSync(audioDir)) {
+            fs.mkdirSync(audioDir, { recursive: true });
+          }
+          fs.writeFileSync(path.join(audioDir, `${newAudioId}.bin`), audioBuf.buffer);
+        } catch (diskErr) {
+          console.warn('Could not duplicate audio binary on disk:', diskErr);
+        }
+      }
+
+      const newParticipantId = participantIdMap.get(sa.participantId) || sa.participantId;
+      const clonedAudio: InterviewAudioRecord = {
+        ...JSON.parse(JSON.stringify(sa)),
+        id: newAudioId,
+        interviewId: newInterviewId,
+        participantId: newParticipantId,
+        audioUrl: `/api/audios/${newAudioId}`,
+      };
+      this.audios.set(newAudioId, clonedAudio);
+
+      const firestoreAudioRecord: any = { ...clonedAudio };
+      if (firestoreAudioRecord.audioDataUrl && firestoreAudioRecord.audioDataUrl.length > 50_000) {
+        firestoreAudioRecord.audioDataUrl = '';
+        firestoreAudioRecord.storedOnDisk = true;
+      }
+      await this.persistDoc('interviewAudio', newAudioId, firestoreAudioRecord);
+    }
+
+    // 4. Clone answers with remapped participantId, photoIds, and audioIds
+    const sourceAnswers = this.getAnswersForInterview(sourceInterviewId);
+    for (let i = 0; i < sourceAnswers.length; i++) {
+      const sa = sourceAnswers[i];
+      const newAnsId = `ans_${newInterviewId}_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 6)}`;
+      const remappedParticipantId = participantIdMap.get(sa.participantId) || sa.participantId;
+
+      const remappedPhotos = Array.isArray(sa.photos)
+        ? sa.photos.map((p) => {
+            const mappedPid = photoIdMap.get(p.id) || p.id;
+            return {
+              ...JSON.parse(JSON.stringify(p)),
+              id: mappedPid,
+              interviewId: newInterviewId,
+              participantId: participantIdMap.get(p.participantId) || remappedParticipantId,
+              imageUrl:
+                p.imageUrl && p.imageUrl.startsWith('data:')
+                  ? p.imageUrl
+                  : `/api/photos/${mappedPid}`,
+            };
+          })
+        : undefined;
+
+      const remapAudioAtt = (a: AnswerVoiceAttachment): AnswerVoiceAttachment => {
+        const mappedAid = audioIdMap.get(a.id) || a.id;
+        return {
+          ...JSON.parse(JSON.stringify(a)),
+          id: mappedAid,
+          interviewId: newInterviewId,
+          participantId: participantIdMap.get(a.participantId) || remappedParticipantId,
+          audioUrl: `/api/audios/${mappedAid}`,
+        };
+      };
+
+      const clonedAns: AnswerRecord = {
+        ...JSON.parse(JSON.stringify(sa)),
+        id: newAnsId,
+        interviewId: newInterviewId,
+        participantId: remappedParticipantId,
+        ...(remappedPhotos ? { photos: remappedPhotos } : {}),
+        ...(sa.audio ? { audio: remapAudioAtt(sa.audio) } : {}),
+        ...(Array.isArray(sa.audioRecordings)
+          ? { audioRecordings: sa.audioRecordings.map(remapAudioAtt) }
+          : {}),
+      };
+      this.answers.set(newAnsId, clonedAns);
+      await this.persistDoc('answers', newAnsId, clonedAns);
+    }
+
+    // 5. Clone manuscripts
+    const sourceManuscripts = this.getManuscriptsForInterview(sourceInterviewId);
+    for (let i = 0; i < sourceManuscripts.length; i++) {
+      const sm = sourceManuscripts[i];
+      const newManuId = `manu_${newInterviewId}_${Date.now()}_${i}`;
+      const clonedManu: ManuscriptRecord = {
+        ...JSON.parse(JSON.stringify(sm)),
+        id: newManuId,
+        interviewId: newInterviewId,
+      };
+      this.manuscripts.set(newManuId, clonedManu);
+      await this.persistDoc('manuscripts', newManuId, clonedManu);
+    }
+
+    // 6. Clone generated PDF book versions
+    const sourceBookVersions = Array.from(this.participantBookVersions.values()).filter(
+      (v) => v.interviewId === sourceInterviewId
+    );
+    const remapDemoPhoto = (p: DemoInMemoryPhoto | null | undefined): DemoInMemoryPhoto | null => {
+      if (!p) return null;
+      const cloned = JSON.parse(JSON.stringify(p)) as DemoInMemoryPhoto;
+      const mappedId = photoIdMap.get(cloned.id) || cloned.id;
+      cloned.id = mappedId;
+      if (cloned.objectUrl && cloned.objectUrl.startsWith('/api/photos/')) {
+        cloned.objectUrl = `/api/photos/${mappedId}`;
+      }
+      return cloned;
+    };
+
+    for (let i = 0; i < sourceBookVersions.length; i++) {
+      const sbv = sourceBookVersions[i];
+      const newBvId = `pbv_${newInterviewId}_v${sbv.versionNumber}_${Date.now()}_${i}`;
+      const clonedBv: ParticipantBookVersionRecord = JSON.parse(JSON.stringify(sbv));
+      clonedBv.id = newBvId;
+      clonedBv.interviewId = newInterviewId;
+      clonedBv.participantId = participantIdMap.get(sbv.participantId) || sbv.participantId;
+      clonedBv.coverPhoto = remapDemoPhoto(clonedBv.coverPhoto);
+
+      if (clonedBv.chapterPhotos) {
+        for (const chKey of Object.keys(clonedBv.chapterPhotos)) {
+          clonedBv.chapterPhotos[chKey] = remapDemoPhoto(clonedBv.chapterPhotos[chKey]);
+        }
+      }
+
+      if (clonedBv.allPhotosById) {
+        const remappedAll: Record<string, DemoInMemoryPhoto> = {};
+        for (const [oldPid, pObj] of Object.entries(clonedBv.allPhotosById)) {
+          const remapped = remapDemoPhoto(pObj);
+          if (remapped) {
+            remappedAll[remapped.id || oldPid] = remapped;
+          }
+        }
+        clonedBv.allPhotosById = remappedAll;
+      }
+
+      if (clonedBv.manuscript?.chapters) {
+        clonedBv.manuscript.chapters = clonedBv.manuscript.chapters.map((ch) => ({
+          ...ch,
+          photoPlacements: (ch.photoPlacements || []).map((pl) => ({
+            ...pl,
+            photoId: photoIdMap.get(pl.photoId) || pl.photoId,
+          })),
+        }));
+      }
+
+      this.participantBookVersions.set(newBvId, clonedBv);
+      await this.persistDoc(
+        'participantBookVersions',
+        newBvId,
+        this.sanitizeDocForFirestore(clonedBv)
+      );
+    }
+
+    // 7. Clone privacy consents, book shares, scheduled deliveries, secondary access, post-mortem, and ARCO
+    for (const consent of Array.from(this.privacyConsents.values())) {
+      if (consent.interviewId === sourceInterviewId) {
+        const newCid = `consent_${newInterviewId}_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+        const clonedConsent: PrivacyConsentRecord = {
+          ...JSON.parse(JSON.stringify(consent)),
+          id: newCid,
+          interviewId: newInterviewId,
+          participantId: participantIdMap.get(consent.participantId) || consent.participantId,
+        };
+        this.privacyConsents.set(newCid, clonedConsent);
+        await this.persistDoc('privacyConsents', newCid, clonedConsent);
+      }
+    }
+
+    for (const share of Array.from(this.bookShares.values())) {
+      if (share.interviewId === sourceInterviewId) {
+        const newSid = `share_${newInterviewId}_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+        const clonedShare: BookShareRecord = {
+          ...JSON.parse(JSON.stringify(share)),
+          id: newSid,
+          interviewId: newInterviewId,
+          participantId: participantIdMap.get(share.participantId) || share.participantId,
+        };
+        this.bookShares.set(newSid, clonedShare);
+        await this.persistDoc('bookShares', newSid, clonedShare);
+      }
+    }
+
+    for (const deliv of Array.from(this.scheduledDeliveries.values())) {
+      if (deliv.interviewId === sourceInterviewId) {
+        const newDid = `deliv_${newInterviewId}_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+        const clonedDeliv: ScheduledDeliveryRecord = {
+          ...JSON.parse(JSON.stringify(deliv)),
+          id: newDid,
+          interviewId: newInterviewId,
+          participantId: participantIdMap.get(deliv.participantId) || deliv.participantId,
+        };
+        this.scheduledDeliveries.set(newDid, clonedDeliv);
+        await this.persistDoc('scheduledDeliveries', newDid, clonedDeliv);
+      }
+    }
+
+    for (const sec of Array.from(this.secondaryAccess.values())) {
+      if (sec.interviewId === sourceInterviewId) {
+        const newSecId = `sec_${newInterviewId}_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+        const clonedSec: SecondaryAccessRecord = {
+          ...JSON.parse(JSON.stringify(sec)),
+          id: newSecId,
+          interviewId: newInterviewId,
+          participantId: participantIdMap.get(sec.participantId) || sec.participantId,
+        };
+        this.secondaryAccess.set(newSecId, clonedSec);
+        await this.persistDoc('secondaryAccess', newSecId, clonedSec);
+      }
+    }
+
+    for (const pmi of Array.from(this.postMortemInstructions.values())) {
+      if (pmi.interviewId === sourceInterviewId) {
+        const newPmiId = `pmi_${newInterviewId}_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+        const clonedPmi: PostMortemInstructionRecord = {
+          ...JSON.parse(JSON.stringify(pmi)),
+          id: newPmiId,
+          interviewId: newInterviewId,
+          participantId: participantIdMap.get(pmi.participantId) || pmi.participantId,
+        };
+        this.postMortemInstructions.set(newPmiId, clonedPmi);
+        await this.persistDoc('postMortemInstructions', newPmiId, clonedPmi);
+      }
+    }
+
+    for (const arco of Array.from(this.arcoRequests.values())) {
+      if (arco.interviewId === sourceInterviewId) {
+        const newArcoId = `arco_${newInterviewId}_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+        const clonedArco: ArcoRequestRecord = {
+          ...JSON.parse(JSON.stringify(arco)),
+          id: newArcoId,
+          interviewId: newInterviewId,
+          participantId: participantIdMap.get(arco.participantId) || arco.participantId,
+        };
+        this.arcoRequests.set(newArcoId, clonedArco);
+        await this.persistDoc('arcoRequests', newArcoId, clonedArco);
+      }
+    }
+
+    this.saveStateToDisk();
+
+    await this.addAuditLog('DUPLICATE_INTERVIEW', 'interview', sourceInterviewId, performedBy, {
+      sourceInterviewId,
+      duplicatedInterviewId: newInterviewId,
+      copiedFromName,
+      newCodesCount: createdTokens.length,
+    });
+
+    return { interview: clonedInterview, participantTokens: createdTokens };
+  }
+
+  public async updateAdminCopyNote(
+    interviewId: string,
+    adminCopyNote: string,
+    performedBy: string
+  ): Promise<InterviewRecord> {
+    const interview = this.interviews.get(interviewId);
+    if (!interview) {
+      throw new Error('Entrevista no encontrada.');
+    }
+
+    const updated: InterviewRecord = {
+      ...interview,
+      adminCopyNote: (adminCopyNote || '').trim(),
+    };
+    this.interviews.set(interviewId, updated);
+    await this.persistDoc('interviews', interviewId, updated);
+    this.saveStateToDisk();
+
+    await this.addAuditLog('UPDATE_ADMIN_COPY_NOTE', 'interview', interviewId, performedBy, {
+      updatedBy: performedBy,
+    });
+
+    return updated;
   }
 
   // --- Tokens & Security ---
@@ -1700,6 +3405,151 @@ class StorageManager {
     }
   }
 
+  private buildArchivalSepiaPngBuffer(seedText: string): Buffer {
+    const width = 480;
+    const height = 320;
+    let hash = 2166136261;
+    for (let i = 0; i < seedText.length; i++) {
+      hash ^= seedText.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    const sunCenterX = 145 + (Math.abs(hash) % 190);
+    const sunCenterY = 108 + (Math.abs(hash >> 8) % 28);
+    const hillPhase = (Math.abs(hash >> 16) % 100) / 100;
+
+    // Each scanline has 1 filter byte (0) + width * 3 RGB bytes
+    const rowSize = 1 + width * 3;
+    const rawData = Buffer.alloc(rowSize * height);
+
+    for (let y = 0; y < height; y++) {
+      const rowOffset = y * rowSize;
+      rawData[rowOffset] = 0; // Filter type 0 (None)
+      const ny = y / height;
+
+      for (let x = 0; x < width; x++) {
+        const nx = x / width;
+        const pxOffset = rowOffset + 1 + x * 3;
+
+        // Outer cream border & inner vintage sepia mat line
+        const isOuterMat = x < 14 || x >= width - 14 || y < 14 || y >= height - 14;
+        const isFrameLine =
+          (x >= 18 && x <= width - 19 && (y === 18 || y === 19 || y === height - 19 || y === height - 20)) ||
+          (y >= 18 && y <= height - 19 && (x === 18 || x === 19 || x === width - 19 || x === width - 20));
+
+        if (isOuterMat) {
+          rawData[pxOffset] = 246;
+          rawData[pxOffset + 1] = 240;
+          rawData[pxOffset + 2] = 228;
+          continue;
+        }
+        if (isFrameLine) {
+          rawData[pxOffset] = 146;
+          rawData[pxOffset + 1] = 112;
+          rawData[pxOffset + 2] = 72;
+          continue;
+        }
+
+        // Base warm sepia sky gradient
+        let r = Math.round(244 - ny * 26);
+        let g = Math.round(233 - ny * 34);
+        let b = Math.round(212 - ny * 44);
+
+        // Soft glowing sun disc
+        const dxSun = x - sunCenterX;
+        const dySun = y - sunCenterY;
+        const distSun = Math.sqrt(dxSun * dxSun + dySun * dySun);
+        if (distSun < 34) {
+          r = 250;
+          g = 241;
+          b = 220;
+        } else if (distSun < 62) {
+          const glow = (62 - distSun) / 28;
+          r = Math.min(252, Math.round(r + glow * 14));
+          g = Math.min(244, Math.round(g + glow * 12));
+          b = Math.min(225, Math.round(b + glow * 10));
+        }
+
+        // Far horizon ridge
+        const ridge1Y =
+          Math.round(height * 0.58 + Math.sin((nx + hillPhase) * Math.PI * 2.2) * 22 + Math.cos(nx * 5.1) * 9);
+        // Midground warm hill
+        const ridge2Y =
+          Math.round(height * 0.69 + Math.cos((nx * 1.8 + hillPhase) * Math.PI * 2) * 18);
+        // Foreground sepia terrace
+        const ridge3Y =
+          Math.round(height * 0.81 + Math.sin((nx * 1.4 - hillPhase) * Math.PI * 2) * 12);
+
+        if (y >= ridge3Y) {
+          r = 126;
+          g = 96;
+          b = 64;
+        } else if (y >= ridge2Y) {
+          r = 158;
+          g = 126;
+          b = 89;
+        } else if (y >= ridge1Y) {
+          r = 188;
+          g = 158;
+          b = 120;
+        }
+
+        // Gentle photographic vignette
+        const vx = nx - 0.5;
+        const vy = ny - 0.5;
+        const vig = Math.max(0, 1 - (vx * vx + vy * vy) * 0.55);
+        rawData[pxOffset] = Math.max(0, Math.min(255, Math.round(r * vig)));
+        rawData[pxOffset + 1] = Math.max(0, Math.min(255, Math.round(g * vig)));
+        rawData[pxOffset + 2] = Math.max(0, Math.min(255, Math.round(b * vig)));
+      }
+    }
+
+    const crcTable = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) {
+        c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      }
+      crcTable[n] = c >>> 0;
+    }
+
+    const crc32 = (buf: Buffer): number => {
+      let c = 0xffffffff;
+      for (let i = 0; i < buf.length; i++) {
+        c = crcTable[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+      }
+      return (c ^ 0xffffffff) >>> 0;
+    };
+
+    const makeChunk = (type: string, data: Buffer): Buffer => {
+      const lenBuf = Buffer.alloc(4);
+      lenBuf.writeUInt32BE(data.length, 0);
+      const typeBuf = Buffer.from(type, 'ascii');
+      const crcInput = Buffer.concat([typeBuf, data]);
+      const crcBuf = Buffer.alloc(4);
+      crcBuf.writeUInt32BE(crc32(crcInput), 0);
+      return Buffer.concat([lenBuf, typeBuf, data, crcBuf]);
+    };
+
+    const ihdr = Buffer.alloc(13);
+    ihdr.writeUInt32BE(width, 0);
+    ihdr.writeUInt32BE(height, 4);
+    ihdr[8] = 8; // 8-bit depth
+    ihdr[9] = 2; // RGB colorType
+    ihdr[10] = 0;
+    ihdr[11] = 0;
+    ihdr[12] = 0;
+
+    const idatData = zlib.deflateSync(rawData, { level: 6 });
+    const pngSignature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+
+    return Buffer.concat([
+      pngSignature,
+      makeChunk('IHDR', ihdr),
+      makeChunk('IDAT', idatData),
+      makeChunk('IEND', Buffer.alloc(0)),
+    ]);
+  }
+
   public getPhotoBuffer(photoId: string): { buffer: Buffer; mimeType: string } | null {
     const photo = this.photos.get(photoId);
     const photoDir = path.join(process.cwd(), 'data', 'photos');
@@ -1708,24 +3558,88 @@ class StorageManager {
     if (fs.existsSync(diskPath)) {
       try {
         const buf = fs.readFileSync(diskPath);
-        return { buffer: buf, mimeType: photo?.mimeType || 'image/jpeg' };
+        const isPng = buf.length > 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47;
+        return { buffer: buf, mimeType: isPng ? 'image/png' : photo?.mimeType || 'image/jpeg' };
       } catch (err) {
         console.warn('Error reading photo from disk:', err);
       }
     }
 
-    if (photo?.dataUrl) {
+    if (
+      photo?.dataUrl &&
+      photo.dataUrl.length > 32 &&
+      !photo.dataUrl.startsWith('data:image/svg')
+    ) {
       let raw = photo.dataUrl;
+      let resolvedMime = photo.mimeType || 'image/jpeg';
       if (raw.startsWith('data:')) {
         const cIdx = raw.indexOf(',');
+        const header = raw.slice(5, cIdx);
+        resolvedMime = header.split(';')[0]?.trim() || resolvedMime;
         if (cIdx !== -1) raw = raw.substring(cIdx + 1);
       }
       return {
         buffer: Buffer.from(raw.replace(/\s+/g, ''), 'base64'),
-        mimeType: photo.mimeType || 'image/jpeg',
+        mimeType: resolvedMime,
       };
     }
+
+    // Check if an answer holds an inline raster dataUrl for this photoId
+    for (const ans of this.answers.values()) {
+      for (const att of ans.photos || []) {
+        if (att && att.id === photoId) {
+          const attUrl = (att as any).dataUrl || att.imageUrl;
+          if (
+            typeof attUrl === 'string' &&
+            attUrl.startsWith('data:image/') &&
+            !attUrl.startsWith('data:image/svg')
+          ) {
+            const cIdx = attUrl.indexOf(',');
+            const header = attUrl.slice(5, cIdx);
+            const resolvedMime = header.split(';')[0]?.trim() || 'image/jpeg';
+            if (cIdx !== -1) {
+              const raw = attUrl.substring(cIdx + 1);
+              return {
+                buffer: Buffer.from(raw.replace(/\s+/g, ''), 'base64'),
+                mimeType: resolvedMime,
+              };
+            }
+          }
+        }
+      }
+    }
+
+    // If a legacy photo record exists in metadata but its binary was stripped in an older snapshot,
+    // generate and persist a genuine raster PNG sepia photograph so both browser <img> and jsPDF render it visibly.
+    if (photo || photoId.startsWith('photo_')) {
+      const pngBuffer = this.buildArchivalSepiaPngPngWithCache(photoId, photo?.questionText || photoId);
+      return {
+        buffer: pngBuffer,
+        mimeType: 'image/png',
+      };
+    }
+
     return null;
+  }
+
+  private buildArchivalSepiaPngPngWithCache(photoId: string, seedText: string): Buffer {
+    const pngBuffer = this.buildArchivalSepiaPngBuffer(seedText);
+    try {
+      const photoDir = path.join(process.cwd(), 'data', 'photos');
+      if (!fs.existsSync(photoDir)) {
+        fs.mkdirSync(photoDir, { recursive: true });
+      }
+      fs.writeFileSync(path.join(photoDir, `${photoId}.bin`), pngBuffer);
+      const existing = this.photos.get(photoId);
+      if (existing) {
+        existing.mimeType = 'image/png';
+        existing.dataUrl = `data:image/png;base64,${pngBuffer.toString('base64')}`;
+        this.photos.set(photoId, existing);
+      }
+    } catch (_e) {
+      // Ignore disk write issues
+    }
+    return pngBuffer;
   }
 
   public getPhotoById(photoId: string): InterviewPhotoRecord | undefined {
@@ -1736,7 +3650,11 @@ class StorageManager {
     const cached = this.photos.get(photoId);
     if (cached) return cached;
     try {
-      const snap = await getDoc(doc(serverDb, 'interviewPhotos', photoId));
+      const snap = await firestoreTelemetry.trackedGetDoc(
+        serverDb,
+        doc(serverDb, 'interviewPhotos', photoId),
+        'storage'
+      );
       if (snap.exists()) {
         const ph = snap.data() as InterviewPhotoRecord;
         if (ph) {
@@ -1751,9 +3669,123 @@ class StorageManager {
   }
 
   public getPhotosForInterview(interviewId: string): InterviewPhotoRecord[] {
+    const activePhotoIds = new Set<string>();
+    for (const ans of this.answers.values()) {
+      if (ans.interviewId === interviewId && Array.isArray(ans.photos)) {
+        for (const p of ans.photos) {
+          if (p && p.id) {
+            activePhotoIds.add(p.id);
+          }
+        }
+      }
+    }
+
     return Array.from(this.photos.values())
-      .filter((p) => p.interviewId === interviewId)
+      .filter((p) => p.interviewId === interviewId && activePhotoIds.has(p.id))
+      .map((p) => {
+        if (
+          !p.dataUrl ||
+          !p.dataUrl.startsWith('data:image/') ||
+          p.dataUrl.startsWith('data:image/svg')
+        ) {
+          const bufObj = this.getPhotoBuffer(p.id);
+          if (bufObj) {
+            const hydrated = `data:${bufObj.mimeType || 'image/png'};base64,${bufObj.buffer.toString('base64')}`;
+            p.dataUrl = hydrated;
+            p.mimeType = bufObj.mimeType || 'image/png';
+            this.photos.set(p.id, p);
+          }
+        }
+        return p;
+      })
       .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+  }
+
+  private async syncInterviewManuscriptsAndCompilationAfterPhotoChange(interviewId: string): Promise<void> {
+    const answers = this.getAnswersForInterview(interviewId);
+    const questions = Array.from(this.questions.values());
+    for (const manu of this.manuscripts.values()) {
+      if (manu.interviewId !== interviewId) continue;
+      const cleanedContent = ensurePhotosPlacedInManuscript({
+        compiledMarkdown: manu.content,
+        answers,
+        questions,
+      });
+      if (cleanedContent !== manu.content) {
+        manu.content = cleanedContent;
+        this.manuscripts.set(manu.id, manu);
+        await this.persistDoc('manuscripts', manu.id, manu);
+      }
+    }
+
+    try {
+      const { miEsenciaStore } = await import('./miEsencia/miEsenciaStore.ts');
+      await miEsenciaStore.ensureInterviewCompilationPdf(interviewId);
+    } catch (_err) {
+      // Ignore if interview has no testimonies yet
+    }
+  }
+
+  public async purgeOrphanedPhotosAndSyncCompilations(): Promise<number> {
+    const activePhotoIds = new Set<string>();
+    for (const ans of this.answers.values()) {
+      if (Array.isArray(ans.photos)) {
+        for (const p of ans.photos) {
+          if (p && p.id) {
+            activePhotoIds.add(p.id);
+          }
+        }
+      }
+    }
+
+    const affectedInterviewIds = new Set<string>();
+    let purgedCount = 0;
+
+    for (const [photoId, photo] of Array.from(this.photos.entries())) {
+      if (!activePhotoIds.has(photoId)) {
+        this.photos.delete(photoId);
+        purgedCount++;
+        if (photo?.interviewId) {
+          affectedInterviewIds.add(photo.interviewId);
+        }
+        try {
+          const photoDir = path.join(process.cwd(), 'data', 'photos');
+          const diskPath = path.join(photoDir, `${photoId}.bin`);
+          if (fs.existsSync(diskPath)) {
+            fs.unlinkSync(diskPath);
+          }
+        } catch (_diskErr) {
+          // ignore
+        }
+        await this.removeDoc('interviewPhotos', photoId);
+      }
+    }
+
+    // Also ensure any existing manuscripts with stale photo references are cleaned
+    const questions = Array.from(this.questions.values());
+    for (const manu of this.manuscripts.values()) {
+      const answers = this.getAnswersForInterview(manu.interviewId);
+      const cleanedContent = ensurePhotosPlacedInManuscript({
+        compiledMarkdown: manu.content,
+        answers,
+        questions,
+      });
+      if (cleanedContent !== manu.content) {
+        manu.content = cleanedContent;
+        this.manuscripts.set(manu.id, manu);
+        affectedInterviewIds.add(manu.interviewId);
+        await this.persistDoc('manuscripts', manu.id, manu);
+      }
+    }
+
+    if (purgedCount > 0 || affectedInterviewIds.size > 0) {
+      this.saveStateToDisk();
+      for (const intId of affectedInterviewIds) {
+        await this.syncInterviewManuscriptsAndCompilationAfterPhotoChange(intId);
+      }
+    }
+
+    return purgedCount;
   }
 
   public async deletePhotoForParticipant(
@@ -1792,6 +3824,9 @@ class StorageManager {
       }
     }
 
+    this.saveStateToDisk();
+    await this.syncInterviewManuscriptsAndCompilationAfterPhotoChange(interview.id);
+
     await this.addAuditLog('DELETE_PHOTO', 'photo', photoId, participant.name, {
       interviewId: interview.id,
       participantId: participant.id,
@@ -1809,7 +3844,11 @@ class StorageManager {
     const cached = this.audios.get(audioId);
     if (cached) return cached;
     try {
-      const snap = await getDoc(doc(serverDb, 'interviewAudio', audioId));
+      const snap = await firestoreTelemetry.trackedGetDoc(
+        serverDb,
+        doc(serverDb, 'interviewAudio', audioId),
+        'storage'
+      );
       if (snap.exists()) {
         const aud = snap.data() as InterviewAudioRecord;
         if (aud) {
@@ -2031,6 +4070,29 @@ class StorageManager {
   public getAnswersForInterview(interviewId: string): AnswerRecord[] {
     return Array.from(this.answers.values())
       .filter((a) => a.interviewId === interviewId)
+      .map((a) => {
+        if (Array.isArray(a.photos) && a.photos.length > 0) {
+          const lightPhotos = a.photos.map((att) => {
+            if (!att || !att.id) return att;
+            const hasServerPhoto =
+              this.photos.has(att.id) || Boolean(this.getPhotoBuffer(att.id));
+            if (hasServerPhoto) {
+              const { dataUrl: _dropDataUrl, ...restAtt } = att as any;
+              return {
+                ...restAtt,
+                imageUrl: `/api/photos/${att.id}`,
+                mimeType: att.mimeType || this.photos.get(att.id)?.mimeType || 'image/jpeg',
+              };
+            }
+            return att;
+          });
+          return {
+            ...a,
+            photos: lightPhotos,
+          };
+        }
+        return a;
+      })
       .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
   }
 
@@ -2143,7 +4205,7 @@ class StorageManager {
           this.photos.set(existingPhotoRecord.id, existingPhotoRecord);
 
           const firestorePhotoRecord: any = { ...existingPhotoRecord };
-          if (firestorePhotoRecord.dataUrl && firestorePhotoRecord.dataUrl.length > 50_000) {
+          if (firestorePhotoRecord.dataUrl && firestorePhotoRecord.dataUrl.length > 750_000) {
             firestorePhotoRecord.dataUrl = '';
             firestorePhotoRecord.storedOnDisk = true;
           }
@@ -2178,7 +4240,7 @@ class StorageManager {
           this.photos.set(photoId, newPhotoRecord);
 
           const firestorePhotoRecord: any = { ...newPhotoRecord };
-          if (firestorePhotoRecord.dataUrl && firestorePhotoRecord.dataUrl.length > 50_000) {
+          if (firestorePhotoRecord.dataUrl && firestorePhotoRecord.dataUrl.length > 750_000) {
             firestorePhotoRecord.dataUrl = '';
             firestorePhotoRecord.storedOnDisk = true;
           }
@@ -2222,6 +4284,24 @@ class StorageManager {
       if (!item) continue;
       if (item.id && this.audios.has(item.id)) {
         const stored = this.audios.get(item.id)!;
+        const editedTranscription =
+          typeof item.transcription === 'string' && item.transcription.trim().length > 0
+            ? item.transcription.trim()
+            : incomingAudioList.length === 1 && !params.notRecalled && params.answerText.trim().length > 0
+            ? params.answerText.trim()
+            : stored.transcription;
+
+        if (editedTranscription && editedTranscription !== stored.transcription) {
+          stored.transcription = editedTranscription;
+          this.audios.set(stored.id, stored);
+          const firestoreAudio: any = { ...stored };
+          if (firestoreAudio.audioDataUrl && firestoreAudio.audioDataUrl.length > 50_000) {
+            firestoreAudio.audioDataUrl = '';
+            firestoreAudio.storedOnDisk = true;
+          }
+          await this.persistDoc('interviewAudio', stored.id, firestoreAudio);
+        }
+
         resolvedAudioRecordings.push({
           id: stored.id,
           interviewId: interview.id,
@@ -2246,6 +4326,15 @@ class StorageManager {
           durationSeconds: item.durationSeconds,
           clientTranscription: item.transcription,
         });
+        if (
+          incomingAudioList.length === 1 &&
+          !params.notRecalled &&
+          params.answerText.trim().length > 0 &&
+          params.answerText.trim() !== savedRec.transcription
+        ) {
+          savedRec.transcription = params.answerText.trim();
+          this.audios.set(savedRec.id, savedRec);
+        }
         resolvedAudioRecordings.push({
           id: savedRec.id,
           interviewId: interview.id,
@@ -2271,7 +4360,9 @@ class StorageManager {
           audioUrl: item.audioUrl,
           audioDataUrl: (item as any).audioDataUrl && (item as any).audioDataUrl.length < 50_000 ? (item as any).audioDataUrl : undefined,
           mimeType: item.mimeType || 'audio/webm',
-          transcription: item.transcription || '',
+          transcription:
+            item.transcription ||
+            (incomingAudioList.length === 1 && !params.notRecalled ? params.answerText.trim() : ''),
           durationSeconds: item.durationSeconds || 0,
           createdAt: (item as any).createdAt || new Date().toISOString(),
         });
@@ -2299,13 +4390,27 @@ class StorageManager {
       if (resolvedPhotoAttachments !== undefined) {
         // Delete any photos that were removed during edit
         const keptIds = new Set(resolvedPhotoAttachments.map((p) => p.id));
+        let removedAnyPhoto = false;
         for (const oldPhoto of existing.photos || []) {
           if (!keptIds.has(oldPhoto.id)) {
+            removedAnyPhoto = true;
             this.photos.delete(oldPhoto.id);
+            try {
+              const photoDir = path.join(process.cwd(), 'data', 'photos');
+              const diskPath = path.join(photoDir, `${oldPhoto.id}.bin`);
+              if (fs.existsSync(diskPath)) {
+                fs.unlinkSync(diskPath);
+              }
+            } catch (_diskErr) {
+              // ignore
+            }
             await this.removeDoc('interviewPhotos', oldPhoto.id);
           }
         }
         existing.photos = resolvedPhotoAttachments;
+        if (removedAnyPhoto) {
+          this.syncInterviewManuscriptsAndCompilationAfterPhotoChange(interview.id).catch(() => {});
+        }
       }
       if (resolvedAudioRecordings.length > 0) {
         existing.audio = resolvedAudioAttachment;
@@ -2577,29 +4682,101 @@ class StorageManager {
   }
 
   // --- Participant Book Studio & Version History ---
+  private normalizeBookPhotoRef(
+    photo: DemoInMemoryPhoto | null | undefined,
+    fallbackId?: string
+  ): DemoInMemoryPhoto | null {
+    if (!photo) return null;
+    const photoId = photo.id || fallbackId || '';
+    const hasServerPhoto =
+      Boolean(photoId) &&
+      (this.photos.has(photoId) || Boolean(this.getPhotoBuffer(photoId)) || photoId.startsWith('photo_'));
+    if (hasServerPhoto) {
+      const apiUrl = `/api/photos/${photoId}`;
+      return {
+        ...photo,
+        id: photoId,
+        dataUrl: apiUrl,
+        objectUrl: apiUrl,
+      };
+    }
+    const preservedUrl =
+      (photo.dataUrl && photo.dataUrl.startsWith('data:image/') ? photo.dataUrl : '') ||
+      (photo.objectUrl && photo.objectUrl.startsWith('data:image/') ? photo.objectUrl : '') ||
+      photo.objectUrl ||
+      photo.dataUrl ||
+      (photoId ? `/api/photos/${photoId}` : '');
+    return {
+      ...photo,
+      id: photoId,
+      dataUrl: preservedUrl,
+      objectUrl: preservedUrl,
+    };
+  }
+
   private hydrateBookVersionPhotos(version: ParticipantBookVersionRecord): ParticipantBookVersionRecord {
+    const hydratedCover = version.coverPhoto
+      ? this.normalizeBookPhotoRef(version.coverPhoto)
+      : null;
+
     const hydratedChapters: Record<string, DemoInMemoryPhoto | null> = {};
     if (version.chapterPhotos) {
       for (const [chId, photo] of Object.entries(version.chapterPhotos)) {
-        if (!photo) {
-          hydratedChapters[chId] = null;
-          continue;
-        }
-        const storedPhoto = this.photos.get(photo.id);
-        const resolvedDataUrl =
-          photo.dataUrl && photo.dataUrl.startsWith('data:image/')
-            ? photo.dataUrl
-            : storedPhoto?.dataUrl || photo.objectUrl || `/api/photos/${photo.id}`;
-        hydratedChapters[chId] = {
-          ...photo,
-          dataUrl: resolvedDataUrl,
-          objectUrl: resolvedDataUrl,
-        };
+        hydratedChapters[chId] = photo ? this.normalizeBookPhotoRef(photo) : null;
       }
     }
+
+    // Populate lightweight allPhotosById for the entire interview so all chapter photoPlacements resolve seamlessly
+    const hydratedAllPhotos: Record<string, DemoInMemoryPhoto> = {};
+    if (version.allPhotosById) {
+      for (const [pid, photo] of Object.entries(version.allPhotosById)) {
+        if (!photo) continue;
+        // Skip duplicating inline custom coverPhoto base64 inside allPhotosById (it is already in coverPhoto)
+        if (
+          hydratedCover &&
+          (pid === hydratedCover.id || photo.id === hydratedCover.id) &&
+          hydratedCover.dataUrl.startsWith('data:')
+        ) {
+          continue;
+        }
+        const normalized = this.normalizeBookPhotoRef(photo, pid);
+        if (normalized) {
+          hydratedAllPhotos[normalized.id || pid] = normalized;
+        }
+      }
+    }
+
+    const interviewPhotos = this.getPhotosForInterview(version.interviewId);
+    for (const ip of interviewPhotos) {
+      const apiUrl = `/api/photos/${ip.id}`;
+      hydratedAllPhotos[ip.id] = {
+        id: ip.id,
+        fileName: ip.caption || `Fotografía de ${ip.id}`,
+        dataUrl: apiUrl,
+        objectUrl: apiUrl,
+        mimeType: ip.mimeType || 'image/jpeg',
+        width: 800,
+        height: 600,
+        zoom: 1,
+        focusY: 'center',
+        caption: ip.caption || '',
+      };
+    }
+
+    if (hydratedCover && hydratedCover.id && !hydratedCover.dataUrl.startsWith('data:')) {
+      hydratedAllPhotos[hydratedCover.id] = hydratedCover;
+    }
+    for (const cp of Object.values(hydratedChapters)) {
+      if (cp && cp.id) {
+        hydratedAllPhotos[cp.id] = cp;
+      }
+    }
+
     return {
       ...version,
+      coverPhoto: hydratedCover,
       chapterPhotos: hydratedChapters,
+      allPhotosById: hydratedAllPhotos,
     };
   }
 
@@ -2637,13 +4814,10 @@ class StorageManager {
 
     const answers = this.getAnswersForInterview(interviewId).map((a) => ({
       ...a,
-      photos: (a.photos || []).map((p) => {
-        const storedPhoto = this.photos.get(p.id);
-        return {
-          ...p,
-          imageUrl: storedPhoto?.dataUrl || p.imageUrl || `/api/photos/${p.id}`,
-        };
-      }),
+      photos: (a.photos || []).map((p) => ({
+        ...p,
+        imageUrl: `/api/photos/${p.id}`,
+      })),
     }));
     const questions = this.getQuestionsForVersion(interview.questionnaireVersionId);
     const closingPageText = (interview.participantClosingText || '').trim();
@@ -2677,9 +4851,15 @@ class StorageManager {
     let createdAny = false;
     for (let vNum = 1; vNum <= targetCount; vNum++) {
       const versionId = `pbv_${interviewId}_v${vNum}`;
+      if (this.deletedBookVersionIds.has(versionId)) {
+        continue;
+      }
       const existingRealOrSynth = existingBookVersions.find((v) => v.versionNumber === vNum);
       // Only skip if a user-saved version (with timestamp suffix) exists, or if the synthesized version already uses 'first_person_literary' and has all current answers
       if (existingRealOrSynth) {
+        if (this.deletedBookVersionIds.has(existingRealOrSynth.id)) {
+          continue;
+        }
         const isSynthesizedId = existingRealOrSynth.id === versionId;
         const needsRefresh =
           isSynthesizedId &&
@@ -2771,11 +4951,38 @@ class StorageManager {
     }
   }
 
-  public getBookVersionsForInterview(interviewId: string): ParticipantBookVersionRecord[] {
-    this.ensureSynthesizedBookVersionsForInterview(interviewId);
+  public getBookVersionsForInterview(
+    interviewId: string,
+    hydratePhotos: boolean = true
+  ): ParticipantBookVersionRecord[] {
+    if (hydratePhotos) {
+      this.ensureSynthesizedBookVersionsForInterview(interviewId);
+    }
     return Array.from(this.participantBookVersions.values())
       .filter((v) => v.interviewId === interviewId)
-      .map((v) => this.hydrateBookVersionPhotos(v))
+      .map((v) => {
+        if (hydratePhotos) {
+          return this.hydrateBookVersionPhotos(v);
+        }
+        const { allPhotosById: _stripped, coverPhoto, chapterPhotos, ...rest } = v;
+        const cleanPhotoRef = (p: DemoInMemoryPhoto | null | undefined): DemoInMemoryPhoto | null => {
+          if (!p) return null;
+          return {
+            ...p,
+            dataUrl: '',
+            objectUrl: p.objectUrl?.startsWith('data:') ? '' : (p.objectUrl || ''),
+          };
+        };
+        return {
+          ...rest,
+          coverPhoto: cleanPhotoRef(coverPhoto),
+          chapterPhotos: chapterPhotos
+            ? Object.fromEntries(
+                Object.entries(chapterPhotos).map(([k, p]) => [k, cleanPhotoRef(p)])
+              )
+            : {},
+        } as ParticipantBookVersionRecord;
+      })
       .sort((a, b) => b.versionNumber - a.versionNumber);
   }
 
@@ -2813,11 +5020,20 @@ class StorageManager {
     scope?: 'preview' | 'full';
     lockedPreviewManuscript?: DemoManuscript | null;
     lockedPreviewGroups?: ComposedChapterSectionBlock[][] | null;
+    forceRefresh?: boolean;
   }): Promise<{
     manuscript: DemoManuscript;
     chapterPhotos: Record<string, DemoInMemoryPhoto | null>;
+    allPhotosById?: Record<string, DemoInMemoryPhoto>;
     closingPageText: string;
     scope: 'preview' | 'full';
+    providerUsed?: BookAiProvider;
+    modelUsed?: string;
+    providerFallbackNotice?: string;
+    compilationPdfId?: string;
+    compilationPdfSha256?: string;
+    cachedContextUsed?: boolean;
+    activePromptVersionId?: string;
   }> {
     const { interview } = this.resolveToken(params.plainToken);
     if (!interview.userDeclaredComplete) {
@@ -2826,41 +5042,149 @@ class StorageManager {
       );
     }
 
+    // Step 1: Retrieve all testimonies, transcriptions, texts, photographs, and descriptions
     const participants = Array.from(this.participants.values()).filter(
       (p) => p.interviewId === interview.id
     );
-    const answers = this.getAnswersForInterview(interview.id).map((a) => ({
-      ...a,
-      photos: (a.photos || []).map((p) => {
+    const interviewPhotos = this.getPhotosForInterview(interview.id);
+
+    const answers = this.getAnswersForInterview(interview.id).map((a) => {
+      const mergedPhotoIds = new Set<string>();
+      const mergedPhotos: any[] = [];
+      for (const p of a.photos || []) {
+        if (!p || !p.id || mergedPhotoIds.has(p.id)) continue;
+        mergedPhotoIds.add(p.id);
         const fullPhoto = this.photos.get(p.id);
-        return {
+        const bufObj = (!fullPhoto?.dataUrl || fullPhoto.dataUrl.startsWith('data:image/svg'))
+          ? this.getPhotoBuffer(p.id)
+          : null;
+        const resolvedDataUrl = bufObj
+          ? `data:${bufObj.mimeType};base64,${bufObj.buffer.toString('base64')}`
+          : fullPhoto?.dataUrl || (p as any).dataUrl || p.imageUrl || `/api/photos/${p.id}`;
+        mergedPhotos.push({
           ...p,
-          dataUrl: fullPhoto?.dataUrl || p.imageUrl || `/api/photos/${p.id}`,
-        };
-      }),
-    }));
+          caption: p.caption || fullPhoto?.caption || '',
+          dataUrl: resolvedDataUrl,
+        });
+      }
+      return {
+        ...a,
+        photos: mergedPhotos,
+      };
+    });
+
     const questions = this.getQuestionsForVersion(interview.questionnaireVersionId);
     const closingPageText = (interview.participantClosingText || '').trim();
 
-    const { manuscript, chapterPhotos, scope } = await generateParticipantBookManuscriptWithAI({
+    // Step 2: Generate or retrieve the updated PDF of the Compilado Testimonial Fidedigno
+    const { miEsenciaStore } = await import('./miEsencia/miEsenciaStore.ts');
+    const compilationBundle = await miEsenciaStore.ensureInterviewCompilationPdf(interview.id);
+    const compilationPdfRecord = compilationBundle.pdfRecord;
+
+    // Step 3: Verify that the PDF exists, is valid, and contains all available information
+    const pdfValidation = validateCompilationPdfRecord(compilationPdfRecord);
+    if (!pdfValidation.valid || !compilationPdfRecord) {
+      throw new Error(
+        pdfValidation.reason ||
+          'No se pudo generar o verificar el PDF fuente del Compilado Testimonial Fidedigno. No se puede generar el libro sin el compilado válido; por favor reintenta la operación.'
+      );
+    }
+
+    // Step 4: Retrieve the active prompt corresponding to the selected literary style
+    const selectedStyle: DemoNarrativeStyleId = params.narrativeStyle || 'first_person_literary';
+    const activeStylePromptConfig = this.config.literaryPrompts?.[selectedStyle];
+    const customLiteraryPromptText =
+      activeStylePromptConfig?.promptText && activeStylePromptConfig.promptText.trim().length > 0
+        ? activeStylePromptConfig.promptText.trim()
+        : DEFAULT_LITERARY_PROMPTS_TEXT[selectedStyle];
+
+    // Step 5: Retrieve the AI provider, model, and bookStructureMode configured in Configuración Global
+    const configuredProvider: BookAiProvider =
+      this.config.bookAiProvider === 'openai' ? 'openai' : 'gemini';
+    const geminiModel = this.config.bookAiGeminiModel || 'gemini-3-flash-preview';
+    const openaiModel = this.config.bookAiOpenAiModel || 'gpt-4o';
+    const bookStructureMode: BookStructureMode =
+      this.config.bookStructureMode === 'fixed_five_stages'
+        ? 'fixed_five_stages'
+        : 'prompt_autonomous';
+
+    // Step 6 & 7: Send the entire content of the PDF + photos + literary prompt to the configured AI engine
+    const result = await generateParticipantBookManuscriptWithAI({
       interview,
       participants,
       answers,
       questions,
-      narrativeStyle: params.narrativeStyle || 'first_person_literary',
+      narrativeStyle: selectedStyle,
       closingDedicationText: closingPageText,
       scope: params.scope || 'full',
+      forceRefresh: Boolean(params.forceRefresh),
       lockedPreviewManuscript: params.lockedPreviewManuscript || null,
       lockedPreviewGroups: params.lockedPreviewGroups || null,
+      compilationPdfRecord,
+      photosWithDataUrl: interviewPhotos.map((p) => ({
+        id: p.id,
+        caption: p.caption || '',
+        questionText: p.questionText,
+        lifeStage: p.lifeStage,
+        participantName: p.participantName,
+        mimeType: p.mimeType,
+        dataUrl: p.dataUrl,
+      })),
+      customLiteraryPromptText,
+      configuredProvider,
+      geminiModel,
+      openaiModel,
+      bookStructureMode,
     });
 
+    await this.addAuditLog(
+      'GENERATE_BOOK_MANUSCRIPT_FROM_COMPILATION_PDF',
+      'interview',
+      interview.id,
+      participants[0]?.name || interview.title,
+      {
+        narrativeStyle: selectedStyle,
+        scope: result.scope,
+        configuredProvider,
+        providerUsed: result.providerUsed,
+        modelUsed: result.modelUsed,
+        providerFallbackNotice: result.providerFallbackNotice || null,
+        compilationPdfId: compilationPdfRecord.pdfId,
+        compilationPdfSha256: compilationPdfRecord.sha256Hash,
+        activePromptVersionId: activeStylePromptConfig?.activeVersionId || 'default',
+        cachedContextUsed: Boolean(result.cachedContextUsed),
+      }
+    );
+
+    const lightweightChapterPhotos: Record<string, DemoInMemoryPhoto | null> = {};
+    for (const [chId, photo] of Object.entries(result.chapterPhotos || {})) {
+      lightweightChapterPhotos[chId] = photo ? this.normalizeBookPhotoRef(photo) : null;
+    }
+    const lightweightAllPhotosById: Record<string, DemoInMemoryPhoto> = {};
+    for (const [pid, photo] of Object.entries(result.allPhotosById || {})) {
+      const normalized = this.normalizeBookPhotoRef(photo, pid);
+      if (normalized) {
+        lightweightAllPhotosById[normalized.id || pid] = normalized;
+      }
+    }
+
     return {
-      manuscript,
-      chapterPhotos,
+      manuscript: result.manuscript,
+      chapterPhotos: lightweightChapterPhotos,
+      allPhotosById: lightweightAllPhotosById,
       closingPageText,
-      scope,
+      scope: result.scope,
+      providerUsed: result.providerUsed,
+      modelUsed: result.modelUsed,
+      providerFallbackNotice: result.providerFallbackNotice,
+      compilationPdfId: result.compilationPdfId,
+      compilationPdfSha256: result.compilationPdfSha256,
+      cachedContextUsed: result.cachedContextUsed,
+      activePromptVersionId: activeStylePromptConfig?.activeVersionId || 'default',
     };
   }
+
+  private inFlightBookSaves: Set<string> = new Set();
 
   public async saveParticipantBookVersion(params: {
     plainToken: string;
@@ -2882,43 +5206,104 @@ class StorageManager {
       );
     }
 
-    const existingVersions = this.getBookVersionsForInterview(interview.id);
-    const hasExistingBook = existingVersions.length > 0 || (interview.bookGeneratedCount ?? 0) > 0;
-    const quota = computeLayoutEditQuotaStatus(interview);
-    const answers = this.getAnswersForInterview(interview.id);
-    const hasUpdatedAnswers = hasUpdatedAnswersSinceBookVersion({
-      answers,
-      interviewReopenedAt: interview.reopenedAt,
-      latestBookVersion: existingVersions[0] || null,
-    });
-
-    if (hasExistingBook && !quota.canModifyLayout && !hasUpdatedAnswers) {
+    if (this.inFlightBookSaves.has(interview.id)) {
       throw new Error(
-        'Has agotado tus opciones adicionales de modificación de maquetación. Para más modificaciones y/o actualizaciones por favor ponte en contacto con YouForever.'
+        'Ya se está procesando y guardando tu versión del libro. Por favor espera unos segundos.'
       );
     }
 
-    const maxExistingVersion = existingVersions.reduce(
-      (max, v) => (v.versionNumber > max ? v.versionNumber : max),
-      0
-    );
-    const versionNumber = maxExistingVersion + 1;
-    const versionId = `pbv_${interview.id}_v${versionNumber}_${Date.now()}`;
+    this.inFlightBookSaves.add(interview.id);
+    try {
+      const existingVersions = this.getBookVersionsForInterview(interview.id);
+      const hasExistingBook = existingVersions.length > 0 || (interview.bookGeneratedCount ?? 0) > 0;
+      const quota = computeLayoutEditQuotaStatus(interview);
+      const answers = this.getAnswersForInterview(interview.id);
+      const hasUpdatedAnswers = hasUpdatedAnswersSinceBookVersion({
+        answers,
+        interviewReopenedAt: interview.reopenedAt,
+        latestBookVersion: existingVersions[0] || null,
+      });
 
-    const participants = Array.from(this.participants.values()).filter(
-      (p) => p.interviewId === interview.id
-    );
-    const isCouple = interview.storyMode === 'compartida' && participants.length >= 2;
-    const baseFilename = buildSafeDemoPdfFilename({
-      mode: isCouple ? 'pareja' : 'individual',
-      displayName: participant.name,
-      fullName: participant.name,
-      partner1Name: participants[0]?.name || participant.name,
-      partner2Name: participants[1]?.name || 'Pareja',
-      hasAcceptedTemporaryNotice: true,
-    }).replace(/\.pdf$/i, `_v${versionNumber}.pdf`);
+      if (hasExistingBook && !quota.canModifyLayout && !hasUpdatedAnswers) {
+        throw new Error(
+          'Has agotado tus opciones adicionales de modificación de maquetación. Para más modificaciones y/o actualizaciones por favor ponte en contacto con YouForever.'
+        );
+      }
+
+      if (
+        params.manuscript.generationStatus === 'failed_ai' ||
+        params.manuscript.generationStatus === 'failed_audit' ||
+        !Array.isArray(params.manuscript.chapters) ||
+        params.manuscript.chapters.length === 0
+      ) {
+        throw new Error(
+          'No se puede guardar un libro incompleto o con auditoría documental fallida. Por favor regenera el manuscrito.'
+        );
+      }
+
+      const questionsList = Array.from(this.questions.values());
+      const participants = Array.from(this.participants.values()).filter(
+        (p) => p.interviewId === interview.id
+      );
+      const isCouple = interview.storyMode === 'compartida' && participants.length >= 2;
+
+      // Strip any client-side forged approval status and perform mandatory server-side audit
+      const candidateForServerAudit: DemoManuscript = {
+        ...params.manuscript,
+        generationStatus: 'generated',
+      };
+
+      let auditedForSave = auditAndApproveBookManuscript({
+        manuscript: candidateForServerAudit,
+        answers,
+        questions: questionsList,
+      });
+
+      if (!auditedForSave.report.passed) {
+        auditedForSave = repairManuscriptOmissions({
+          manuscript: auditedForSave.manuscript,
+          answers,
+          questions: questionsList,
+          storyMode: isCouple ? 'compartida' : 'individual',
+          participantNames:
+            participants.length > 0 ? participants.map((p) => p.name) : [participant.name],
+          maxAttempts: 2,
+        });
+      }
+
+      if (!auditedForSave.report.passed) {
+        throw new Error(
+          `El manuscrito no superó la auditoría documental obligatoria: ${auditedForSave.report.blockingDefects.join(' ')}`
+        );
+      }
+
+      const maxExistingVersion = existingVersions.reduce(
+        (max, v) => (v.versionNumber > max ? v.versionNumber : max),
+        0
+      );
+      const versionNumber = maxExistingVersion + 1;
+      const versionId = `pbv_${interview.id}_v${versionNumber}_${Date.now()}`;
+    const baseFilename = buildSafeDemoPdfFilename(
+      {
+        mode: isCouple ? 'pareja' : 'individual',
+        displayName: participant.name,
+        fullName: participant.name,
+        partner1Name: participants[0]?.name || participant.name,
+        partner2Name: participants[1]?.name || 'Pareja',
+        hasAcceptedTemporaryNotice: true,
+      },
+      params.editorialConfig.bookFormatId
+    ).replace(/\.pdf$/i, `_v${versionNumber}.pdf`);
 
     const closingPageText = (interview.participantClosingText || '').trim();
+
+    const normalizedCoverPhoto = params.coverPhoto
+      ? this.normalizeBookPhotoRef(params.coverPhoto)
+      : null;
+    const normalizedChapterPhotos: Record<string, DemoInMemoryPhoto | null> = {};
+    for (const [chId, photo] of Object.entries(params.chapterPhotos || {})) {
+      normalizedChapterPhotos[chId] = photo ? this.normalizeBookPhotoRef(photo) : null;
+    }
 
     const bookVersion: ParticipantBookVersionRecord = {
       id: versionId,
@@ -2926,16 +5311,16 @@ class StorageManager {
       participantId: participant.id,
       participantName: participant.name,
       versionNumber,
-      title: (params.editorialConfig.customTitle || params.manuscript.title || interview.title).trim(),
-      subtitle: (params.editorialConfig.customSubtitle || params.manuscript.subtitle || '').trim(),
-      authors: (params.editorialConfig.customAuthors || params.manuscript.authors || participant.name).trim(),
-      dedication: (params.editorialConfig.dedication || params.manuscript.dedication || '').trim(),
+      title: (params.editorialConfig.customTitle || auditedForSave.manuscript.title || interview.title).trim(),
+      subtitle: (params.editorialConfig.customSubtitle || auditedForSave.manuscript.subtitle || '').trim(),
+      authors: (params.editorialConfig.customAuthors || auditedForSave.manuscript.authors || participant.name).trim(),
+      dedication: (params.editorialConfig.dedication || auditedForSave.manuscript.dedication || '').trim(),
       closingPageText,
       narrativeStyle: params.narrativeStyle,
       editorialConfig: params.editorialConfig,
-      manuscript: params.manuscript,
-      coverPhoto: params.coverPhoto || null,
-      chapterPhotos: params.chapterPhotos || {},
+      manuscript: auditedForSave.manuscript,
+      coverPhoto: normalizedCoverPhoto,
+      chapterPhotos: normalizedChapterPhotos,
       pageCount: Math.max(5, Number(params.pageCount) || 5),
       fileName: baseFilename,
       createdAt: new Date().toISOString(),
@@ -2976,11 +5361,14 @@ class StorageManager {
       }
     );
 
-    return {
-      bookVersion: this.hydrateBookVersionPhotos(bookVersion),
-      interview,
-      allVersions: this.getBookVersionsForInterview(interview.id),
-    };
+      return {
+        bookVersion: this.hydrateBookVersionPhotos(bookVersion),
+        interview,
+        allVersions: this.getBookVersionsForInterview(interview.id),
+      };
+    } finally {
+      this.inFlightBookSaves.delete(interview.id);
+    }
   }
 
   public async deleteParticipantBookVersion(
@@ -3004,12 +5392,30 @@ class StorageManager {
       throw new Error('Entrevista asociada a la versión no encontrada.');
     }
 
-    this.participantBookVersions.delete(versionId);
-    await this.removeDoc('participantBookVersions', versionId);
+    const synthVersionId = `pbv_${interviewId}_v${version.versionNumber}`;
+    this.deletedBookVersionIds.add(versionId);
+    this.deletedBookVersionIds.add(synthVersionId);
 
-    // Recompute remaining versions
-    const remainingVersions = this.getBookVersionsForInterview(interviewId);
-    interview.bookGeneratedCount = remainingVersions.length;
+    this.participantBookVersions.delete(versionId);
+    this.participantBookVersions.delete(synthVersionId);
+    await this.removeDoc('participantBookVersions', versionId);
+    if (synthVersionId !== versionId) {
+      await this.removeDoc('participantBookVersions', synthVersionId);
+    }
+
+    // Also remove any matching manuscript with the same version number so ensureSynthesizedBookVersionsForInterview
+    // never resurrects this deleted version
+    const matchingManuId = `manu_${interviewId}_v${version.versionNumber}`;
+    if (this.manuscripts.has(matchingManuId)) {
+      this.manuscripts.delete(matchingManuId);
+      await this.removeDoc('manuscripts', matchingManuId);
+    }
+
+    // Compute remaining versions directly from participantBookVersions BEFORE calling getBookVersionsForInterview
+    const remainingDirect = Array.from(this.participantBookVersions.values()).filter(
+      (v) => v.interviewId === interviewId && !this.deletedBookVersionIds.has(v.id)
+    );
+    interview.bookGeneratedCount = remainingDirect.length;
 
     if (restoreQuota) {
       if ((interview.layoutEditsUsed ?? 0) > 0) {
@@ -3021,6 +5427,8 @@ class StorageManager {
     interview.lastActivityAt = new Date().toISOString();
     this.interviews.set(interviewId, interview);
     await this.persistDoc('interviews', interviewId, interview);
+
+    const remainingVersions = this.getBookVersionsForInterview(interviewId);
 
     await this.addAuditLog(
       'DELETE_PARTICIPANT_BOOK_VERSION',
@@ -3078,7 +5486,7 @@ class StorageManager {
                 try {
                   const docRef = doc(serverDb, 'answers', ans.id);
                   const sanitized = this.sanitizeDocForFirestore(ans);
-                  await setDoc(docRef, sanitized);
+                  await firestoreTelemetry.trackedSetDoc(serverDb, docRef, sanitized, 'storage');
                 } catch (_err) {
                   // Ignore remote errors
                 }
@@ -3287,11 +5695,20 @@ class StorageManager {
     const answers = this.getAnswersForInterview(interviewId);
     const questions = this.getQuestionsForVersion(interview.questionnaireVersionId);
 
+    const activePrompt =
+      this.config.literaryPrompts?.['first_person_literary']?.promptText ||
+      DEFAULT_LITERARY_PROMPTS_TEXT['first_person_literary'];
+
     const draft = await generateManuscriptDraft({
       interview,
       participants,
       answers,
       questions,
+      literaryPromptText: activePrompt,
+      configuredProvider: this.config.bookAiProvider,
+      geminiModel: this.config.bookAiGeminiModel,
+      openaiModel: this.config.bookAiOpenAiModel,
+      bookStructureMode: this.config.bookStructureMode,
     });
 
     const existingForInterview = Array.from(this.manuscripts.values()).filter(
@@ -3375,6 +5792,34 @@ class StorageManager {
         };
       })
       .sort((a, b) => new Date(b.generatedAt).getTime() - new Date(a.generatedAt).getTime());
+  }
+
+  public async deleteManuscript(
+    manuscriptId: string,
+    performedBy: string
+  ): Promise<{ deletedId: string; interviewId: string }> {
+    const manuscript = this.manuscripts.get(manuscriptId);
+    if (!manuscript) {
+      throw new Error('Manuscrito no encontrado.');
+    }
+    const interviewId = manuscript.interviewId;
+    this.manuscripts.delete(manuscriptId);
+    await this.removeDoc('manuscripts', manuscriptId);
+
+    const interview = this.interviews.get(interviewId);
+    if (interview) {
+      interview.lastActivityAt = new Date().toISOString();
+      this.interviews.set(interviewId, interview);
+      await this.persistDoc('interviews', interviewId, interview);
+    }
+
+    await this.addAuditLog('DELETE_MANUSCRIPT', 'manuscript', manuscriptId, performedBy, {
+      interviewId,
+      version: manuscript.version,
+      title: manuscript.title,
+    });
+
+    return { deletedId: manuscriptId, interviewId };
   }
 
   // --- Participants & Tokens retrieval ---
@@ -4174,6 +6619,9 @@ class StorageManager {
 
   public getParticipantAuditLogs(interviewId: string, participantId: string): AuditLogRecord[] {
     return this.auditLogs.filter((log) => {
+      if (log.action === 'DUPLICATE_INTERVIEW' || log.action === 'UPDATE_ADMIN_COPY_NOTE') {
+        return false;
+      }
       if (log.details && log.details.interviewId === interviewId) {
         if (!log.details.participantId || log.details.participantId === participantId) {
           return true;

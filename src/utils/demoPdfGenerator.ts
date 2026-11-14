@@ -7,8 +7,12 @@ import {
   DemoInteriorStyleSpec,
   DemoThematicIllustrationId,
   buildSafeDemoPdfFilename,
+  formatPhotoEditorialCaption,
 } from '../logic/demoStoryRules.ts';
-import { drawForeverYouHorizontalLockupOnCanvas } from './foreverYouLogoDraw.ts';
+import {
+  drawForeverYouHorizontalLockupOnCanvas,
+  drawForeverYouInfinitySymbolOnCanvas,
+} from './foreverYouLogoDraw.ts';
 
 // Cache of decoded HTMLImageElement instances keyed by photo id or src so high-DPI canvas rendering is synchronous
 const decodedImageCache = new Map<string, HTMLImageElement>();
@@ -23,12 +27,14 @@ function getPhotoSrc(photo: DemoInMemoryPhoto | null | undefined): string {
 function decodeSingleImage(src: string): Promise<HTMLImageElement | null> {
   if (!src || typeof Image === 'undefined') return Promise.resolve(null);
   const cached = decodedImageCache.get(src);
-  if (cached && cached.complete && cached.naturalWidth > 0) {
+  if (cached && cached.complete && (cached.naturalWidth > 0 || cached.width > 0)) {
     return Promise.resolve(cached);
   }
   return new Promise((resolve) => {
     const img = new Image();
     img.crossOrigin = 'anonymous';
+    img.width = 640;
+    img.height = 420;
     img.onload = () => {
       decodedImageCache.set(src, img);
       resolve(img);
@@ -40,7 +46,7 @@ function decodeSingleImage(src: string): Promise<HTMLImageElement | null> {
 
 /**
  * Ensures all Google Fonts and any cover/chapter photographs in `composed` are decoded in memory
- * before rendering the 1:1 high-definition pages into the PDF document.
+ * and converted to real base64 raster Data URLs before rendering into the PDF document.
  */
 export async function preloadBookResourcesForPdf(
   composed: ComposedBookDocument
@@ -57,18 +63,67 @@ export async function preloadBookResourcesForPdf(
     // Ignore font readiness errors
   }
 
-  const srcs = new Set<string>();
-  const coverSrc = getPhotoSrc(composed.coverPhoto);
-  if (coverSrc) srcs.add(coverSrc);
+  // Gather all unique photo object references in the composed document
+  const allPhotoObjects: DemoInMemoryPhoto[] = [];
+  if (composed.coverPhoto) allPhotoObjects.push(composed.coverPhoto);
 
   for (const page of composed.pages) {
     for (const sec of page.sections || []) {
-      const s = getPhotoSrc(sec.photo);
-      if (s) srcs.add(s);
+      if (sec.photo) allPhotoObjects.push(sec.photo);
+      if (sec.paragraphPhotos) {
+        for (const pList of Object.values(sec.paragraphPhotos)) {
+          for (const pItem of pList || []) {
+            if (pItem) allPhotoObjects.push(pItem);
+          }
+        }
+      }
     }
   }
 
-  await Promise.all(Array.from(srcs).map((s) => decodeSingleImage(s)));
+  // Pre-fetch any photo that doesn't have a raster base64 dataUrl and convert it in-place
+  await Promise.all(
+    allPhotoObjects.map(async (ph) => {
+      const curDataUrl = ph.dataUrl || '';
+      const hasBase64 =
+        curDataUrl.startsWith('data:image/jpeg') ||
+        curDataUrl.startsWith('data:image/png') ||
+        curDataUrl.startsWith('data:image/webp') ||
+        curDataUrl.startsWith('data:image/jpg');
+
+      if (!hasBase64) {
+        const fetchTarget =
+          ph.objectUrl ||
+          ph.dataUrl ||
+          (ph.id && ph.id.startsWith('photo_') ? `/api/photos/${ph.id}` : '');
+
+        if (fetchTarget && typeof fetch !== 'undefined') {
+          try {
+            const resp = await fetch(fetchTarget);
+            if (resp.ok) {
+              const blob = await resp.blob();
+              const b64 = await new Promise<string>((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onloadend = () => resolve(String(reader.result || ''));
+                reader.onerror = reject;
+                reader.readAsDataURL(blob);
+              });
+              if (b64.startsWith('data:image/')) {
+                ph.dataUrl = b64;
+                ph.objectUrl = b64;
+              }
+            }
+          } catch (_fErr) {
+            // fallback gracefully
+          }
+        }
+      }
+
+      const finalSrc = getPhotoSrc(ph);
+      if (finalSrc) {
+        await decodeSingleImage(finalSrc);
+      }
+    })
+  );
 }
 
 function hexToRgb(hex: string): [number, number, number] {
@@ -382,14 +437,16 @@ function drawViewerPhotoBoxOnCanvas(params: {
 
   ctx.save();
   drawRoundedRectPath(ctx, boxX, topY, boxW, frameH, 8);
-  ctx.fillStyle = 'rgba(0, 0, 0, 0.04)';
+  ctx.fillStyle = '#F6F1E7';
   ctx.fill();
   ctx.clip();
 
   const src = getPhotoSrc(photo);
   const img = src ? decodedImageCache.get(src) : null;
-  if (img && img.naturalWidth > 0 && img.naturalHeight > 0) {
-    const imgRatio = img.naturalWidth / img.naturalHeight;
+  const effW = img ? img.naturalWidth || img.width || 640 : 0;
+  const effH = img ? img.naturalHeight || img.height || 420 : 0;
+  if (img && effW > 0 && effH > 0) {
+    const imgRatio = effW / effH;
     const boxRatio = boxW / frameH;
     let drawW = boxW;
     let drawH = frameH;
@@ -411,6 +468,37 @@ function drawViewerPhotoBoxOnCanvas(params: {
         ? topY + frameH - drawH
         : topY + (frameH - drawH) / 2;
     ctx.drawImage(img, drawX, drawY, drawW, drawH);
+  } else {
+    // Rich archival sepia plate fallback so the photo box never renders empty
+    const grad = ctx.createLinearGradient(boxX, topY, boxX, topY + frameH);
+    grad.addColorStop(0, '#F5EFE3');
+    grad.addColorStop(0.65, '#EAE0CE');
+    grad.addColorStop(1, '#DFD1B8');
+    ctx.fillStyle = grad;
+    ctx.fillRect(boxX, topY, boxW, frameH);
+
+    // Inner vintage mat border
+    ctx.strokeStyle = hexWithAlpha(borderColorHex, 0.45);
+    ctx.lineWidth = 1;
+    ctx.strokeRect(boxX + 6, topY + 6, boxW - 12, frameH - 12);
+
+    // Warm sun & horizon landscape silhouette
+    const midX = boxX + boxW / 2;
+    const midY = topY + frameH * 0.46;
+    ctx.fillStyle = hexWithAlpha(borderColorHex, 0.25);
+    ctx.beginPath();
+    ctx.arc(midX - 18, midY - 8, Math.min(14, frameH * 0.16), 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = hexWithAlpha(borderColorHex, 0.32);
+    ctx.beginPath();
+    ctx.moveTo(boxX + 14, topY + frameH - 10);
+    ctx.lineTo(midX - 28, midY + 4);
+    ctx.lineTo(midX + 4, midY + 16);
+    ctx.lineTo(midX + 34, midY - 2);
+    ctx.lineTo(boxX + boxW - 14, topY + frameH - 10);
+    ctx.closePath();
+    ctx.fill();
   }
   ctx.restore();
 
@@ -423,16 +511,26 @@ function drawViewerPhotoBoxOnCanvas(params: {
   ctx.restore();
 
   let nextY = topY + frameH + 4;
-  if (photo.caption && photo.caption.trim()) {
+  const editorialCaption = formatPhotoEditorialCaption(photo.caption);
+  if (editorialCaption) {
     ctx.save();
-    ctx.font = buildCanvasFontString('italic', 10, captionFontFamily);
+    ctx.font = buildCanvasFontString('italic', 9.5, captionFontFamily);
     ctx.fillStyle = captionColorHex;
     ctx.globalAlpha = 0.85;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
-    ctx.fillText(stripInlineFormatting(photo.caption), cx, nextY, boxW);
+    const captionLines = wrapPlainTextCanvas(
+      ctx,
+      stripInlineFormatting(editorialCaption),
+      boxW,
+      2
+    );
+    for (const line of captionLines) {
+      ctx.fillText(line, cx, nextY, boxW);
+      nextY += 12;
+    }
     ctx.restore();
-    nextY += 14;
+    nextY += 2;
   }
 
   return nextY + 4;
@@ -605,8 +703,16 @@ function renderRichParagraphOnCanvas(params: {
   ctx.textAlign = 'left';
   ctx.textBaseline = 'top';
 
+  const totalRequiredHeight = lines.length * lineHeightPx;
+  const effectiveLineHeightPx =
+    !measureOnly &&
+    lines.length > 1 &&
+    startY + totalRequiredHeight > maxBottomY &&
+    maxBottomY > startY
+      ? Math.max(fontSizePx * 1.15, (maxBottomY - startY) / lines.length)
+      : lineHeightPx;
+
   for (let i = 0; i < lines.length; i++) {
-    if (cursorY + fontSizePx > maxBottomY) break;
     const ln = lines[i];
     const isLastLine = i === lines.length - 1;
     const gaps = ln.tokens.filter(
@@ -639,11 +745,11 @@ function renderRichParagraphOnCanvas(params: {
         }
       }
     }
-    cursorY += lineHeightPx;
+    cursorY += effectiveLineHeightPx;
   }
 
   if (dropCapChar && lines.length < dropCapLinesCount) {
-    cursorY = Math.max(cursorY, startY + dropCapLinesCount * lineHeightPx);
+    cursorY = Math.max(cursorY, startY + dropCapLinesCount * effectiveLineHeightPx);
   }
 
   return cursorY;
@@ -1129,7 +1235,6 @@ function renderPageToViewerIdenticalDataUrl(
 
   for (let sIdx = 0; sIdx < sections.length; sIdx++) {
     const sec = sections[sIdx];
-    if (cursorY >= maxContentBottomY - 16) break;
 
     if (sIdx > 0) {
       cursorY += 4;
@@ -1198,8 +1303,13 @@ function renderPageToViewerIdenticalDataUrl(
       cursorY += 16;
     }
 
-    // Optional chapter photo (`h-28 sm:h-32` -> ~116px)
-    if (sec.photo && !sec.isContinuation && cursorY + 90 < maxContentBottomY) {
+    // Optional legacy chapter photo if paragraphPhotos is not set
+    if (
+      sec.photo &&
+      !sec.isContinuation &&
+      (!sec.paragraphPhotos || Object.keys(sec.paragraphPhotos).length === 0) &&
+      cursorY + 90 < maxContentBottomY
+    ) {
       const availForPhoto = Math.min(118, (maxContentBottomY - cursorY) * 0.42);
       if (availForPhoto >= 64) {
         cursorY = drawViewerPhotoBoxOnCanvas({
@@ -1216,11 +1326,10 @@ function renderPageToViewerIdenticalDataUrl(
       }
     }
 
-    // Chapter paragraphs
+    // Chapter paragraphs + paragraph-level photos placed in the exact story section
     for (let pIdx = 0; pIdx < sec.paragraphs.length; pIdx++) {
       const para = sec.paragraphs[pIdx];
       if (!para || !para.trim()) continue;
-      if (cursorY + bodyFontPx > maxContentBottomY) break;
 
       const useDrop =
         Boolean(interiorStyle.useDropCap) && !sec.isContinuation && pIdx === 0;
@@ -1242,7 +1351,28 @@ function renderPageToViewerIdenticalDataUrl(
         useDropCap: useDrop,
       });
 
-      cursorY += 8;
+      cursorY += 6;
+
+      const paraPhotos = sec.paragraphPhotos?.[pIdx] || [];
+      for (const pItem of paraPhotos) {
+        if (cursorY + 64 <= maxContentBottomY + 12) {
+          const availForPhoto = Math.min(114, Math.max(64, (maxContentBottomY - cursorY) * 0.55));
+          cursorY = drawViewerPhotoBoxOnCanvas({
+            ctx,
+            photo: pItem,
+            cx,
+            topY: cursorY,
+            containerW: contentW,
+            boxHeightPx: availForPhoto,
+            borderColorHex: interiorStyle.accentHex,
+            captionFontFamily: interiorStyle.bodyFontFamily,
+            captionColorHex: interiorStyle.mutedHex,
+          });
+          cursorY += 4;
+        }
+      }
+
+      cursorY += 2;
     }
 
     // Pull quote (`sec.pullQuote`) with 2px left accent bar
@@ -1318,7 +1448,7 @@ function renderRichParagraphPdf(params: {
   maxBottomY: number;
   textAlign: 'justify' | 'left';
   useDropCap: boolean;
-}): number {
+}): { cursorY: number; overflowText: string } {
   const {
     doc,
     rawText,
@@ -1336,7 +1466,7 @@ function renderRichParagraphPdf(params: {
   } = params;
 
   const trimmed = (rawText || '').trim();
-  if (!trimmed) return startY;
+  if (!trimmed) return { cursorY: startY, overflowText: '' };
 
   let workingText = trimmed;
   let dropCapChar = '';
@@ -1444,9 +1574,25 @@ function renderRichParagraphPdf(params: {
   doc.setFontSize(fontSizePt);
   doc.setTextColor(textRgb[0], textRgb[1], textRgb[2]);
 
+  // If the paragraph only slightly exceeds maxBottomY by 1-2 lines due to subtle font metric differences,
+  // slightly tighten leading down to 0.39 * fontSizePt so all lines fit on this page without overflow.
+  const totalHeightNeeded = lines.length * lineHeightMm;
+  const minLineHeightMm = fontSizePt * 0.38;
+  const canFitWithTightLeading =
+    startY + lines.length * minLineHeightMm <= maxBottomY + 3.5;
+  const effectiveLineHeightMm =
+    startY + totalHeightNeeded > maxBottomY && canFitWithTightLeading && lines.length > 1
+      ? Math.max(minLineHeightMm, (maxBottomY + 2.5 - startY) / lines.length)
+      : lineHeightMm;
+
+  const overflowLines: Array<typeof lines[0]> = [];
+
   for (let i = 0; i < lines.length; i++) {
-    if (cursorY > maxBottomY) break;
     const ln = lines[i];
+    if (cursorY > maxBottomY + 3.5 && i > 0) {
+      overflowLines.push(...lines.slice(i));
+      break;
+    }
     const isLastLine = i === lines.length - 1;
     const gapsCount = ln.tokens.filter(
       (t, idx) => idx < ln.tokens.length - 1 && t.spaceWidthMm > 0
@@ -1479,14 +1625,22 @@ function renderRichParagraphPdf(params: {
       }
     }
 
-    cursorY += lineHeightMm;
+    cursorY += effectiveLineHeightMm;
   }
 
   if (dropCapChar && lines.length < dropCapLinesCount) {
-    cursorY = Math.max(cursorY, startY + dropCapLinesCount * lineHeightMm);
+    cursorY = Math.max(cursorY, startY + dropCapLinesCount * effectiveLineHeightMm);
   }
 
-  return cursorY;
+  const overflowText =
+    overflowLines.length > 0
+      ? overflowLines
+          .map((ln) => ln.tokens.map((t) => t.word).join(' '))
+          .join(' ')
+          .trim()
+      : '';
+
+  return { cursorY, overflowText };
 }
 
 function drawRotatedDiamondPdf(doc: jsPDF, cx: number, cy: number, halfDiagMm: number): void {
@@ -1632,8 +1786,21 @@ function drawFittedPhoto(
   borderRgb: [number, number, number]
 ): void {
   try {
-    const imgRatio =
-      photo.width > 0 && photo.height > 0 ? photo.width / photo.height : 4 / 3;
+    const rawSrc = photo.dataUrl || photo.objectUrl || '';
+    const cachedImg = rawSrc ? decodedImageCache.get(rawSrc) : undefined;
+    const effW =
+      photo.width > 0
+        ? photo.width
+        : cachedImg && cachedImg.naturalWidth > 0
+        ? cachedImg.naturalWidth
+        : 800;
+    const effH =
+      photo.height > 0
+        ? photo.height
+        : cachedImg && cachedImg.naturalHeight > 0
+        ? cachedImg.naturalHeight
+        : 600;
+    const imgRatio = effW > 0 && effH > 0 ? effW / effH : 4 / 3;
     const boxRatio = boxW / boxH;
 
     let drawW = boxW;
@@ -1649,14 +1816,98 @@ function drawFittedPhoto(
     const drawX = boxX + (boxW - drawW) / 2;
     const drawY = boxY + (boxH - drawH) / 2;
 
-    const format = photo.mimeType.includes('png') ? 'PNG' : 'JPEG';
-    doc.addImage(photo.dataUrl, format, drawX, drawY, drawW, drawH, undefined, 'FAST');
+    let srcData = rawSrc;
+    let isRasterDataUrl =
+      srcData.startsWith('data:image/png') ||
+      srcData.startsWith('data:image/jpeg') ||
+      srcData.startsWith('data:image/jpg') ||
+      srcData.startsWith('data:image/webp');
+
+    if (
+      !isRasterDataUrl &&
+      cachedImg &&
+      cachedImg.naturalWidth > 0 &&
+      typeof document !== 'undefined'
+    ) {
+      try {
+        const offCanvas = document.createElement('canvas');
+        const maxDim = 1200;
+        const scale = Math.min(
+          1,
+          maxDim / Math.max(cachedImg.naturalWidth, cachedImg.naturalHeight, 1)
+        );
+        offCanvas.width = Math.max(1, Math.round(cachedImg.naturalWidth * scale));
+        offCanvas.height = Math.max(1, Math.round(cachedImg.naturalHeight * scale));
+        const offCtx = offCanvas.getContext('2d');
+        if (offCtx) {
+          offCtx.drawImage(cachedImg, 0, 0, offCanvas.width, offCanvas.height);
+          srcData = offCanvas.toDataURL('image/jpeg', 0.9);
+          isRasterDataUrl = srcData.startsWith('data:image/');
+        }
+      } catch (_convErr) {
+        // Fallback if canvas is tainted
+      }
+    }
+
+    if (isRasterDataUrl) {
+      const format =
+        (photo.mimeType && photo.mimeType.includes('png')) || srcData.startsWith('data:image/png')
+          ? 'PNG'
+          : 'JPEG';
+      doc.addImage(srcData, format, drawX, drawY, drawW, drawH, undefined, 'FAST');
+    } else {
+      // Draw a warm archival sepia photographic plate in headless environments without base64 data
+      doc.setFillColor(245, 239, 227);
+      doc.rect(drawX, drawY, drawW, drawH, 'F');
+      doc.setDrawColor(borderRgb[0], borderRgb[1], borderRgb[2]);
+      doc.setLineWidth(0.25);
+      doc.rect(drawX + 2, drawY + 2, drawW - 4, drawH - 4, 'S');
+      doc.setFillColor(224, 209, 184);
+      doc.circle(drawX + drawW * 0.38, drawY + drawH * 0.42, Math.min(4, drawH * 0.14), 'F');
+    }
     doc.setDrawColor(borderRgb[0], borderRgb[1], borderRgb[2]);
     doc.setLineWidth(0.3);
     doc.rect(drawX - 1, drawY - 1, drawW + 2, drawH + 2, 'S');
   } catch (_err) {
+    doc.setFillColor(245, 239, 227);
+    doc.rect(boxX, boxY, boxW, boxH, 'F');
     doc.setDrawColor(borderRgb[0], borderRgb[1], borderRgb[2]);
     doc.rect(boxX, boxY, boxW, boxH, 'S');
+  }
+}
+
+function renderCoverIllustrationEmblemImageDataUrl(
+  illustrationId: DemoThematicIllustrationId,
+  accentHex: string
+): string | null {
+  if (typeof document === 'undefined') return null;
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = 360;
+    canvas.height = 360;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    drawViewerThematicIllustrationOnCanvas(ctx, illustrationId, 180, 180, 150, accentHex);
+    const url = canvas.toDataURL('image/png');
+    return url.startsWith('data:image/png') ? url : null;
+  } catch (_e) {
+    return null;
+  }
+}
+
+function renderForeverYouSymbolImageDataUrl(theme: 'dark' | 'light'): string | null {
+  if (typeof document === 'undefined') return null;
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = 240;
+    canvas.height = 140;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    drawForeverYouInfinitySymbolOnCanvas(ctx, 120, 70, 210, theme);
+    const url = canvas.toDataURL('image/png');
+    return url.startsWith('data:image/png') ? url : null;
+  } catch (_e) {
+    return null;
   }
 }
 
@@ -1782,14 +2033,31 @@ function renderCoverPagePdf(
     );
   } else if (editorialConfig.coverVisualType === 'illustration') {
     const radius = Math.min(usableW * 0.135, availH * 0.35, 22);
-    drawVectorThematicIllustration(
-      doc,
+    const emblemPng = renderCoverIllustrationEmblemImageDataUrl(
       editorialConfig.coverIllustrationId,
-      cx,
-      visualCenterY,
-      radius,
-      accentRgb
+      coverPalette.accentHex
     );
+    if (emblemPng) {
+      doc.addImage(
+        emblemPng,
+        'PNG',
+        cx - radius,
+        visualCenterY - radius,
+        radius * 2,
+        radius * 2,
+        undefined,
+        'FAST'
+      );
+    } else {
+      drawVectorThematicIllustration(
+        doc,
+        editorialConfig.coverIllustrationId,
+        cx,
+        visualCenterY,
+        radius,
+        accentRgb
+      );
+    }
   } else {
     doc.setDrawColor(accentRgb[0], accentRgb[1], accentRgb[2]);
     doc.setFillColor(accentRgb[0], accentRgb[1], accentRgb[2]);
@@ -1884,7 +2152,7 @@ function renderTitleDedicationPagePdf(
   doc.text('YouForever', cx, H - format.marginBottomMm + 4, { align: 'center' });
 }
 
-function renderChapterContentPagePdf(
+function renderEditorialCreditsPagePdf(
   doc: jsPDF,
   composed: ComposedBookDocument,
   page: ComposedBookPage
@@ -1901,26 +2169,179 @@ function renderChapterContentPagePdf(
   doc.rect(0, 0, W, H, 'F');
   drawInteriorPageFrameIfApplicable(doc, composed);
 
+  const cx = W / 2;
+  const horizMargin = (format.marginInnerMm + format.marginOuterMm) / 2;
+  const contentW = W - horizMargin * 2;
+  const font = interiorStyle.pdfFontFamily;
+
+  let cursorY = H * 0.36;
+  drawInteriorOrnamentPdf(doc, interiorStyle.ornamentStyle, cx, cursorY, accentRgb);
+  cursorY += 10;
+
+  doc.setFont(font, 'bold');
+  doc.setFontSize(format.baseFontPt);
+  doc.setTextColor(textRgb[0], textRgb[1], textRgb[2]);
+  doc.text(stripInlineFormatting(page.title || 'Créditos Editoriales'), cx, cursorY, {
+    align: 'center',
+  });
+  cursorY += 8;
+
+  if (page.editorialCreditsText) {
+    doc.setFont(font, 'italic');
+    doc.setFontSize(format.baseFontPt - 1);
+    doc.setTextColor(mutedRgb[0], mutedRgb[1], mutedRgb[2]);
+    const lines = doc.splitTextToSize(
+      stripInlineFormatting(page.editorialCreditsText),
+      contentW - 16
+    );
+    doc.text(lines, cx, cursorY, { align: 'center' });
+    cursorY += lines.length * ((format.baseFontPt - 1) * 0.45) + 8;
+  }
+
+  doc.setFont(font, 'normal');
+  doc.setFontSize(8.5);
+  doc.setTextColor(mutedRgb[0], mutedRgb[1], mutedRgb[2]);
+  doc.text('Edición documental y biográfica • YouForever', cx, H - format.marginBottomMm, {
+    align: 'center',
+  });
+}
+
+function renderTableOfContentsPagePdf(
+  doc: jsPDF,
+  composed: ComposedBookDocument,
+  page: ComposedBookPage
+): void {
+  const { format, interiorStyle } = composed;
+  const W = format.widthMm;
+  const H = format.heightMm;
+  const bgRgb = hexToRgb(interiorStyle.pageBgHex);
+  const textRgb = hexToRgb(interiorStyle.textHex);
+  const mutedRgb = hexToRgb(interiorStyle.mutedHex);
+  const accentRgb = hexToRgb(interiorStyle.accentHex);
+
+  doc.setFillColor(bgRgb[0], bgRgb[1], bgRgb[2]);
+  doc.rect(0, 0, W, H, 'F');
+  drawInteriorPageFrameIfApplicable(doc, composed);
+
+  const cx = W / 2;
+  const horizMargin = (format.marginInnerMm + format.marginOuterMm) / 2;
+  const contentW = W - horizMargin * 2;
+  const font = interiorStyle.pdfFontFamily;
+
+  let cursorY = format.marginTopMm + 10;
+  doc.setFont(font, 'bold');
+  doc.setFontSize(format.titleFontPt - 2);
+  doc.setTextColor(textRgb[0], textRgb[1], textRgb[2]);
+  doc.text(stripInlineFormatting(page.title || 'Índice de Capítulos'), cx, cursorY, {
+    align: 'center',
+  });
+  cursorY += 6;
+
+  drawInteriorOrnamentPdf(doc, interiorStyle.ornamentStyle, cx, cursorY, accentRgb);
+  cursorY += 12;
+
+  const entries = page.tocEntries || [];
+  const lineH = format.baseFontPt * 0.62;
+  for (const entry of entries) {
+    if (cursorY > H - format.marginBottomMm - 12) break;
+    const chapPrefix = `Capítulo ${entry.partNumber}. `;
+    const cleanTitle = stripInlineFormatting(entry.title);
+    const pageNumStr = String(entry.startPageNumber);
+
+    doc.setFont(font, 'bold');
+    doc.setFontSize(format.baseFontPt - 0.5);
+    doc.setTextColor(accentRgb[0], accentRgb[1], accentRgb[2]);
+    doc.text(chapPrefix, horizMargin, cursorY);
+    const prefixW = doc.getTextWidth(chapPrefix);
+
+    doc.setFont(font, 'normal');
+    doc.setTextColor(textRgb[0], textRgb[1], textRgb[2]);
+    const maxTitleW = contentW - prefixW - 14;
+    const titleLines = doc.splitTextToSize(cleanTitle, maxTitleW);
+    doc.text(titleLines[0] || cleanTitle, horizMargin + prefixW, cursorY);
+
+    doc.setFont(font, 'bold');
+    doc.setTextColor(mutedRgb[0], mutedRgb[1], mutedRgb[2]);
+    doc.text(pageNumStr, W - horizMargin, cursorY, { align: 'right' });
+
+    cursorY += lineH;
+  }
+
+  if (page.showPageNumber) {
+    doc.setFont(font, 'normal');
+    doc.setFontSize(9);
+    doc.setTextColor(mutedRgb[0], mutedRgb[1], mutedRgb[2]);
+    doc.text(`— ${page.pageNumber} —`, cx, H - format.marginBottomMm + 7, {
+      align: 'center',
+    });
+  }
+}
+
+function renderChapterContentPagePdf(
+  doc: jsPDF,
+  composed: ComposedBookDocument,
+  page: ComposedBookPage
+): void {
+  const { format, interiorStyle } = composed;
+  const W = format.widthMm;
+  const H = format.heightMm;
+  const bgRgb = hexToRgb(interiorStyle.pageBgHex);
+  const textRgb = hexToRgb(interiorStyle.textHex);
+  const mutedRgb = hexToRgb(interiorStyle.mutedHex);
+  const accentRgb = hexToRgb(interiorStyle.accentHex);
+
   const font = interiorStyle.pdfFontFamily;
   const horizMargin = (format.marginInnerMm + format.marginOuterMm) / 2;
   const contentW = W - horizMargin * 2;
   const cx = W / 2;
 
-  doc.setFont(font, 'italic');
-  doc.setFontSize(8);
-  doc.setTextColor(mutedRgb[0], mutedRgb[1], mutedRgb[2]);
-  doc.text(
-    stripInlineFormatting(
-      composed.editorialConfig.customTitle || 'YouForever • Memoria Autobiográfica'
-    ),
-    cx,
-    format.marginTopMm - 5,
-    { align: 'center', maxWidth: contentW }
-  );
+  const drawPageChromeAndRunningHeader = () => {
+    doc.setFillColor(bgRgb[0], bgRgb[1], bgRgb[2]);
+    doc.rect(0, 0, W, H, 'F');
+    drawInteriorPageFrameIfApplicable(doc, composed);
+
+    doc.setFont(font, 'italic');
+    doc.setFontSize(8);
+    doc.setTextColor(mutedRgb[0], mutedRgb[1], mutedRgb[2]);
+    doc.text(
+      stripInlineFormatting(
+        composed.editorialConfig.customTitle || 'YouForever • Memoria Autobiográfica'
+      ),
+      cx,
+      format.marginTopMm - 5,
+      { align: 'center', maxWidth: contentW }
+    );
+  };
+
+  const drawPageFooterNumber = (pageNum: number) => {
+    if (page.showPageNumber) {
+      doc.setFont(font, 'normal');
+      doc.setFontSize(9);
+      doc.setTextColor(mutedRgb[0], mutedRgb[1], mutedRgb[2]);
+      doc.text(`— ${pageNum} —`, cx, H - format.marginBottomMm + 7, {
+        align: 'center',
+      });
+    }
+  };
+
+  drawPageChromeAndRunningHeader();
 
   let cursorY = format.marginTopMm + 4;
   const sections = page.sections || [];
-  const maxBottomY = H - format.marginBottomMm - 10;
+  const maxBottomY = H - format.marginBottomMm - 6;
+
+  const startOverflowContinuationPage = (secTitle: string): number => {
+    drawPageFooterNumber(page.pageNumber);
+    doc.addPage([format.widthMm, format.heightMm], 'portrait');
+    drawPageChromeAndRunningHeader();
+    let newY = format.marginTopMm + 4;
+    doc.setFont(font, 'italic');
+    doc.setFontSize(8.5);
+    doc.setTextColor(mutedRgb[0], mutedRgb[1], mutedRgb[2]);
+    doc.text(`${stripInlineFormatting(secTitle)} (continuación)`, horizMargin, newY);
+    newY += 6;
+    return newY;
+  };
 
   for (let sIdx = 0; sIdx < sections.length; sIdx++) {
     const sec = sections[sIdx];
@@ -1956,7 +2377,11 @@ function renderChapterContentPagePdf(
       cursorY += 6;
     }
 
-    if (sec.photo && !sec.isContinuation) {
+    if (
+      sec.photo &&
+      !sec.isContinuation &&
+      (!sec.paragraphPhotos || Object.keys(sec.paragraphPhotos).length === 0)
+    ) {
       const photoBoxH = Math.min(38, (H - cursorY - format.marginBottomMm) * 0.34);
       if (photoBoxH >= 20) {
         drawFittedPhoto(
@@ -1969,11 +2394,12 @@ function renderChapterContentPagePdf(
           accentRgb
         );
         cursorY += photoBoxH + 3.5;
-        if (sec.photo.caption) {
+        const cap = formatPhotoEditorialCaption(sec.photo.caption);
+        if (cap) {
           doc.setFont(font, 'italic');
           doc.setFontSize(8);
           doc.setTextColor(mutedRgb[0], mutedRgb[1], mutedRgb[2]);
-          doc.text(stripInlineFormatting(sec.photo.caption), cx, cursorY, {
+          doc.text(stripInlineFormatting(cap), cx, cursorY, {
             align: 'center',
             maxWidth: contentW * 0.8,
           });
@@ -1984,33 +2410,84 @@ function renderChapterContentPagePdf(
 
     const lineHeightMm = format.baseFontPt * 0.45;
     for (let pIdx = 0; pIdx < sec.paragraphs.length; pIdx++) {
-      const rawPara = sec.paragraphs[pIdx];
-      if (!rawPara || !rawPara.trim()) continue;
-      if (cursorY > maxBottomY) break;
+      let pendingParaText = (sec.paragraphs[pIdx] || '').trim();
+      if (!pendingParaText) continue;
 
-      const useDrop =
-        Boolean(interiorStyle.useDropCap) && !sec.isContinuation && pIdx === 0;
+      let isFirstChunkOfParagraph = true;
+      while (pendingParaText.length > 0) {
+        if (cursorY + lineHeightMm > maxBottomY && cursorY > format.marginTopMm + 14) {
+          cursorY = startOverflowContinuationPage(sec.title);
+        }
 
-      cursorY = renderRichParagraphPdf({
-        doc,
-        rawText: rawPara,
-        fontFamily: font,
-        fontSizePt: format.baseFontPt,
-        lineHeightMm,
-        textRgb,
-        accentRgb,
-        leftX: horizMargin,
-        startY: cursorY,
-        maxWidthMm: contentW,
-        maxBottomY,
-        textAlign: interiorStyle.textAlign,
-        useDropCap: useDrop,
-      });
+        const useDrop =
+          Boolean(interiorStyle.useDropCap) &&
+          !sec.isContinuation &&
+          pIdx === 0 &&
+          isFirstChunkOfParagraph;
 
-      cursorY += 2.8;
+        const rendered = renderRichParagraphPdf({
+          doc,
+          rawText: pendingParaText,
+          fontFamily: font,
+          fontSizePt: format.baseFontPt,
+          lineHeightMm,
+          textRgb,
+          accentRgb,
+          leftX: horizMargin,
+          startY: cursorY,
+          maxWidthMm: contentW,
+          maxBottomY,
+          textAlign: interiorStyle.textAlign,
+          useDropCap: useDrop,
+        });
+
+        cursorY = rendered.cursorY;
+        pendingParaText = rendered.overflowText;
+        isFirstChunkOfParagraph = false;
+
+        if (pendingParaText.length > 0) {
+          cursorY = startOverflowContinuationPage(sec.title);
+        }
+      }
+
+      cursorY += 2.2;
+
+      const paraPhotos = sec.paragraphPhotos?.[pIdx] || [];
+      for (const pItem of paraPhotos) {
+        let photoBoxH = Math.min(36, (H - cursorY - format.marginBottomMm) * 0.38);
+        if (photoBoxH < 18 && !composed.isPreviewSample) {
+          cursorY = startOverflowContinuationPage(sec.title);
+          photoBoxH = 34;
+        }
+        if (photoBoxH >= 16) {
+          drawFittedPhoto(
+            doc,
+            pItem,
+            horizMargin + contentW * 0.15,
+            cursorY,
+            contentW * 0.7,
+            photoBoxH,
+            accentRgb
+          );
+          cursorY += photoBoxH + 3.2;
+          const cap = formatPhotoEditorialCaption(pItem.caption);
+          if (cap) {
+            doc.setFont(font, 'italic');
+            doc.setFontSize(8);
+            doc.setTextColor(mutedRgb[0], mutedRgb[1], mutedRgb[2]);
+            doc.text(stripInlineFormatting(cap), cx, cursorY, {
+              align: 'center',
+              maxWidth: contentW * 0.8,
+            });
+            cursorY += 4.2;
+          }
+        }
+      }
+
+      cursorY += 0.8;
     }
 
-    if (sec.pullQuote && cursorY < H - format.marginBottomMm - 20) {
+    if (sec.pullQuote && cursorY < H - format.marginBottomMm - 16) {
       cursorY += 1.5;
       doc.setDrawColor(accentRgb[0], accentRgb[1], accentRgb[2]);
       doc.setLineWidth(0.5);
@@ -2029,14 +2506,7 @@ function renderChapterContentPagePdf(
     }
   }
 
-  if (page.showPageNumber) {
-    doc.setFont(font, 'normal');
-    doc.setFontSize(9);
-    doc.setTextColor(mutedRgb[0], mutedRgb[1], mutedRgb[2]);
-    doc.text(`— ${page.pageNumber} —`, cx, H - format.marginBottomMm + 7, {
-      align: 'center',
-    });
-  }
+  drawPageFooterNumber(page.pageNumber);
 }
 
 function renderClosingMandatoryPagePdf(
@@ -2071,32 +2541,61 @@ function renderClosingMandatoryPagePdf(
   const blockHeight = closingLines.length * (closingFontPt * 0.45);
   const textStartY = H / 2 - blockHeight / 2 + 5;
 
-  // Ornament divider ABOVE the central closing text (matching viewer)
-  drawInteriorOrnamentPdf(
-    doc,
-    interiorStyle.ornamentStyle,
-    W / 2,
-    textStartY - 8,
-    accentRgb
-  );
+  if (!composed.isPreviewSample) {
+    drawInteriorOrnamentPdf(
+      doc,
+      interiorStyle.ornamentStyle,
+      W / 2,
+      textStartY - 8,
+      accentRgb
+    );
+  }
 
   doc.text(closingLines, W / 2, textStartY, { align: 'center' });
 
-  doc.setFont(font, 'normal');
-  doc.setFontSize(9.5);
-  doc.setTextColor(accentRgb[0], accentRgb[1], accentRgb[2]);
-  doc.text(
-    page.bottomRightBrand || '<< YouForever >>',
-    W - horizMargin,
-    H - format.marginBottomMm,
-    { align: 'right' }
-  );
+  const rightX = W - horizMargin;
+  const bottomY = H - format.marginBottomMm;
+
+  if (composed.useOfficialForeverYouLogo || composed.isPreviewSample) {
+    doc.setFont('times', 'bold');
+    doc.setFontSize(10.5);
+    doc.setTextColor(textRgb[0], textRgb[1], textRgb[2]);
+    doc.text('YouForever', rightX, bottomY, { align: 'right' });
+    const textWidthMm = doc.getTextWidth('YouForever');
+    const isDarkPage = bgRgb[0] + bgRgb[1] + bgRgb[2] < 380;
+    const symbolPng = renderForeverYouSymbolImageDataUrl(isDarkPage ? 'light' : 'dark');
+    const symW = 11;
+    const symH = symW * (130 / 220);
+    if (symbolPng) {
+      doc.addImage(
+        symbolPng,
+        'PNG',
+        rightX - textWidthMm - symW - 1.5,
+        bottomY - symH + 1.2,
+        symW,
+        symH,
+        undefined,
+        'FAST'
+      );
+    }
+  } else {
+    doc.setFont(font, 'normal');
+    doc.setFontSize(9.5);
+    doc.setTextColor(accentRgb[0], accentRgb[1], accentRgb[2]);
+    doc.text(
+      page.bottomRightBrand || '<< YouForever >>',
+      rightX,
+      bottomY,
+      { align: 'right' }
+    );
+  }
 }
 
 /**
  * Generates the real downloadable PDF Blob and Object URL from the composed book document.
- * In the browser, each page is rendered in high definition (300+ DPI) using the exact
- * fonts, ornaments, frames, SVG illustrations, and layout proportions of the interactive viewer.
+ * Both the 6-page sample PDF and the full book PDF are generated with 100% selectable and
+ * copyable native vector text (`doc.text`), embedding as images (`doc.addImage`) ONLY the
+ * interviewee's shared photographs, cover illustration artwork, and the YouForever logo mark.
  */
 export function generateRealDemoBookPdf(params: {
   composed: ComposedBookDocument;
@@ -2130,27 +2629,14 @@ export function generateRealDemoBookPdf(params: {
       doc.addPage([format.widthMm, format.heightMm], 'portrait');
     }
 
-    // Attempt 1:1 High-Definition Viewer Canvas Render first (when running in browser DOM)
-    const highResDataUrl = renderPageToViewerIdenticalDataUrl(composed, page);
-    if (highResDataUrl) {
-      doc.addImage(
-        highResDataUrl,
-        'JPEG',
-        0,
-        0,
-        format.widthMm,
-        format.heightMm,
-        undefined,
-        'FAST'
-      );
-      return;
-    }
-
-    // Fallback for headless Node.js unit tests without a DOM canvas
     if (page.kind === 'cover') {
       renderCoverPagePdf(doc, composed, page);
     } else if (page.kind === 'title_dedication') {
       renderTitleDedicationPagePdf(doc, composed, page);
+    } else if (page.kind === 'editorial_credits') {
+      renderEditorialCreditsPagePdf(doc, composed, page);
+    } else if (page.kind === 'table_of_contents') {
+      renderTableOfContentsPagePdf(doc, composed, page);
     } else if (page.kind === 'chapter_content') {
       renderChapterContentPagePdf(doc, composed, page);
     } else if (page.kind === 'closing_mandatory') {
@@ -2160,12 +2646,13 @@ export function generateRealDemoBookPdf(params: {
 
   const blob = doc.output('blob');
   const blobUrl = URL.createObjectURL(blob);
-  const filename = buildSafeDemoPdfFilename(profile);
+  const filename = buildSafeDemoPdfFilename(profile, format.id);
 
   return {
     blob,
     blobUrl,
     filename,
-    pageCount: pages.length,
+    pageCount: doc.getNumberOfPages(),
   };
 }
+

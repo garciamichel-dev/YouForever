@@ -609,7 +609,7 @@ export const DemoFreeTrialView: React.FC<DemoFreeTrialViewProps> = ({
   // Generate Autobiographical Manuscript with Gemini (Section 14)
   const handleGenerateManuscript = async (chosenStyle: DemoNarrativeStyleId) => {
     setManuscriptError(null);
-    setSystemStatusMessage('Redactando el manuscrito con inteligencia artificial...');
+    setSystemStatusMessage('Estamos preparando tu historia...');
 
     try {
       const res = await fetch('/api/demo/manuscript', {
@@ -899,7 +899,7 @@ export const DemoFreeTrialView: React.FC<DemoFreeTrialViewProps> = ({
               variant="horizontal"
               theme="light"
               size="sm"
-              subtitle="Mi historia en 8 preguntas • Sin registro ni guardado en base de datos"
+              subtitle="Mi historia en 8 preguntas • Prueba privada sin registro"
             />
             <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-800/90 text-amber-100 border border-amber-600/50 shrink-0">
               Prueba gratuita
@@ -988,7 +988,7 @@ export const DemoFreeTrialView: React.FC<DemoFreeTrialViewProps> = ({
               </h1>
 
               <p className="text-stone-600 text-sm sm:text-base max-w-2xl mx-auto leading-relaxed">
-                Vive la experiencia de YouForever de forma gratuita. Responde 8 preguntas en total (5 preguntas esenciales y 3 generadas mediante IA), elige entre 5 portadas de colección y 5 diseños interiores, y descarga al instante tu pequeño libro autobiográfico en PDF.
+                Vive la experiencia de YouForever de forma gratuita. Responde 8 preguntas en total (5 preguntas esenciales y 3 preguntas personalizadas para profundizar), elige entre 5 portadas de colección y 5 diseños interiores, y descarga al instante tu pequeño libro autobiográfico en PDF.
               </p>
 
               <div className="pt-2 flex flex-col sm:flex-row items-center justify-center gap-4">
@@ -1030,7 +1030,7 @@ export const DemoFreeTrialView: React.FC<DemoFreeTrialViewProps> = ({
                     <span>Privacidad total sin registro</span>
                   </div>
                   <p className="text-xs text-stone-600 leading-relaxed">
-                    Sin crear cuenta ni guardar tus respuestas en bases de datos. Todo permanece en tu sesión actual.
+                    Sin crear cuenta ni guardar tus respuestas permanentemente. Todo permanece únicamente en esta sesión.
                   </p>
                 </div>
               </div>
@@ -1388,7 +1388,7 @@ export const DemoFreeTrialView: React.FC<DemoFreeTrialViewProps> = ({
                           onClick={() => handleSubmitMainQuestion('none')}
                           className="px-3 py-1.5 bg-rose-800 text-white rounded-lg font-semibold cursor-pointer"
                         >
-                          Reintentar con IA
+                          Volver a intentar
                         </button>
                         <button
                           type="button"
@@ -1661,7 +1661,7 @@ export const DemoFreeTrialView: React.FC<DemoFreeTrialViewProps> = ({
                   </span>
                 </span>
                 <span className="text-stone-500 font-medium">
-                  {completedDimensionsCount} de 5 etapas base • {generatedAiFollowUpsCount} de {DEMO_MAX_AI_FOLLOW_UPS} preguntas IA (8 en total)
+                  {completedDimensionsCount} de 5 etapas base • {generatedAiFollowUpsCount} de {DEMO_MAX_AI_FOLLOW_UPS} preguntas de profundización (8 en total)
                 </span>
               </div>
 
@@ -1848,7 +1848,7 @@ export const DemoFreeTrialView: React.FC<DemoFreeTrialViewProps> = ({
                     onClick={() => handleGenerateManuscript(narrativeStyle)}
                     className="px-3.5 py-1.5 bg-rose-800 text-white rounded-lg font-semibold cursor-pointer"
                   >
-                    Reintentar generación con IA
+                    Volver a intentar
                   </button>
                   <button
                     type="button"
@@ -2157,7 +2157,7 @@ export const DemoFreeTrialView: React.FC<DemoFreeTrialViewProps> = ({
                               <span>
                                 {coverPhoto
                                   ? 'Cambiar fotografía de portada'
-                                  : 'Seleccionar fotografía (JPG, PNG, WebP)'}
+                                  : 'Seleccionar fotografía'}
                               </span>
                               <input
                                 type="file"
@@ -2508,7 +2508,7 @@ export const DemoFreeTrialView: React.FC<DemoFreeTrialViewProps> = ({
                 <div className="flex flex-wrap items-center justify-between gap-3 pb-4 border-b border-stone-200 sticky top-16 bg-white z-20 py-2">
                   <div>
                     <h3 className="font-serif text-lg font-bold text-stone-900">
-                      Editor del Manuscrito Autobiográfico
+                      Editor de tu Historia
                     </h3>
                     <p className="text-xs text-stone-500">
                       Edita libremente párrafos, títulos o fotografías antes de descargar tu versión definitiva.
@@ -2563,7 +2563,7 @@ export const DemoFreeTrialView: React.FC<DemoFreeTrialViewProps> = ({
                         className="px-3 py-1.5 rounded-lg bg-amber-50 border border-amber-300 text-xs font-semibold text-amber-900 hover:bg-amber-100 cursor-pointer inline-flex items-center gap-1"
                       >
                         <RotateCcw className="w-3.5 h-3.5" />
-                        <span>Restaurar versión IA</span>
+                        <span>Restaurar texto original</span>
                       </button>
                     )}
                   </div>
@@ -3109,7 +3109,7 @@ export const DemoFreeTrialView: React.FC<DemoFreeTrialViewProps> = ({
                 <p>
                   Con Forever You, una entrevista mucho más profunda, construida a partir de{' '}
                   <strong>
-                    un amplio banco de preguntas biográficas por etapas de vida y preguntas de profundización personalizadas mediante inteligencia artificial
+                    un amplio banco de preguntas biográficas por etapas de vida y preguntas personalizadas para profundizar en cada recuerdo
                   </strong>
                   , puede convertirse en un libro autobiográfico completo, cuidadosamente escrito y maquetado.
                 </p>
@@ -3432,7 +3432,7 @@ export const DemoFreeTrialView: React.FC<DemoFreeTrialViewProps> = ({
                     }}
                     className="text-xs font-semibold text-amber-900 hover:underline cursor-pointer"
                   >
-                    Ver todos los detalles en /conoceme →
+                    Ver todos los detalles de YouForever →
                   </button>
                 )}
               </div>

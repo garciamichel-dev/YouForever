@@ -1,5 +1,6 @@
 import express, { Request, Response, NextFunction, Router } from 'express';
-import { storage } from './storage.ts';
+import { storage, serverDb } from './storage.ts';
+import { firestoreTelemetry } from './firestoreTelemetry.ts';
 import * as XLSX from 'xlsx';
 import {
   buildInterviewBackupZip,
@@ -14,14 +15,25 @@ import {
 } from '../logic/privacyNoticeContent.ts';
 import {
   CURRENT_PRIVACY_POLICY_VERSION,
+  sanitizeInterviewForParticipant,
 } from '../logic/interviewRules.ts';
 import {
   generateTransientDemoFollowUp,
   generateTransientDemoManuscript,
 } from './demoGeminiService.ts';
-import { analyzeAndTranscribeAudioWithGemini } from './geminiService.ts';
+import {
+  analyzeAndTranscribeAudioWithGemini,
+  testConfiguredBookAiEngines,
+} from './geminiService.ts';
 import { miEsenciaRouter } from './miEsencia/miEsenciaRouter.ts';
 import { miEsenciaStore } from './miEsencia/miEsenciaStore.ts';
+import {
+  getEmailConfigStatus,
+  sendSelfRegisterParticipantEmail,
+  type EmailSendResult,
+} from './emailService.ts';
+import { buildUserManualPdfBuffer } from './manualPdfBuilder.ts';
+import { normalizeCanonicalPublicOrigin } from '../logic/freeRegistration.ts';
 
 export const apiRouter: Router = express.Router();
 apiRouter.use(express.json({ limit: '100mb' }));
@@ -87,19 +99,37 @@ export function resetAccessCodeFailures(req: Request): void {
   accessCodeBruteForceMap.delete(key);
 }
 
-// Ensure Firestore state is hydrated before processing non-demo API requests
+// Ensure Firestore state is hydrated before processing non-demo API requests without blocking
 apiRouter.use(async (req: Request, _res: Response, next: NextFunction) => {
-  if (req.path.startsWith('/demo/')) {
+  if (
+    req.path.startsWith('/demo/') ||
+    req.path === '/health' ||
+    req.path === '/app-info' ||
+    req.path === '/public/manual-pdf'
+  ) {
     next();
     return;
   }
   try {
-    await storage.ensureInitialized();
+    await Promise.race([
+      storage.ensureInitialized(),
+      new Promise<void>((resolve) => setTimeout(resolve, 3500)),
+    ]);
     next();
   } catch (err: any) {
     console.warn('Storage initialization note (proceeding with memory cache):', err?.message || err);
     next();
   }
+});
+
+apiRouter.get('/health', (_req: Request, res: Response) => {
+  res.json({
+    success: true,
+    status: 'ok',
+    storageInitialized: storage.isInitialized(),
+    interviewsCount: storage.getInterviews().length,
+    timestamp: new Date().toISOString(),
+  });
 });
 
 // --- Helper: Admin verification & Middleware ---
@@ -194,6 +224,34 @@ apiRouter.post('/config', requireAdmin, async (req: Request, res: Response) => {
     res.json({ success: true, data: updated });
   } catch (err: unknown) {
     res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
+// 1b. Live AI Engine Connection Verifier (Tests both Google Gemini & OpenAI ChatGPT)
+apiRouter.post('/config/test-ai-engines', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const currentConfig = storage.getConfig();
+    const primaryProvider =
+      req.body?.bookAiProvider === 'openai' || req.body?.bookAiProvider === 'gemini'
+        ? req.body.bookAiProvider
+        : currentConfig.bookAiProvider || 'gemini';
+    const geminiModel =
+      typeof req.body?.bookAiGeminiModel === 'string' && req.body.bookAiGeminiModel.trim()
+        ? req.body.bookAiGeminiModel.trim()
+        : currentConfig.bookAiGeminiModel || 'gemini-3-flash-preview';
+    const openaiModel =
+      typeof req.body?.bookAiOpenAiModel === 'string' && req.body.bookAiOpenAiModel.trim()
+        ? req.body.bookAiOpenAiModel.trim()
+        : currentConfig.bookAiOpenAiModel || 'gpt-4o';
+
+    const diagnostic = await testConfiguredBookAiEngines({
+      primaryProvider,
+      geminiModel,
+      openaiModel,
+    });
+    res.json({ success: true, data: diagnostic });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: (err as Error).message });
   }
 });
 
@@ -609,14 +667,27 @@ apiRouter.post('/questions/import', requireAdmin, async (req: Request, res: Resp
 });
 
 // 4. Interviews & Manuscripts Management
-apiRouter.get('/interviews', requireAdmin, (_req: Request, res: Response) => {
+apiRouter.get('/interviews/sync-status', requireAdmin, (_req: Request, res: Response) => {
   try {
+    res.json({ success: true, data: storage.getFirestoreSyncStatus() });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
+apiRouter.post('/interviews/sync-firestore', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const mode: 'incremental' | 'full' = req.body?.full === true ? 'full' : 'incremental';
+    const syncResult = await storage.syncFromFirestore(true, mode);
+    if (mode === 'full') {
+      await miEsenciaStore.syncFromFirestore(true);
+    }
     const list = storage.getInterviews();
     const enriched = list.map((inv) => {
       const participants = storage.getParticipantsForInterview(inv.id);
       const answers = storage.getAnswersForInterview(inv.id);
       const manuscripts = storage.getManuscriptsForInterview(inv.id);
-      const bookVersions = storage.getBookVersionsForInterview(inv.id);
+      const bookVersions = storage.getBookVersionsForInterview(inv.id, false);
       return {
         ...inv,
         participants,
@@ -629,15 +700,52 @@ apiRouter.get('/interviews', requireAdmin, (_req: Request, res: Response) => {
         latestBookVersion: bookVersions[0]?.versionNumber || 0,
       };
     });
-    res.json({ success: true, data: enriched });
+    res.json({
+      success: true,
+      data: enriched,
+      syncResult,
+      quotaReport: firestoreTelemetry.getReport(storage.getFirestoreSyncStatus()),
+    });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
+apiRouter.get('/interviews', requireAdmin, async (_req: Request, res: Response) => {
+  try {
+    await storage.syncFromFirestore(false);
+    const list = storage.getInterviews();
+    const enriched = list.map((inv) => {
+      const participants = storage.getParticipantsForInterview(inv.id);
+      const answers = storage.getAnswersForInterview(inv.id);
+      const manuscripts = storage.getManuscriptsForInterview(inv.id);
+      const bookVersions = storage.getBookVersionsForInterview(inv.id, false);
+      return {
+        ...inv,
+        participants,
+        answersCount: answers.length,
+        photosCount: answers.reduce((sum, a) => sum + (a.photos?.length || 0), 0),
+        manuscriptsCount: manuscripts.length,
+        latestManuscriptVersion: manuscripts[0]?.version || 0,
+        bookVersions,
+        bookVersionsCount: bookVersions.length,
+        latestBookVersion: bookVersions[0]?.versionNumber || 0,
+      };
+    });
+    res.json({
+      success: true,
+      data: enriched,
+      syncStatus: storage.getFirestoreSyncStatus(),
+    });
   } catch (err: unknown) {
     res.status(500).json({ success: false, error: (err as Error).message });
   }
 });
 
 // Get answers with photos and audio recordings for an interview (admin)
-apiRouter.get('/interviews/:id/answers', requireAdmin, (req: Request, res: Response) => {
+apiRouter.get('/interviews/:id/answers', requireAdmin, async (req: Request, res: Response) => {
   try {
+    await storage.syncFromFirestore(false, 'incremental');
     const answers = storage.getAnswersForInterview(req.params.id);
     res.json({ success: true, data: answers });
   } catch (err: unknown) {
@@ -653,6 +761,51 @@ apiRouter.post('/interviews', requireAdmin, async (req: Request, res: Response) 
       performedBy: admin,
     });
     res.json({ success: true, data: result });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
+apiRouter.post('/interviews/:id/duplicate', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const admin = (req as any).adminUser as string;
+    const result = await storage.duplicateInterview(req.params.id, admin);
+    const participants = storage.getParticipantsForInterview(result.interview.id);
+    const answers = storage.getAnswersForInterview(result.interview.id);
+    const manuscripts = storage.getManuscriptsForInterview(result.interview.id);
+    const bookVersions = storage.getBookVersionsForInterview(result.interview.id, false);
+    res.json({
+      success: true,
+      data: {
+        interview: {
+          ...result.interview,
+          participants,
+          answersCount: answers.length,
+          photosCount: answers.reduce((sum, a) => sum + (a.photos?.length || 0), 0),
+          manuscriptsCount: manuscripts.length,
+          latestManuscriptVersion: manuscripts[0]?.version || 0,
+          bookVersions,
+          bookVersionsCount: bookVersions.length,
+          latestBookVersion: bookVersions[0]?.versionNumber || 0,
+        },
+        participantTokens: result.participantTokens,
+      },
+    });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
+apiRouter.post('/interviews/:id/copy-note', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const admin = (req as any).adminUser as string;
+    const { adminCopyNote } = req.body || {};
+    const updated = await storage.updateAdminCopyNote(
+      req.params.id,
+      typeof adminCopyNote === 'string' ? adminCopyNote : '',
+      admin
+    );
+    res.json({ success: true, data: updated });
   } catch (err: unknown) {
     res.status(400).json({ success: false, error: (err as Error).message });
   }
@@ -704,7 +857,6 @@ apiRouter.post('/interviews/:id/layout-quota', requireAdmin, async (req: Request
       success: true,
       data: {
         ...updated,
-        bookVersions,
         bookVersionsCount: bookVersions.length,
         latestBookVersion: bookVersions[0]?.versionNumber || 0,
       },
@@ -766,7 +918,7 @@ apiRouter.post('/interviews/seed-test-stories', requireAdmin, async (req: Reques
       const participants = storage.getParticipantsForInterview(inv.id);
       const answers = storage.getAnswersForInterview(inv.id);
       const manuscripts = storage.getManuscriptsForInterview(inv.id);
-      const bookVersions = storage.getBookVersionsForInterview(inv.id);
+      const bookVersions = storage.getBookVersionsForInterview(inv.id, false);
       return {
         ...inv,
         participants,
@@ -851,12 +1003,23 @@ apiRouter.get('/interviews/:id/manuscripts', requireAdmin, (req: Request, res: R
   }
 });
 
-apiRouter.get('/manuscripts', requireAdmin, (_req: Request, res: Response) => {
+apiRouter.get('/manuscripts', requireAdmin, async (_req: Request, res: Response) => {
   try {
+    await storage.syncFromFirestore(false, 'incremental');
     const manuscripts = storage.getAllManuscripts();
     res.json({ success: true, data: manuscripts });
   } catch (err: unknown) {
     res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
+apiRouter.delete('/manuscripts/:id', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const admin = (req as any).adminUser as string;
+    const result = await storage.deleteManuscript(req.params.id, admin);
+    res.json({ success: true, data: result });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
   }
 });
 
@@ -887,6 +1050,7 @@ apiRouter.get('/interviews/:id/backup/qa-html', requireAdmin, (req: Request, res
     const photos = storage.getPhotosForInterview(req.params.id);
     const audios = storage.getAudiosForInterview(req.params.id);
 
+    const adminUser = ((req as any).adminUser as string | undefined) || (req.query.admin as string | undefined);
     const html = generateQACompilationHtml({
       interview,
       participants,
@@ -894,6 +1058,7 @@ apiRouter.get('/interviews/:id/backup/qa-html', requireAdmin, (req: Request, res
       answers,
       photos,
       audios,
+      adminEmail: adminUser,
     });
 
     const isDownload = req.query.download === 'true';
@@ -938,6 +1103,23 @@ apiRouter.get('/interviews/:id/backup/qa-markdown', requireAdmin, (req: Request,
   }
 });
 
+// Export Q&A Compilation PDF («Compilado Testimonial Fidedigno (Preguntas, Respuestas, Audios y Fotos)»)
+apiRouter.get('/interviews/:id/backup/qa-pdf', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const { pdfRecord } = await miEsenciaStore.ensureInterviewCompilationPdf(req.params.id);
+    const pdfBuf = Buffer.from(pdfRecord.pdfBase64, 'base64');
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${pdfRecord.fileName || `Compilado_Testimonial_Fidedigno_${req.params.id}.pdf`}"`
+    );
+    res.setHeader('Content-Length', pdfBuf.length);
+    res.send(pdfBuf);
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
 // 5. Audit Logs
 apiRouter.get('/audit-logs', requireAdmin, (_req: Request, res: Response) => {
   try {
@@ -974,7 +1156,7 @@ apiRouter.post('/interviews/restore-cache', requireAdmin, (req: Request, res: Re
       const participants = storage.getParticipantsForInterview(inv.id);
       const answers = storage.getAnswersForInterview(inv.id);
       const manuscripts = storage.getManuscriptsForInterview(inv.id);
-      const bookVersions = storage.getBookVersionsForInterview(inv.id);
+      const bookVersions = storage.getBookVersionsForInterview(inv.id, false);
       return {
         ...inv,
         participants,
@@ -993,8 +1175,10 @@ apiRouter.post('/interviews/restore-cache', requireAdmin, (req: Request, res: Re
   }
 });
 
+let lastParticipantSessionForcedSyncMs = 0;
+
 // 7. Participant Portal Endpoints
-apiRouter.post('/participant/session', (req: Request, res: Response) => {
+apiRouter.post('/participant/session', async (req: Request, res: Response) => {
   try {
     const bruteCheck = checkAccessCodeBruteForce(req);
     if (bruteCheck.blocked) {
@@ -1018,12 +1202,23 @@ apiRouter.post('/participant/session', (req: Request, res: Response) => {
       storage.restoreFromClientCache(cachedInterviews, cachedBookVersions);
     }
 
+    await storage.syncFromFirestore(false, 'incremental');
+
     let resolvedResult;
     try {
       resolvedResult = storage.resolveToken(token);
-    } catch (resolveErr) {
-      recordAccessCodeFailure(req);
-      throw resolveErr;
+    } catch (firstErr) {
+      const nowMs = Date.now();
+      if (nowMs - lastParticipantSessionForcedSyncMs > 8_000) {
+        lastParticipantSessionForcedSyncMs = nowMs;
+        await storage.syncFromFirestore(true, 'incremental');
+      }
+      try {
+        resolvedResult = storage.resolveToken(token);
+      } catch (_retryErr) {
+        recordAccessCodeFailure(req);
+        throw firstErr;
+      }
     }
     resetAccessCodeFailures(req);
 
@@ -1045,7 +1240,7 @@ apiRouter.post('/participant/session', (req: Request, res: Response) => {
       data: {
         resolvedToken: (resolvedTokenDoc as any).plainToken || resolvedTokenDoc.accessCode || token,
         accessCode: resolvedTokenDoc.accessCode,
-        interview,
+        interview: sanitizeInterviewForParticipant(interview),
         participant,
         questions,
         answers,
@@ -1122,7 +1317,11 @@ apiRouter.post('/participant/answer', async (req: Request, res: Response) => {
       idempotencyKey: idempotencyKey || `idem_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
     });
 
-    res.json({ success: true, data: result });
+    const sanitizedResult =
+      result && (result as any).interview
+        ? { ...result, interview: sanitizeInterviewForParticipant((result as any).interview) }
+        : result;
+    res.json({ success: true, data: sanitizedResult });
   } catch (err: unknown) {
     res.status(400).json({ success: false, error: (err as Error).message });
   }
@@ -1284,9 +1483,20 @@ apiRouter.post('/participant/photos/:photoId/delete', async (req: Request, res: 
   }
 });
 
-// Serve stored interview photograph by ID
+// Serve stored interview photograph by ID with full CORS support for canvas & PDF rasterization
+apiRouter.options('/photos/:photoId', (_req: Request, res: Response) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', '*');
+  res.sendStatus(204);
+});
+
 apiRouter.get('/photos/:photoId', async (req: Request, res: Response) => {
   try {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+
     const photoBuffer = storage.getPhotoBuffer(req.params.photoId);
     if (photoBuffer) {
       res.setHeader('Content-Type', photoBuffer.mimeType);
@@ -1326,7 +1536,13 @@ apiRouter.post('/participant/finish', async (req: Request, res: Response) => {
     }
 
     const finished = await storage.declareVoluntaryCompletion(token, reason || '');
-    res.json({ success: true, data: finished });
+    const sanitizedFinished =
+      finished && (finished as any).interview
+        ? { ...finished, interview: sanitizeInterviewForParticipant((finished as any).interview) }
+        : finished && (finished as any).id
+        ? sanitizeInterviewForParticipant(finished as any)
+        : finished;
+    res.json({ success: true, data: sanitizedFinished });
   } catch (err: unknown) {
     res.status(400).json({ success: false, error: (err as Error).message });
   }
@@ -1339,6 +1555,7 @@ apiRouter.post('/participant/book/generate-manuscript', async (req: Request, res
       token,
       narrativeStyle,
       scope,
+      forceRefresh,
       lockedPreviewManuscript,
       lockedPreviewGroups,
     } = req.body;
@@ -1350,6 +1567,7 @@ apiRouter.post('/participant/book/generate-manuscript', async (req: Request, res
       plainToken: token,
       narrativeStyle: narrativeStyle || 'first_person_literary',
       scope: scope === 'preview' ? 'preview' : 'full',
+      forceRefresh: Boolean(forceRefresh),
       lockedPreviewManuscript: lockedPreviewManuscript || null,
       lockedPreviewGroups: lockedPreviewGroups || null,
     });
@@ -1387,7 +1605,11 @@ apiRouter.post('/participant/book/save-version', async (req: Request, res: Respo
       chapterPhotos,
       pageCount: Number(pageCount) || 5,
     });
-    res.json({ success: true, data: result });
+    const sanitizedSaveResult =
+      result && (result as any).interview
+        ? { ...result, interview: sanitizeInterviewForParticipant((result as any).interview) }
+        : result;
+    res.json({ success: true, data: sanitizedSaveResult });
   } catch (err: unknown) {
     res.status(400).json({ success: false, error: (err as Error).message });
   }
@@ -1567,7 +1789,7 @@ apiRouter.post('/participant/admin/profile', async (req: Request, res: Response)
       success: true,
       data: {
         participant,
-        interview,
+        interview: sanitizeInterviewForParticipant(interview),
         activeConsent,
         consentHistory,
         bookShares,
@@ -1847,9 +2069,39 @@ apiRouter.post('/demo/audio/transcribe', async (req: Request, res: Response) => 
   }
 });
 
+// Admin Firestore Quota & Sync Telemetry Endpoints
+apiRouter.get('/admin/firestore-quota', requireAdmin, (_req: Request, res: Response) => {
+  try {
+    const report = firestoreTelemetry.getReport(storage.getFirestoreSyncStatus());
+    res.json({ success: true, data: report });
+  } catch (err: unknown) {
+    res.status(500).json({
+      success: false,
+      error: (err as Error).message || 'Error al obtener la telemetría de cuotas Firestore.',
+    });
+  }
+});
+
+apiRouter.post('/admin/firestore-quota/probe', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const probe = await firestoreTelemetry.probeLiveFirestoreStatus(serverDb);
+    if (probe.healthy && !probe.quotaExhausted && req.body?.sync !== false) {
+      await storage.syncFromFirestore(false, 'incremental');
+    }
+    const report = firestoreTelemetry.getReport(storage.getFirestoreSyncStatus());
+    res.json({ success: true, data: report });
+  } catch (err: unknown) {
+    res.status(500).json({
+      success: false,
+      error: (err as Error).message || 'Error al verificar el estado en vivo de Cloud Firestore.',
+    });
+  }
+});
+
 // Unified Real-Time System Statistics Endpoint (Quantitative + Qualitative across Interviews, Books, Privacy & Mi Esencia)
 apiRouter.get('/admin/system-statistics', requireAdmin, async (_req: Request, res: Response) => {
   try {
+    await storage.syncFromFirestore(false, 'incremental');
     await miEsenciaStore.ensureInitialized();
     const core = storage.getSystemStatisticsSummary();
     const miEsencia = miEsenciaStore.getAdminOverviewData();
@@ -1865,6 +2117,206 @@ apiRouter.get('/admin/system-statistics', requireAdmin, async (_req: Request, re
     res.status(500).json({
       success: false,
       error: (err as Error).message || 'Error al obtener las estadísticas del sistema.',
+    });
+  }
+});
+
+// Admin: Update registration details for participants of an interview (preserving answers, tokens, and books)
+apiRouter.put(
+  '/admin/interviews/:id/registration-data',
+  requireAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const admin = (req as any).adminUser as string;
+      const result = await storage.updateInterviewParticipantRegistrations({
+        interviewId: req.params.id,
+        interviewTitle: req.body?.interviewTitle,
+        participants: Array.isArray(req.body?.participants) ? req.body.participants : [],
+        performedBy: admin,
+      });
+      res.json({ success: true, data: result });
+    } catch (err: unknown) {
+      res.status(400).json({
+        success: false,
+        error: (err as Error).message || 'No se pudieron actualizar los datos de registro.',
+      });
+    }
+  }
+);
+
+function resolvePublicBaseUrl(_req: Request): string {
+  return normalizeCanonicalPublicOrigin(process.env.PUBLIC_CANONICAL_URL);
+}
+
+// Public: Download or view brief illustrated user manual PDF
+apiRouter.get('/public/manual-pdf', (req: Request, res: Response) => {
+  try {
+    const pdfBuffer = buildUserManualPdfBuffer();
+    const disposition = req.query.download === '1' ? 'attachment' : 'inline';
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `${disposition}; filename="Manual_Usuario_YouForever.pdf"`);
+    res.setHeader('Cache-Control', 'public, max-age=300');
+    res.send(pdfBuffer);
+  } catch (err: unknown) {
+    res.status(500).json({
+      success: false,
+      error: (err as Error).message || 'No se pudo generar el manual en PDF.',
+    });
+  }
+});
+
+// Public: Self-registration (/free) — creates interview + access tokens + privacy consent + sends welcome email(s)
+apiRouter.post('/public/free-register', async (req: Request, res: Response) => {
+  try {
+    const result = await storage.createFreeSelfRegisteredInterview({
+      payload: req.body,
+      userAgent: String(req.headers['user-agent'] || ''),
+    });
+
+    const baseUrl = resolvePublicBaseUrl(req);
+    const manualPdfUrl = `${baseUrl}/api/public/manual-pdf`;
+    const portalUrl = `${baseUrl}/`;
+
+    const emailResults: EmailSendResult[] = await Promise.all(
+      result.participantTokens.map((pt) =>
+        sendSelfRegisterParticipantEmail({
+          participantId: pt.participant.id,
+          participantName: pt.participant.name,
+          recipientEmail: pt.participant.email || '',
+          interviewTitle: result.interview.title,
+          storyMode: result.interview.storyMode,
+          role: pt.participant.role,
+          accessCode: pt.accessCode,
+          directUrl: `${baseUrl}${pt.inviteUrl}`,
+          manualPdfUrl,
+          portalUrl,
+          expiresAtIso: result.interview.expiresAt,
+        })
+      )
+    );
+
+    const emailResultMap = new Map(emailResults.map((er) => [er.participantId, er]));
+
+    res.json({
+      success: true,
+      data: {
+        interview: {
+          id: result.interview.id,
+          title: result.interview.title,
+          storyMode: result.interview.storyMode,
+          openedAt: result.interview.openedAt,
+          expiresAt: result.interview.expiresAt,
+          openDaysAtCreation: result.interview.openDaysAtCreation,
+          sufficiencyThreshold: result.interview.sufficiencyThreshold,
+          layoutEditsAllowed: result.interview.layoutEditsAllowed ?? 1,
+        },
+        manualPdfUrl,
+        emailConfig: getEmailConfigStatus(),
+        participants: result.participantTokens.map((pt) => ({
+          participantId: pt.participant.id,
+          name: pt.participant.name,
+          email: pt.participant.email || '',
+          age: pt.participant.age ?? null,
+          city: pt.participant.city || '',
+          relationship: pt.participant.relationship,
+          role: pt.participant.role,
+          accessCode: pt.accessCode,
+          plainToken: pt.plainToken,
+          inviteUrl: pt.inviteUrl,
+          directUrl: `${baseUrl}${pt.inviteUrl}`,
+          emailStatus: emailResultMap.get(pt.participant.id) || {
+            sent: false,
+            recipientEmail: pt.participant.email || '',
+            participantId: pt.participant.id,
+            participantName: pt.participant.name,
+            error: 'No se pudo determinar el estado del envío.',
+            attemptedAt: new Date().toISOString(),
+          },
+        })),
+      },
+    });
+  } catch (err: unknown) {
+    res.status(400).json({
+      success: false,
+      error: (err as Error).message || 'No se pudo completar tu registro.',
+    });
+  }
+});
+
+// Public: Retry welcome email delivery WITHOUT duplicating interview or registration records
+apiRouter.post('/public/free-register/:interviewId/retry-email', async (req: Request, res: Response) => {
+  try {
+    const interview = storage.getInterview(req.params.interviewId);
+    if (!interview) {
+      res.status(404).json({
+        success: false,
+        error: 'No se encontró la entrevista registrada para reintentar el correo.',
+      });
+      return;
+    }
+
+    if (interview.registrationSource !== 'self_register_free') {
+      res.status(403).json({
+        success: false,
+        error: 'Esta entrevista no corresponde a un autorregistro público.',
+      });
+      return;
+    }
+
+    const participants = storage.getParticipantsForInterview(interview.id);
+    const requestedIds: string[] | null = Array.isArray(req.body?.participantIds)
+      ? req.body.participantIds.map((id: unknown) => String(id))
+      : null;
+
+    const targets = participants.filter((p) => {
+      if (requestedIds && requestedIds.length > 0 && !requestedIds.includes(p.id)) {
+        return false;
+      }
+      return Boolean(p.email && p.plainToken);
+    });
+
+    if (targets.length === 0) {
+      res.status(400).json({
+        success: false,
+        error: 'No hay participantes con correo registrado para reintentar el envío.',
+      });
+      return;
+    }
+
+    const baseUrl = resolvePublicBaseUrl(req);
+    const manualPdfUrl = `${baseUrl}/api/public/manual-pdf`;
+    const portalUrl = `${baseUrl}/`;
+
+    const emailResults: EmailSendResult[] = await Promise.all(
+      targets.map((p) =>
+        sendSelfRegisterParticipantEmail({
+          participantId: p.id,
+          participantName: p.name,
+          recipientEmail: p.email || '',
+          interviewTitle: interview.title,
+          storyMode: interview.storyMode,
+          role: p.role,
+          accessCode: p.accessCode || '',
+          directUrl: `${baseUrl}/interview?token=${p.plainToken}`,
+          manualPdfUrl,
+          portalUrl,
+          expiresAtIso: interview.expiresAt,
+        })
+      )
+    );
+
+    res.json({
+      success: true,
+      data: {
+        interviewId: interview.id,
+        emailConfig: getEmailConfigStatus(),
+        emailResults,
+      },
+    });
+  } catch (err: unknown) {
+    res.status(400).json({
+      success: false,
+      error: (err as Error).message || 'No se pudo reintentar el envío del correo.',
     });
   }
 });

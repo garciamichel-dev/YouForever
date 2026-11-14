@@ -413,7 +413,7 @@ export function createInitialChatThread(
     {
       id: `ai-init-${stageId}-${mode}`,
       sender: 'ai',
-      roleLabel: 'Entrevistador IA · Pregunta Inicial',
+      roleLabel: 'Entrevista guiada · Pregunta inicial',
       text: initialQuestion,
       isFollowUp: false,
     },

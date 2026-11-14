@@ -1,14 +1,126 @@
 import crypto from 'node:crypto';
 
+export type LiteraryPromptStyleId =
+  | 'first_person_simple'
+  | 'first_person_literary'
+  | 'third_person_biography';
+
+export type BookAiProvider = 'gemini' | 'openai';
+
+export type BookStructureMode = 'prompt_autonomous' | 'fixed_five_stages';
+
+export interface LiteraryPromptVersion {
+  id: string;
+  name: string;
+  styleId: LiteraryPromptStyleId;
+  createdForStyleId?: LiteraryPromptStyleId;
+  promptText: string;
+  createdAt: string;
+  updatedAt?: string;
+  createdBy: string;
+}
+
+export interface LiteraryStylePromptConfig {
+  styleId: LiteraryPromptStyleId;
+  styleLabel: string;
+  activeVersionId: string;
+  promptText: string;
+  updatedAt: string;
+  updatedBy: string;
+}
+
 export interface AppConfig {
   defaultOpenDays: number;
   defaultSufficiencyThreshold: number;
   defaultMaxFollowUps: number;
   allowAnswerEditing: boolean;
   allowAdditionalMemories: boolean;
+  bookAiProvider?: BookAiProvider;
+  bookAiGeminiModel?: string;
+  bookAiOpenAiModel?: string;
+  bookStructureMode?: BookStructureMode;
+  literaryPrompts?: Record<LiteraryPromptStyleId, LiteraryStylePromptConfig>;
+  literaryPromptVersions?: LiteraryPromptVersion[];
   updatedAt?: string;
   updatedBy?: string;
 }
+
+export const DEFAULT_LITERARY_PROMPTS_TEXT: Record<LiteraryPromptStyleId, string> = {
+  first_person_simple: `REGLA ESPECÍFICA DEL ESTILO A (Primera persona — Relato personal formal y estructurado):
+- Redacta en primera persona ("yo" en historia individual, o "nosotros" identificando la voz de cada integrante en historia compartida), pero REESCRIBE las frases con un lenguaje más formal, claro, ordenado y bien estructurado.
+- Usa el contexto íntegro del Compilado Testimonial Fidedigno (preguntas, respuestas originales, transcripciones de voz, información adicional y fotografías con sus descripciones) para dar coherencia y sentido completo a cada oración sin jamás usar frases robóticas o muletillas introductorias fijas ("En lo que respecta a esta etapa de mi vida...", "Asimismo, cabe señalar en torno a esta vivencia que...").
+- Corrige TODAS las faltas de ortografía, tildes omitidas, errores gramaticales, discordancias y puntuación defectuosa.
+- Elimina por completo muletillas orales ("este...", "eh", "pues", "o sea", "bueno", "digamos", "como te decía") y suprime repeticiones innecesarias de palabras o ideas.
+- Respeta el 100% de los hechos reales, nombres, fechas, lugares y vivencias del Compilado Testimonial Fidedigno sin inventar ni omitir ningún testimonio.`,
+  first_person_literary: `REGLA ESPECÍFICA DEL ESTILO B (Primera persona — Narrativa literaria y emotiva):
+- Redacta en primera persona ("yo" en historia individual, o "nosotros" en historia compartida) con una prosa literaria, cálida, emotiva y envolvente, como un libro de memorias cuidadosamente editado.
+- Usa el contexto íntegro del Compilado Testimonial Fidedigno (preguntas, respuestas originales, transcripciones de voz, información adicional y fotografías con sus descripciones) para que las respuestas breves o directas fluyan como prosa autobiográfica natural, sin anteponer frases fijas repetitivas.
+- Corrige TODAS las faltas de ortografía, tildes, gramática, muletillas orales y repeticiones innecesarias, elevando la fluidez literaria de cada párrafo.
+- Respeta el 100% de los hechos reales, nombres, fechas, lugares y vivencias del Compilado Testimonial Fidedigno sin inventar ni omitir ningún testimonio.`,
+  third_person_biography: `REGLA ESPECÍFICA DEL ESTILO C (Tercera persona — Biografía narrativa completa):
+- CONVIERTE EL 100% DEL RELATO A TERCERA PERSONA en todas las oraciones (incluyendo respuestas principales, profundizaciones e información adicional).
+- PROHIBIDO dejar verbos, pronombres o posesivos en primera persona ("yo", "me", "mi", "mis", "nosotros", "nos", "nuestro", "nací", "recuerdo", "viví", "fui", "estudié", "trabajé", "siento"). Todo debe narrarse desde un biógrafo cálido hablando sobre el/los protagonista(s) ("nació", "recuerda", "vivió", "su infancia", "sus padres", etc.).
+- Usa sujeto tácito en oraciones consecutivas para no repetir el nombre del protagonista de forma artificial en cada frase, y jamás uses frases robóticas fijas como "En consonancia con este recuerdo, X refiere que...".
+- Corrige TODAS las faltas de ortografía, tildes, gramática, muletillas orales y repeticiones innecesarias.
+- Respeta el 100% de los hechos reales, nombres, fechas, lugares y vivencias del Compilado Testimonial Fidedigno sin inventar ni omitir ningún testimonio.`,
+};
+
+export const DEFAULT_LITERARY_PROMPT_VERSIONS: LiteraryPromptVersion[] = [
+  {
+    id: 'ver_style_a_default',
+    name: 'Versión Base Oficial — Estilo A (1ª Persona Formal y Estructurado)',
+    styleId: 'first_person_simple',
+    promptText: DEFAULT_LITERARY_PROMPTS_TEXT.first_person_simple,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    createdBy: 'system',
+  },
+  {
+    id: 'ver_style_b_default',
+    name: 'Versión Base Oficial — Estilo B (1ª Persona Literaria y Emotiva)',
+    styleId: 'first_person_literary',
+    promptText: DEFAULT_LITERARY_PROMPTS_TEXT.first_person_literary,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    createdBy: 'system',
+  },
+  {
+    id: 'ver_style_c_default',
+    name: 'Versión Base Oficial — Estilo C (3ª Persona Biografía Narrativa)',
+    styleId: 'third_person_biography',
+    promptText: DEFAULT_LITERARY_PROMPTS_TEXT.third_person_biography,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    createdBy: 'system',
+  },
+];
+
+export const DEFAULT_LITERARY_PROMPTS_CONFIG: Record<
+  LiteraryPromptStyleId,
+  LiteraryStylePromptConfig
+> = {
+  first_person_simple: {
+    styleId: 'first_person_simple',
+    styleLabel: 'Opción A — Primera persona (Relato personal y sencillo)',
+    activeVersionId: 'ver_style_a_default',
+    promptText: DEFAULT_LITERARY_PROMPTS_TEXT.first_person_simple,
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    updatedBy: 'system',
+  },
+  first_person_literary: {
+    styleId: 'first_person_literary',
+    styleLabel: 'Opción B — Primera persona (Narrativa literaria y emotiva)',
+    activeVersionId: 'ver_style_b_default',
+    promptText: DEFAULT_LITERARY_PROMPTS_TEXT.first_person_literary,
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    updatedBy: 'system',
+  },
+  third_person_biography: {
+    styleId: 'third_person_biography',
+    styleLabel: 'Opción C — Tercera persona (Biografía narrativa)',
+    activeVersionId: 'ver_style_c_default',
+    promptText: DEFAULT_LITERARY_PROMPTS_TEXT.third_person_biography,
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    updatedBy: 'system',
+  },
+};
 
 export const INITIAL_APP_CONFIG: AppConfig = {
   defaultOpenDays: 15,
@@ -16,6 +128,16 @@ export const INITIAL_APP_CONFIG: AppConfig = {
   defaultMaxFollowUps: 2,
   allowAnswerEditing: true,
   allowAdditionalMemories: true,
+  bookAiProvider: 'gemini',
+  bookAiGeminiModel: 'gemini-3-flash-preview',
+  bookAiOpenAiModel: 'gpt-6',
+  bookStructureMode: 'prompt_autonomous',
+  literaryPrompts: {
+    first_person_simple: { ...DEFAULT_LITERARY_PROMPTS_CONFIG.first_person_simple },
+    first_person_literary: { ...DEFAULT_LITERARY_PROMPTS_CONFIG.first_person_literary },
+    third_person_biography: { ...DEFAULT_LITERARY_PROMPTS_CONFIG.third_person_biography },
+  },
+  literaryPromptVersions: DEFAULT_LITERARY_PROMPT_VERSIONS.map((v) => ({ ...v })),
 };
 
 export type StoryMode = 'individual' | 'compartida';
@@ -47,6 +169,12 @@ export interface InterviewRecord {
   questionnaireVersionId: string;
   createdById?: string;
   createdByName?: string;
+  // Admin-only duplication metadata (never exposed to participant endpoints)
+  copiedFromInterviewId?: string;
+  copiedFromName?: string;
+  copiedAt?: string;
+  adminCopyNote?: string;
+  registrationSource?: 'admin' | 'self_register_free';
 }
 
 export interface ParticipantRecord {
@@ -57,6 +185,10 @@ export interface ParticipantRecord {
   role: 'primary' | 'contributor';
   status: 'invited' | 'active' | 'completed';
   email?: string;
+  age?: number | null;
+  city?: string;
+  privacyAcceptedAt?: string;
+  privacyVersion?: string;
   joinedAt?: string;
 }
 
@@ -1039,7 +1171,7 @@ const STAGE_HEADING_KEYWORDS: Record<string, string[]> = {
  * Format a single photo attachment as a Markdown image block with rich contextual caption.
  */
 export function formatPhotoMarkdownBlock(photo: AnswerPhotoAttachment): string {
-  const safeCaption = photo.caption.replace(/[\[\]\r\n]+/g, ' ').trim();
+  const safeCaption = (photo.caption || '').replace(/[\[\]\r\n]+/g, ' ').trim();
   const stageLabel = (photo.lifeStage || 'recuerdo').replace(/_/g, ' ');
   const url = photo.imageUrl || `/api/photos/${photo.id}`;
   return `\n![${safeCaption} | Aportada por ${photo.participantName} (${stageLabel})](${url})\n*Fotografía relacionada con «${photo.questionText || stageLabel}» — Contexto: ${safeCaption} (Aportada por ${photo.participantName})*\n`;
@@ -1084,11 +1216,32 @@ export function ensurePhotosPlacedInManuscript(params: {
     }
   }
 
-  if (allPhotos.length === 0) {
-    return compiledMarkdown;
+  const activePhotoIds = new Set(allPhotos.map((p) => p.id));
+
+  // Strip any markdown image blocks referencing /api/photos/<photoId> that are no longer in activePhotoIds
+  const rawLines = (compiledMarkdown || '').split('\n');
+  const cleanedLines: string[] = [];
+  for (let idx = 0; idx < rawLines.length; idx++) {
+    const line = rawLines[idx];
+    const match = line.match(/!\[[^\]]*\]\((?:https?:\/\/[^)]+)?\/api\/photos\/([^)\s]+)\)/);
+    if (match && match[1] && !activePhotoIds.has(match[1])) {
+      // Also skip the immediately following photo context caption line if present
+      if (
+        idx + 1 < rawLines.length &&
+        /^\*Fotografía relacionada con /i.test(rawLines[idx + 1].trim())
+      ) {
+        idx++;
+      }
+      continue;
+    }
+    cleanedLines.push(line);
   }
 
-  let updatedMarkdown = compiledMarkdown;
+  let updatedMarkdown = cleanedLines.join('\n');
+
+  if (allPhotos.length === 0) {
+    return updatedMarkdown;
+  }
 
   for (const photo of allPhotos) {
     const photoUrl = photo.imageUrl || `/api/photos/${photo.id}`;
@@ -1313,3 +1466,340 @@ export function shouldDisplayReopenedBanner(params: {
   }
   return interview.reopenedAt !== dismissedReopenedAt;
 }
+
+/**
+ * Strips all admin-only copy/duplication metadata before sending an InterviewRecord
+ * to any participant-facing endpoint so the interviewee never sees it is a copy.
+ */
+export function sanitizeInterviewForParticipant<T extends InterviewRecord>(interview: T): T {
+  const {
+    copiedFromInterviewId: _cfId,
+    copiedFromName: _cfName,
+    copiedAt: _cAt,
+    adminCopyNote: _acn,
+    ...clean
+  } = interview as any;
+  return clean as T;
+}
+
+/**
+ * Builds the default admin-only note identifying the copied interviewee and creation date.
+ */
+export function buildDefaultAdminCopyNote(
+  fullName: string,
+  dateInput: string | Date = new Date()
+): string {
+  const cleanName = (fullName || '').trim() || 'Entrevistado';
+  const dateObj = dateInput instanceof Date ? dateInput : new Date(dateInput);
+  const validDate = Number.isNaN(dateObj.getTime()) ? new Date() : dateObj;
+  const formattedDate = validDate.toLocaleDateString('es-MX', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+  });
+  return `Es una copia de ${cleanName}, realizada el ${formattedDate}`;
+}
+
+/**
+ * Sorts interviews so root interviews appear newest-first (by openedAt descending),
+ * while each duplicated interview appears immediately underneath its original interview
+ * (ordered chronologically by copiedAt ascending).
+ */
+export function sortInterviewsWithCopies<
+  T extends Pick<InterviewRecord, 'id' | 'openedAt' | 'copiedFromInterviewId' | 'copiedAt'>
+>(interviews: T[]): T[] {
+  if (!Array.isArray(interviews) || interviews.length <= 1) {
+    return Array.isArray(interviews) ? [...interviews] : [];
+  }
+
+  const byId = new Map<string, T>();
+  for (const item of interviews) {
+    if (item && item.id) byId.set(item.id, item);
+  }
+
+  const childrenByParent = new Map<string, T[]>();
+  const roots: T[] = [];
+
+  for (const item of interviews) {
+    const parentId = item.copiedFromInterviewId;
+    if (parentId && parentId !== item.id && byId.has(parentId)) {
+      const bucket = childrenByParent.get(parentId) || [];
+      bucket.push(item);
+      childrenByParent.set(parentId, bucket);
+    } else {
+      roots.push(item);
+    }
+  }
+
+  roots.sort(
+    (a, b) => new Date(b.openedAt).getTime() - new Date(a.openedAt).getTime()
+  );
+
+  for (const [, bucket] of childrenByParent.entries()) {
+    bucket.sort((a, b) => {
+      const timeA = new Date(a.copiedAt || a.openedAt).getTime();
+      const timeB = new Date(b.copiedAt || b.openedAt).getTime();
+      return timeA - timeB;
+    });
+  }
+
+  const result: T[] = [];
+  const visited = new Set<string>();
+
+  const appendTree = (node: T) => {
+    if (visited.has(node.id)) return;
+    visited.add(node.id);
+    result.push(node);
+    const children = childrenByParent.get(node.id) || [];
+    for (const child of children) {
+      appendTree(child);
+    }
+  };
+
+  for (const root of roots) {
+    appendTree(root);
+  }
+
+  // Fallback for any disconnected cycle
+  for (const item of interviews) {
+    if (!visited.has(item.id)) {
+      result.push(item);
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Computes the next answer text deterministically when a voice recording finishes transcription,
+ * avoiding stale React state reads when auto-saving immediately after voice submission.
+ */
+export function mergeVoiceTranscriptText(prevText: string, transcript: string): string {
+  const cleanTranscript = (transcript || '').trim();
+  const cleanPrev = (prevText || '').trim();
+  if (!cleanTranscript) {
+    return cleanPrev;
+  }
+  if (!cleanPrev || cleanPrev === 'No aplica a mi historia.') {
+    return cleanTranscript;
+  }
+  if (cleanPrev.includes(cleanTranscript)) {
+    return cleanPrev;
+  }
+  return `${cleanPrev}\n\n[Nota de voz]: ${cleanTranscript}`;
+}
+
+/**
+ * Determines whether sending and transcribing a voice recording should auto-save and advance
+ * automatically to the next question or deepening card.
+ * Stays on the current question when the transcript is empty or audio quality was flagged
+ * as silent, unintelligible, or excessively noisy.
+ */
+export function shouldAutoAdvanceAfterVoiceSubmit(params: {
+  transcript?: string | null;
+  audioQuality?: string | null;
+}): boolean {
+  const cleanTranscript = (params.transcript || '').trim();
+  if (cleanTranscript.length === 0) {
+    return false;
+  }
+  const quality = (params.audioQuality || '').toLowerCase();
+  if (quality === 'noisy' || quality === 'unintelligible' || quality === 'silent') {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Resolves the confirmation notice shown ONLY AFTER transcription, database persistence,
+ * and flow transition (next question, deepening card, or completion screen) have completed.
+ */
+export function resolvePostSaveFeedbackNotice(params: {
+  flowType: 'base' | 'adaptive';
+  hasAdaptiveFollowUp: boolean;
+  hasVoiceAudio: boolean;
+  hasPhotos: boolean;
+  notRecalled: boolean;
+}): { message: string; durationMs: number } {
+  if (params.flowType === 'adaptive') {
+    return {
+      message: 'Profundización guardada e integrada a tu historia.',
+      durationMs: 3500,
+    };
+  }
+  if (params.hasAdaptiveFollowUp) {
+    return {
+      message:
+        'Respuesta guardada. Hemos preparado una pregunta para profundizar en este recuerdo.',
+      durationMs: 4000,
+    };
+  }
+  if (!params.notRecalled && params.hasVoiceAudio) {
+    return {
+      message: 'Archivos de voz y transcripción guardados con éxito',
+      durationMs: 3500,
+    };
+  }
+  if (!params.notRecalled && params.hasPhotos) {
+    return {
+      message: 'Respuesta y fotografías guardadas con éxito en el servidor.',
+      durationMs: 3500,
+    };
+  }
+  return {
+    message: 'Respuesta guardada con éxito en la base de datos.',
+    durationMs: 3500,
+  };
+}
+
+function getLatestTimestampMs(values: Array<string | undefined | null>): number {
+  let maxMs = 0;
+  for (const val of values) {
+    if (!val) continue;
+    const ms = new Date(val).getTime();
+    if (!Number.isNaN(ms) && ms > maxMs) {
+      maxMs = ms;
+    }
+  }
+  return maxMs;
+}
+
+/**
+ * Non-destructively merges a remote Firestore InterviewRecord with an existing local/disk record.
+ * Preserves newer lifecycle state (reopened vs completed), higher counters, and newer edits
+ * so remote writes from www.youforever.app are never overwritten by stale local snapshots.
+ */
+export function mergeInterviewRecordNonDestructive(
+  localInv: InterviewRecord | undefined,
+  remoteInv: InterviewRecord
+): InterviewRecord {
+  if (!localInv) {
+    return remoteInv;
+  }
+
+  const localLatestMs = getLatestTimestampMs([
+    localInv.reopenedAt,
+    localInv.closedAt,
+    localInv.copiedAt,
+    localInv.openedAt,
+  ]);
+  const remoteLatestMs = getLatestTimestampMs([
+    remoteInv.reopenedAt,
+    remoteInv.closedAt,
+    remoteInv.copiedAt,
+    remoteInv.openedAt,
+  ]);
+
+  // Base takes whichever record has a newer timestamp (ties favor remote Firestore as source of truth)
+  const preferRemote = remoteLatestMs >= localLatestMs;
+  const primary = preferRemote ? remoteInv : localInv;
+  const secondary = preferRemote ? localInv : remoteInv;
+
+  // Respect explicit reopen vs completion timestamps safely
+  const bestReopenedAt =
+    getLatestTimestampMs([remoteInv.reopenedAt]) >= getLatestTimestampMs([localInv.reopenedAt])
+      ? remoteInv.reopenedAt ?? localInv.reopenedAt
+      : localInv.reopenedAt ?? remoteInv.reopenedAt;
+  const bestClosedAt =
+    getLatestTimestampMs([remoteInv.closedAt]) >= getLatestTimestampMs([localInv.closedAt])
+      ? remoteInv.closedAt ?? localInv.closedAt
+      : localInv.closedAt ?? remoteInv.closedAt;
+
+  const reopenedMs = getLatestTimestampMs([bestReopenedAt]);
+  const closedMs = getLatestTimestampMs([bestClosedAt]);
+  const isReopenedNewer = reopenedMs > 0 && reopenedMs > closedMs;
+
+  return {
+    ...secondary,
+    ...primary,
+    status: isReopenedNewer ? 'open' : primary.status,
+    userDeclaredComplete: isReopenedNewer ? false : primary.userDeclaredComplete,
+    reopenedAt: bestReopenedAt,
+    closedAt: bestClosedAt,
+    bookGeneratedCount: Math.max(
+      localInv.bookGeneratedCount ?? 0,
+      remoteInv.bookGeneratedCount ?? 0
+    ),
+    layoutEditsUsed: Math.max(localInv.layoutEditsUsed ?? 0, remoteInv.layoutEditsUsed ?? 0),
+    layoutEditsAllowed:
+      preferRemote
+        ? remoteInv.layoutEditsAllowed ?? localInv.layoutEditsAllowed
+        : localInv.layoutEditsAllowed ?? remoteInv.layoutEditsAllowed,
+    completedQuestionCount: Math.max(
+      localInv.completedQuestionCount ?? 0,
+      remoteInv.completedQuestionCount ?? 0
+    ),
+    copiedFromInterviewId: remoteInv.copiedFromInterviewId ?? localInv.copiedFromInterviewId,
+    copiedFromName: remoteInv.copiedFromName ?? localInv.copiedFromName,
+    copiedAt: remoteInv.copiedAt ?? localInv.copiedAt,
+    adminCopyNote: preferRemote
+      ? remoteInv.adminCopyNote ?? localInv.adminCopyNote
+      : localInv.adminCopyNote ?? remoteInv.adminCopyNote,
+  };
+}
+
+/**
+ * Non-destructively merges a remote Firestore AnswerRecord with an existing local/disk record.
+ * Keeps newer text by updatedAt while preserving union of uploaded photos and voice recordings.
+ */
+export function mergeAnswerRecordNonDestructive(
+  localAns: AnswerRecord | undefined,
+  remoteAns: AnswerRecord
+): AnswerRecord {
+  if (!localAns) {
+    return remoteAns;
+  }
+
+  const localUpdatedMs = getLatestTimestampMs([localAns.updatedAt, localAns.createdAt]);
+  const remoteUpdatedMs = getLatestTimestampMs([remoteAns.updatedAt, remoteAns.createdAt]);
+  const preferRemote = remoteUpdatedMs >= localUpdatedMs;
+  const primary = preferRemote ? remoteAns : localAns;
+  const secondary = preferRemote ? localAns : remoteAns;
+
+  const photoMap = new Map<string, AnswerPhotoAttachment>();
+  for (const ph of [...(secondary.photos || []), ...(primary.photos || [])]) {
+    if (!ph) continue;
+    const key = ph.id || ph.imageUrl || ph.caption;
+    if (key) {
+      const existing = photoMap.get(key);
+      const hasDataUrl = Boolean((ph as AnswerPhotoAttachment & { dataUrl?: string }).dataUrl);
+      const existingHasDataUrl = Boolean(
+        existing && (existing as AnswerPhotoAttachment & { dataUrl?: string }).dataUrl
+      );
+      if (!existing || (hasDataUrl && !existingHasDataUrl)) {
+        photoMap.set(key, ph);
+      }
+    }
+  }
+
+  const audioMap = new Map<string, AnswerVoiceAttachment>();
+  const secondaryAudios = [
+    ...(secondary.audioRecordings || []),
+    ...(secondary.audio ? [secondary.audio] : []),
+  ];
+  const primaryAudios = [
+    ...(primary.audioRecordings || []),
+    ...(primary.audio ? [primary.audio] : []),
+  ];
+  for (const aud of [...secondaryAudios, ...primaryAudios]) {
+    if (!aud || !aud.id) continue;
+    const existing = audioMap.get(aud.id);
+    if (!existing || (aud.transcription && !existing.transcription)) {
+      audioMap.set(aud.id, aud);
+    }
+  }
+  const mergedAudios = Array.from(audioMap.values());
+
+  return {
+    ...secondary,
+    ...primary,
+    photos: photoMap.size > 0 ? Array.from(photoMap.values()) : primary.photos,
+    audioRecordings: mergedAudios.length > 0 ? mergedAudios : primary.audioRecordings,
+    audio:
+      primary.audio ||
+      secondary.audio ||
+      (mergedAudios.length > 0 ? mergedAudios[mergedAudios.length - 1] : undefined),
+  };
+}
+
+

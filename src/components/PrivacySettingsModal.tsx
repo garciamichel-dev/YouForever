@@ -113,13 +113,13 @@ export const PrivacySettingsModal: React.FC<PrivacySettingsModalProps> = ({
       const data = await res.json();
       if (data.success && data.data) {
         onConsentUpdated(data.data);
-        setSaveSuccessMsg('Autorizaciones actualizadas y registradas con éxito en el servidor.');
+        setSaveSuccessMsg('Tus autorizaciones se actualizaron correctamente.');
         setTimeout(() => setSaveSuccessMsg(null), 4000);
       } else {
         setErrorMsg(data.error || 'No se pudieron actualizar las autorizaciones.');
       }
     } catch (err: unknown) {
-      setErrorMsg('Error al conectar con el servidor.');
+      setErrorMsg('No pudimos conectar en este momento. Inténtalo nuevamente.');
     } finally {
       setIsSavingDeclarations(false);
     }
@@ -158,7 +158,7 @@ export const PrivacySettingsModal: React.FC<PrivacySettingsModalProps> = ({
         setErrorMsg(data.error || 'No se pudo programar la entrega.');
       }
     } catch (err) {
-      setErrorMsg('Error de red al programar la entrega.');
+      setErrorMsg('No pudimos programar la entrega en este momento. Inténtalo nuevamente.');
     } finally {
       setIsScheduling(false);
     }
@@ -195,7 +195,7 @@ export const PrivacySettingsModal: React.FC<PrivacySettingsModalProps> = ({
         setErrorMsg(data.error || 'No se pudo registrar el acceso secundario.');
       }
     } catch (err) {
-      setErrorMsg('Error de red al registrar el acceso.');
+      setErrorMsg('No pudimos registrar este acceso en este momento. Inténtalo nuevamente.');
     } finally {
       setIsAddingSec(false);
     }
@@ -230,7 +230,7 @@ export const PrivacySettingsModal: React.FC<PrivacySettingsModalProps> = ({
         setErrorMsg(data.error || 'No se pudo enviar la solicitud ARCO.');
       }
     } catch (err) {
-      setErrorMsg('Error al conectar con el servidor.');
+      setErrorMsg('No pudimos conectar en este momento. Inténtalo nuevamente.');
     } finally {
       setIsSubmittingArco(false);
     }
@@ -256,7 +256,7 @@ export const PrivacySettingsModal: React.FC<PrivacySettingsModalProps> = ({
         setErrorMsg(data.error || 'No se pudo procesar la revocación.');
       }
     } catch (err) {
-      setErrorMsg('Error de red al procesar la revocación.');
+      setErrorMsg('No pudimos procesar tu solicitud en este momento. Inténtalo nuevamente.');
     } finally {
       setIsRevoking(false);
     }
@@ -864,7 +864,7 @@ export const PrivacySettingsModal: React.FC<PrivacySettingsModalProps> = ({
                     Consentimiento Revocado
                   </h4>
                   <p className="text-xs text-stone-600 max-w-md mx-auto">
-                    Se ha registrado la revocación de tu consentimiento en el servidor. Tus tratamientos futuros quedan detenidos. Si deseas reactivar tu participación en el futuro, podrás otorgar una nueva autorización.
+                    Tu revocación de consentimiento se registró correctamente. Tus tratamientos futuros quedan detenidos. Si deseas reactivar tu participación en el futuro, podrás otorgar una nueva autorización.
                   </p>
                 </div>
               ) : (

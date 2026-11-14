@@ -59,7 +59,15 @@
         "lastActivityAt": { "type": "string", "description": "Last activity timestamp" },
         "questionnaireVersionId": { "type": "string", "description": "Version snapshot of question bank used" },
         "createdById": { "type": "string", "description": "Admin creator UID" },
-        "createdByName": { "type": "string", "description": "Admin creator email or name" }
+        "createdByName": { "type": "string", "description": "Admin creator email or name" },
+        "layoutEditsAllowed": { "type": "number", "description": "Allowed layout/manuscript edits quota" },
+        "layoutEditsUsed": { "type": "number", "description": "Used layout/manuscript edits count" },
+        "bookGeneratedCount": { "type": "number", "description": "Generated book versions count" },
+        "copiedFromInterviewId": { "type": "string", "description": "Admin-only ID of original interview if duplicated" },
+        "copiedFromName": { "type": "string", "description": "Admin-only full name of copied interviewee" },
+        "copiedAt": { "type": "string", "description": "Admin-only ISO timestamp when duplicated" },
+        "adminCopyNote": { "type": "string", "description": "Admin-only editable note indicating original source and date" },
+        "registrationSource": { "type": "string", "enum": ["admin", "self_register_free"], "description": "Origin of interview registration" }
       },
       "required": ["id", "title", "storyMode", "status", "openedAt", "expiresAt", "completedQuestionCount", "sufficiencyStatus", "userDeclaredComplete"]
     },
@@ -74,7 +82,11 @@
         "relationship": { "type": "string", "description": "Role or relationship in shared story" },
         "role": { "type": "string", "enum": ["primary", "contributor"] },
         "status": { "type": "string", "enum": ["invited", "active", "completed"] },
-        "email": { "type": "string", "description": "Optional email" },
+        "email": { "type": "string", "description": "Optional or self-registered email" },
+        "age": { "type": "number", "description": "Age captured during self-registration or admin edit" },
+        "city": { "type": "string", "description": "City captured during self-registration or admin edit" },
+        "privacyAcceptedAt": { "type": "string", "description": "ISO timestamp when participant privacy notice was accepted during registration" },
+        "privacyVersion": { "type": "string", "description": "Privacy notice version accepted at registration" },
         "joinedAt": { "type": "string", "description": "Timestamp when joined" }
       },
       "required": ["id", "interviewId", "name", "role", "status"]

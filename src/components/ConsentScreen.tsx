@@ -106,7 +106,9 @@ export const ConsentScreen: React.FC<ConsentScreenProps> = ({
       if (res.success && res.data) {
         onConsentAccepted(res.data);
       } else {
-        setErrorMessage(res.error || 'Hubo un error al registrar el consentimiento en el servidor.');
+        setErrorMessage(
+          res.error || 'No pudimos guardar tu confirmación en este momento. Inténtalo nuevamente.'
+        );
       }
     } catch (_err: unknown) {
       setErrorMessage('Error de conexión al guardar tu consentimiento. Por favor intenta de nuevo.');

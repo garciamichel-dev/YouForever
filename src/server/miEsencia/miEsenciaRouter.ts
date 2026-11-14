@@ -69,8 +69,9 @@ miEsenciaRouter.get(
   requireMiEsenciaAdmin,
   async (req: Request, res: Response) => {
     try {
+      await miEsenciaStore.ensureInitialized();
       const pdf = miEsenciaStore.getCompilationPdfById(req.params.pdfId);
-      if (!pdf) {
+      if (!pdf || !pdf.pdfBase64) {
         res.status(404).json({
           success: false,
           error: 'Archivo PDF del Compilado Testimonial Fidedigno no encontrado.',

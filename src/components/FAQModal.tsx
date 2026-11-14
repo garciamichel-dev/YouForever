@@ -57,10 +57,10 @@ const FAQ_DATA: FAQItem[] = [
     category: 'privacidad',
     question: '¿Cómo se protege mi privacidad y la confidencialidad de mis testimonios?',
     answer:
-      'La privacidad y la dignidad familiar son el principio rector absoluto de la plataforma. Cada entrevista es estrictamente privada y está protegida en Google Cloud Firestore mediante enlaces únicos con hashes criptográficos SHA-256. Ningún dato es indexado por motores de búsqueda ni es accesible para el público en general. La información pertenece al 100% al entrevistado y a su familia.',
+      'La privacidad y el respeto hacia tu familia son nuestra prioridad. Cada entrevista es estrictamente privada y está protegida en la nube mediante enlaces y códigos personales exclusivos. Tu información nunca aparece en buscadores ni es accesible para el público general, y pertenece al 100% a ti y a tu familia.',
     highlights: [
       'Almacenamiento privado y confidencial en la nube',
-      'Acceso exclusivo mediante códigos o enlaces únicos encriptados',
+      'Acceso exclusivo mediante tus códigos o enlaces personales',
       'Cero comercialización: los testimonios nunca se venden ni comparten con terceros',
       'Propiedad absoluta de la familia sobre textos, audios y fotografías',
     ],
@@ -82,7 +82,7 @@ const FAQ_DATA: FAQItem[] = [
     category: 'privacidad',
     question: '¿Qué ocurre con mis archivos de voz y fotografías originales?',
     answer:
-      'Tus archivos de voz y fotografías se conservan intactos en su formato original. Al concluir la entrevista, se genera un Respaldo Testimonial Integral en formato ZIP descargable, que incluye todos los archivos de voz (.webm), las fotografías (.jpg/.png) en alta resolución y un expediente HTML sin conexión para que la familia pueda guardarlo permanentemente en sus propios discos duros o memorias USB sin depender de ningún servicio externo.',
+      'Tus archivos de voz y fotografías se conservan intactos con su calidad original. Al concluir la entrevista, se prepara un respaldo completo descargable que reúne todas tus grabaciones de voz, tus fotografías en alta calidad y una copia de tu historia para abrir incluso sin internet y guardarla en tu computadora o memoria portátil.',
     highlights: [
       'Respaldo permanente e independiente de la nube',
       'Descarga directa de audios y fotos originales',
@@ -96,7 +96,7 @@ const FAQ_DATA: FAQItem[] = [
     category: 'ia',
     question: '¿Cómo participa la Inteligencia Artificial en la entrevista?',
     answer:
-      'La IA (Gemini) actúa como un asistente editorial y de transcripción respetuoso, nunca como un autor independiente. Sus funciones principales son: 1) Transcribir tus notas de voz a texto claro y natural, respetando tus giros y palabras exactas; 2) Proponer preguntas amables de profundización si mencionas un recuerdo valioso con gran potencial narrativo; y 3) Asistir en la redacción armoniosa del libro biográfico estructurando tus vivencias por etapas cronológicas.',
+      'La inteligencia artificial actúa como un asistente editorial y de transcripción respetuoso, nunca como un autor independiente. Sus funciones principales son: 1) Pasar tus notas de voz a texto claro y natural, respetando tus giros y palabras exactas; 2) Proponer preguntas amables para profundizar si mencionas un recuerdo valioso; y 3) Ayudar a dar forma armoniosa a tu libro biográfico organizando tus vivencias por etapas de vida.',
     highlights: [
       'Asistente de transcripción y estructuración, no sustituto humano',
       'Fidelidad testimonial estricta: nunca inventa hechos ni altera vivencias',
@@ -108,10 +108,10 @@ const FAQ_DATA: FAQItem[] = [
     category: 'ia',
     question: '¿La IA puede inventar recuerdos o modificar lo que dije?',
     answer:
-      'No. La plataforma aplica una política estricta de fidelidad biográfica: la IA tiene prohibido inventar anécdotas, nombres, lugares o cambiar el sentido de tus declaraciones. Además, el sistema siempre conserva el respaldo literal de cada pregunta con la respuesta original y el audio exacto que grabaste, para que siempre exista el registro histórico fidedigno de respaldo.',
+      'No. YouForever aplica un principio estricto de fidelidad biográfica: nunca inventamos anécdotas, nombres ni lugares, ni cambiamos el sentido de tus palabras. Además, siempre conservamos el respaldo literal de cada pregunta con tu respuesta original y el audio exacto que grabaste.',
     highlights: [
       'Principio de fidelidad biográfica innegociable',
-      'Doble registro: texto pulido para el libro y compilado literal de respaldo',
+      'Doble respaldo: redacción cuidada para tu libro y tus palabras originales intactas',
       'Supervisión y control en manos de la familia',
     ],
   },
@@ -158,7 +158,7 @@ const FAQ_DATA: FAQItem[] = [
     category: 'proceso',
     question: '¿Cómo y cuándo se genera el libro final de mi historia?',
     answer:
-      'A medida que avanzas en el cuestionario y se alcanza el umbral de información de las etapas de vida, el sistema compila un manuscrito biográfico completo estructurado en capítulos cronológicos (Prólogo, Infancia, Juventud, Madurez, Sabiduría y Epílogo de Legado Moral). Este libro integra tus fotografías en los capítulos correspondientes y puede descargarse en formato digital e imprimirse en encuadernación.',
+      'A medida que avanzas en tus respuestas y completas las etapas de tu historia, preparamos tu libro biográfico completo organizado por capítulos (Prólogo, Infancia, Juventud, Madurez, Sabiduría y Epílogo). Este libro integra tus fotografías en los capítulos correspondientes y puedes descargarlo para leerlo o imprimirlo.',
     highlights: [
       'Estructura de libro biográfico profesional por capítulos',
       'Integración visual de fotos familiares históricas',
@@ -240,7 +240,7 @@ export const FAQModal: React.FC<FAQModalProps> = ({ isOpen, onClose }) => {
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Buscar en preguntas frecuentes (ej. privacidad, fotos, voz, IA, fechas)..."
+              placeholder="Buscar en preguntas frecuentes (ej. privacidad, fotos, voz, fechas)..."
               className="w-full pl-10 pr-9 py-2 bg-white border border-stone-300 rounded-xl text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-amber-300 text-stone-800 placeholder:text-stone-400 shadow-2xs"
             />
             {searchQuery && (

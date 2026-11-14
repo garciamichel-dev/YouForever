@@ -19,6 +19,8 @@ import {
   DEMO_BOOK_FORMATS,
   DEMO_CLOSING_PAGE_BRAND_MARK,
   DemoEditorialConfig,
+  DemoInMemoryPhoto,
+  DemoManuscript,
 } from './demoStoryRules.ts';
 import { generateRealDemoBookPdf, preloadBookResourcesForPdf } from '../utils/demoPdfGenerator.ts';
 
@@ -470,12 +472,13 @@ test('6. Vista previa de 5 páginas de muestra en maquetación y continuidad exa
   });
 
   assert.equal(previewComposed.isPreviewSample, true);
-  assert.equal(previewComposed.pages.length, 5);
+  assert.equal(previewComposed.pages.length, 6);
   assert.equal(previewComposed.pages[0].kind, 'cover');
   assert.equal(previewComposed.pages[1].kind, 'title_dedication');
   assert.equal(previewComposed.pages[2].kind, 'chapter_content');
   assert.equal(previewComposed.pages[3].kind, 'chapter_content');
   assert.equal(previewComposed.pages[4].kind, 'chapter_content');
+  assert.equal(previewComposed.pages[5].kind, 'closing_mandatory');
 
   const lockedPreviewGroups = previewComposed.pages
     .filter((p) => p.kind === 'chapter_content' && Array.isArray(p.sections))
@@ -491,7 +494,7 @@ test('6. Vista previa de 5 páginas de muestra en maquetación y continuidad exa
   });
 
   assert.equal(fullComposed.isPreviewSample, false);
-  // 2 (cover + title) + 5 (all 5 chapters) + 1 (closing) = 8 pages total
+  // Each chapter starts on a new page as requested, while paragraphs within chapters flow continuously
   assert.equal(fullComposed.pages.length, 8);
 
   // Verify Pages 1..5 in fullComposed have the exact same content sections as Pages 1..5 in previewComposed
@@ -501,9 +504,11 @@ test('6. Vista previa de 5 páginas de muestra en maquetación y continuidad exa
   assert.deepEqual(fullComposed.pages[3].sections, previewComposed.pages[3].sections);
   assert.deepEqual(fullComposed.pages[4].sections, previewComposed.pages[4].sections);
 
-  // Verify Pages 6 and 7 contain the remaining chapters (madurez and legado_general) and Page 8 is closing
-  assert.equal(fullComposed.pages[5].sections?.[0].chapterId, 'part_ch_madurez');
-  assert.equal(fullComposed.pages[6].sections?.[0].chapterId, 'part_ch_legado');
+  // Verify remaining content chapters each start on their own page, and the last page is closing_mandatory
+  const page5ChapterIds = (fullComposed.pages[5].sections || []).map((s) => s.chapterId);
+  const page6ChapterIds = (fullComposed.pages[6].sections || []).map((s) => s.chapterId);
+  assert.ok(page5ChapterIds.includes('part_ch_madurez'));
+  assert.ok(page6ChapterIds.includes('part_ch_legado'));
   assert.equal(fullComposed.pages[7].kind, 'closing_mandatory');
 });
 
@@ -1032,6 +1037,170 @@ test('11. Corrección integral de ortografía, preservación de preposiciones tr
     ],
   });
   assert.equal(newlyBuilt.manuscript.useOfficialForeverYouLogo, true);
+});
+
+test('12. Fidelidad y continuidad estricta 100% de la Vista Previa (primeras 5 páginas) en el PDF final con fotografías e inicio de capítulo en nueva página', () => {
+  const editorialConfig: DemoEditorialConfig = {
+    narrativeStyle: 'first_person_simple',
+    coverDesignId: 'clasica_eterna',
+    coverColorVariantIdx: 0,
+    coverVisualType: 'illustration',
+    coverIllustrationId: 'arbol_raices',
+    interiorStyleId: 'clasico_editorial',
+    bookFormatId: '6x9',
+    customTitle: 'Memorias de Michel',
+    customSubtitle: 'Libro autobiográfico familiar',
+    customAuthors: 'Michel García García',
+    dedication: 'Para mis hijos con todo mi cariño',
+  };
+
+  const samplePhoto: DemoInMemoryPhoto = {
+    id: 'photo_test_fish',
+    objectUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+    dataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+    fileName: 'pesca.png',
+    mimeType: 'image/png',
+    width: 800,
+    height: 600,
+    zoom: 1,
+    focusY: 'center',
+    caption: 'Día de pesca en el mar',
+  };
+
+  const previewManuscript: DemoManuscript = {
+    title: 'Memorias de Michel',
+    subtitle: 'Libro autobiográfico familiar',
+    authors: 'Michel García García',
+    mode: 'individual',
+    narrativeStyle: 'first_person_simple',
+    introduction: 'Este prólogo fue generado para la vista previa y debe ser idéntico en el PDF final.',
+    dedication: 'Para mis hijos con todo mi cariño',
+    chapters: [
+      {
+        id: 'cap_1',
+        partNumber: 1,
+        dimensionKey: 'raices',
+        title: 'Primeros Pasos y Recuerdos',
+        paragraphs: [
+          `Párrafo 1 aprobado en la vista previa del Estilo A. ${'En nuestra casa familiar de Veracruz compartíamos largas tardes de conversación junto al jardín de naranjos mientras escuchábamos las anécdotas de nuestros abuelos. '.repeat(3)}`,
+          `Párrafo 2 aprobado en la vista previa del Estilo A. ${'Durante las vacaciones de verano caminábamos hasta el malecón para contemplar los barcos que llegaban al puerto al atardecer. '.repeat(3)}`,
+          `Párrafo 3 aprobado en la vista previa del Estilo A. ${'Cada domingo nos reuníamos alrededor de la mesa grande del comedor para celebrar la unión y el cariño de toda la familia. '.repeat(3)}`,
+          `Párrafo 4 aprobado en la vista previa del Estilo A. ${'Aquellos primeros años me enseñaron el valor del trabajo constante, la palabra cumplida y la gratitud por cada nuevo día. '.repeat(3)}`,
+          `Párrafo 5 aprobado en la vista previa del Estilo A. ${'Guardo cada uno de estos recuerdos como el cimiento sobre el que construimos nuestro camino en los años siguientes. '.repeat(3)}`,
+        ],
+        photoPlacements: [
+          {
+            photoId: 'photo_test_fish',
+            paragraphIndex: 1,
+            shortCaption: 'Día de pesca en el mar',
+          },
+        ],
+      },
+      {
+        id: 'cap_2',
+        partNumber: 2,
+        dimensionKey: 'hogar_familia_crianza',
+        title: 'La Juventud y el Mar',
+        paragraphs: [
+          'Párrafo 1 del capítulo 2 en la vista previa.',
+        ],
+      },
+    ],
+    closingMessage: 'Fin de la vista previa.',
+    insufficientInfoNotices: [],
+    generatedAt: new Date().toISOString(),
+    aiGenerated: true,
+  };
+
+  // 1. Generate 5-page preview
+  const previewComposed = composeBookPages({
+    manuscript: previewManuscript,
+    editorialConfig,
+    chapterPhotos: { cap_1: samplePhoto },
+    allPhotosById: { photo_test_fish: samplePhoto },
+    previewSampleOnly: true,
+  });
+
+  assert.equal(previewComposed.isPreviewSample, true);
+  assert.equal(previewComposed.pages.length, 6); // 5 content/preview pages + page 6 mandatory closing
+
+  // Capture lockedPreviewGroups from preview
+  const lockedPreviewGroups = previewComposed.pages
+    .filter((p) => p.kind === 'chapter_content' && Array.isArray(p.sections))
+    .map((p) => p.sections!);
+
+  // 2. Full book generation with locked preview pages
+  const fullManuscript: DemoManuscript = {
+    ...previewManuscript,
+    introduction: previewManuscript.introduction,
+    lockedPreviewGroups,
+    chapters: [
+      {
+        ...previewManuscript.chapters[0],
+        paragraphs: [
+          ...previewManuscript.chapters[0].paragraphs,
+          'Párrafo 6 adicional del capítulo 1 en el libro completo.',
+          'Párrafo 7 adicional del capítulo 1 en el libro completo.',
+        ],
+      },
+      {
+        id: 'cap_2',
+        partNumber: 2,
+        dimensionKey: 'hogar_familia_crianza',
+        title: 'La Juventud y el Mar',
+        paragraphs: [
+          'Párrafo 1 del capítulo 2 continuando la historia.',
+          'Párrafo 2 del capítulo 2 continuando la historia.',
+        ],
+      },
+      {
+        id: 'cap_3',
+        partNumber: 3,
+        dimensionKey: 'presente_legado_futuro',
+        title: 'Mi Legado',
+        paragraphs: [
+          'Párrafo 1 del capítulo 3 que debe iniciar en nueva página.',
+        ],
+      },
+    ],
+  };
+
+  const fullComposed = composeBookPages({
+    manuscript: fullManuscript,
+    editorialConfig,
+    chapterPhotos: { cap_1: samplePhoto },
+    allPhotosById: { photo_test_fish: samplePhoto },
+    previewSampleOnly: false,
+    lockedLeadingContentGroups: lockedPreviewGroups,
+    maxContentPages: 500,
+  });
+
+  // Verify Page 1 (Cover) matches preview exactly
+  assert.equal(fullComposed.pages[0].title, previewComposed.pages[0].title);
+  assert.equal(fullComposed.pages[0].subtitle, previewComposed.pages[0].subtitle);
+  assert.equal(fullComposed.pages[0].authors, previewComposed.pages[0].authors);
+
+  // Verify Page 2 (Title & Dedication) matches preview exactly
+  assert.equal(fullComposed.pages[1].introduction, previewComposed.pages[1].introduction);
+  assert.equal(fullComposed.pages[1].dedication, previewComposed.pages[1].dedication);
+
+  // Verify Pages 3, 4, 5 match preview content sections exactly character by character
+  assert.deepEqual(fullComposed.pages[2].sections, previewComposed.pages[2].sections);
+  assert.deepEqual(fullComposed.pages[3].sections, previewComposed.pages[3].sections);
+  assert.deepEqual(fullComposed.pages[4].sections, previewComposed.pages[4].sections);
+
+  // Verify that subsequent chapters (cap_3) start on a new page
+  const pageWithCap3 = fullComposed.pages.find((p) =>
+    (p.sections || []).some((s) => s.chapterId === 'cap_3' && !s.isContinuation)
+  );
+  assert.ok(pageWithCap3, 'El capítulo 3 debe existir');
+  const sectionsOnCap3Page = pageWithCap3.sections || [];
+  assert.equal(sectionsOnCap3Page[0].chapterId, 'cap_3');
+  assert.equal(sectionsOnCap3Page[0].isContinuation, false);
+
+  // Verify final closing page is closing_mandatory
+  const lastPage = fullComposed.pages[fullComposed.pages.length - 1];
+  assert.equal(lastPage.kind, 'closing_mandatory');
 });
 
 

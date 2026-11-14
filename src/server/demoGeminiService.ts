@@ -11,7 +11,9 @@ import {
   buildFallbackFollowUp,
   cleanSpanishOralText,
   ensureParagraphConformsToStyle,
+  resolveAnswerExclusionReason,
   sanitizeAndRepairBookManuscript,
+  splitAnswerTextIntoIncludedAndExcludedSentences,
 } from '../logic/demoStoryRules.ts';
 
 const ai = new GoogleGenAI({
@@ -263,22 +265,42 @@ export async function generateTransientDemoManuscript(payload: {
       continue;
     }
 
+    const filterExclusions = (txt: string): string => {
+      const clean = sanitizeInputText(txt, 3000);
+      if (!clean) return '';
+      if (resolveAnswerExclusionReason(clean) !== 'none') return '';
+      return splitAnswerTextIntoIncludedAndExcludedSentences(clean).includedSentences.join(' ').trim();
+    };
+
     const lines: string[] = [];
     lines.push(`PARTE ${q.stepNumber}: ${partTitle} (Dimensión: ${dimTitle})`);
     lines.push(
       `Pregunta principal: ${mode === 'pareja' ? q.coupleText : q.individualText}`
     );
 
+    let hasAnyIncludedContent = false;
     if (mode === 'pareja') {
-      const p1 = sanitizeInputText(r.partner1AnswerText, 2500);
-      const p2 = sanitizeInputText(r.partner2AnswerText, 2500);
-      const joint = sanitizeInputText(r.mainAnswerText, 3000);
-      if (p1) lines.push(`Respuesta de ${cleanProfile.partner1Name || 'Participante 1'}: ${p1}`);
-      if (p2) lines.push(`Respuesta de ${cleanProfile.partner2Name || 'Participante 2'}: ${p2}`);
-      if (joint) lines.push(`Respuesta compartida: ${joint}`);
+      const p1 = filterExclusions(r.partner1AnswerText || '');
+      const p2 = filterExclusions(r.partner2AnswerText || '');
+      const joint = filterExclusions(r.mainAnswerText || '');
+      if (p1) {
+        lines.push(`Respuesta de ${cleanProfile.partner1Name || 'Participante 1'}: ${p1}`);
+        hasAnyIncludedContent = true;
+      }
+      if (p2) {
+        lines.push(`Respuesta de ${cleanProfile.partner2Name || 'Participante 2'}: ${p2}`);
+        hasAnyIncludedContent = true;
+      }
+      if (joint) {
+        lines.push(`Respuesta compartida: ${joint}`);
+        hasAnyIncludedContent = true;
+      }
     } else {
-      const main = sanitizeInputText(r.mainAnswerText, 3000);
-      if (main) lines.push(`Respuesta del protagonista: ${main}`);
+      const main = filterExclusions(r.mainAnswerText || '');
+      if (main) {
+        lines.push(`Respuesta del protagonista: ${main}`);
+        hasAnyIncludedContent = true;
+      }
     }
 
     if (
@@ -286,15 +308,21 @@ export async function generateTransientDemoManuscript(payload: {
       r.followUpOmission !== 'not_recalled' &&
       r.followUpOmission !== 'prefer_not_to_answer'
     ) {
-      const fuAns = sanitizeInputText(r.followUpAnswerText, 2500);
-      const p1Fu = sanitizeInputText(r.partner1FollowUpText, 2000);
-      const p2Fu = sanitizeInputText(r.partner2FollowUpText, 2000);
+      const fuAns = filterExclusions(r.followUpAnswerText || '');
+      const p1Fu = filterExclusions(r.partner1FollowUpText || '');
+      const p2Fu = filterExclusions(r.partner2FollowUpText || '');
       if (fuAns || p1Fu || p2Fu) {
         lines.push(`Pregunta de profundización: ${sanitizeInputText(r.followUp.followUpQuestion, 400)}`);
         if (p1Fu) lines.push(`Profundización de ${cleanProfile.partner1Name}: ${p1Fu}`);
         if (p2Fu) lines.push(`Profundización de ${cleanProfile.partner2Name}: ${p2Fu}`);
         if (fuAns) lines.push(`Respuesta de profundización: ${fuAns}`);
+        hasAnyIncludedContent = true;
       }
+    }
+
+    if (!hasAnyIncludedContent) {
+      omittedDimensions.push(dimTitle);
+      continue;
     }
 
     dimensionBlocks.push(lines.join('\n'));
@@ -328,7 +356,7 @@ Tu misión es transformar las respuestas auténticas de una entrevista en un peq
 ${styleInstructions}
 
 21 REGLAS DE ESCRITURA INNEGOCIABLES:
-1. Crea un relato literario cohesivo dividido en capítulos/partes narrativas.
+1. Crea un relato literario cohesivo dividido en capítulos/partes narrativas. PROHIBIDO crear un capítulo separado por cada pregunta de profundización o respuesta individual: integra la respuesta principal y su profundización en una misma unidad narrativa fluida por cada dimensión activa.
 2. EVITA por completo el formato de cuestionario (nunca incluyas las preguntas dentro del texto).
 3. Evita presentar respuestas aisladas sin conexión; construye transiciones naturales entre recuerdos.
 4. Organiza la narración según las dimensiones biográficas que tengan información real:
@@ -436,7 +464,7 @@ Genera el manuscrito estructurado en JSON. Cada capítulo debe tener entre 2 y 3
           .filter((ch: any) => ch.paragraphs.length > 0);
 
         if (chapters.length > 0) {
-          return sanitizeAndRepairBookManuscript({
+          const repaired = sanitizeAndRepairBookManuscript({
             title:
               cleanProfile.customTitle ||
               sanitizeInputText(parsed.title, 140) ||
@@ -457,8 +485,15 @@ Genera el manuscrito estructurado en JSON. Cada capítulo debe tener entre 2 y 3
             closingMessage: sanitizeInputText(parsed.closingMessage, 1000),
             insufficientInfoNotices: omittedDimensions,
             generatedAt: new Date().toISOString(),
+            aiGenerated: true,
+            generationStatus: 'approved',
             useOfficialForeverYouLogo: true,
           });
+          return {
+            ...repaired,
+            aiGenerated: true,
+            generationStatus: 'approved',
+          };
         }
       }
     } catch (_err) {

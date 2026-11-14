@@ -12,6 +12,7 @@ import { FAQModal } from './components/FAQModal.tsx';
 import { IntegralPrivacyNoticeModal } from './components/IntegralPrivacyNoticeModal.tsx';
 import { ConocemeView } from './components/ConocemeView.tsx';
 import { DemoFreeTrialView } from './components/DemoFreeTrialView.tsx';
+import { FreeSelfRegisterView } from './components/FreeSelfRegisterView.tsx';
 import { MiEsenciaFamilyPortal } from './modules/mi-esencia/MiEsenciaFamilyPortal.tsx';
 import { auth, googleProvider } from './firebase/config.ts';
 import { onAuthStateChanged, signInWithPopup, signOut } from 'firebase/auth';
@@ -34,11 +35,16 @@ function isMiEsenciaLocation(): boolean {
 }
 
 export default function App() {
-  const [currentView, setCurrentView] = useState<'admin' | 'participant' | 'conoceme' | 'demo' | 'mi_esencia'>(() => {
+  const [currentView, setCurrentView] = useState<
+    'admin' | 'participant' | 'conoceme' | 'demo' | 'free' | 'mi_esencia'
+  >(() => {
     const urlParams = new URLSearchParams(window.location.search);
     const view = urlParams.get('view');
     if (isMiEsenciaLocation()) {
       return 'mi_esencia';
+    }
+    if (window.location.pathname.startsWith('/free') || view === 'free') {
+      return 'free';
     }
     if (window.location.pathname.startsWith('/demo') || view === 'demo') {
       return 'demo';
@@ -71,6 +77,7 @@ export default function App() {
     let token = urlParams.get('token') || urlParams.get('code');
     const view = urlParams.get('view');
     const isMiEsenciaUrl = isMiEsenciaLocation();
+    const isFreeUrl = window.location.pathname.startsWith('/free') || view === 'free';
     const isDemoUrl = window.location.pathname.startsWith('/demo') || view === 'demo';
     const isConocemeUrl = window.location.pathname.startsWith('/conoceme') || view === 'conoceme';
     const isAdminUrl = window.location.pathname.startsWith('/admin') || view === 'admin';
@@ -84,6 +91,8 @@ export default function App() {
     if (isMiEsenciaUrl) {
       if (token) setMiEsenciaCode(token);
       setCurrentView('mi_esencia');
+    } else if (isFreeUrl) {
+      setCurrentView('free');
     } else if (isDemoUrl) {
       setCurrentView('demo');
     } else if (isConocemeUrl) {
@@ -155,6 +164,8 @@ export default function App() {
           const urlParams = new URLSearchParams(window.location.search);
           const token = urlParams.get('token') || urlParams.get('code');
           const isMiEsenciaUrl = isMiEsenciaLocation();
+          const isFreeUrl =
+            window.location.pathname.startsWith('/free') || urlParams.get('view') === 'free';
           const isDemoUrl =
             window.location.pathname.startsWith('/demo') || urlParams.get('view') === 'demo';
           const isConocemeUrl =
@@ -165,6 +176,7 @@ export default function App() {
 
           if (
             !isMiEsenciaUrl &&
+            !isFreeUrl &&
             !isDemoUrl &&
             !isConocemeUrl &&
             authorized &&
@@ -218,13 +230,20 @@ export default function App() {
   };
 
   const handleEnterParticipantWithToken = (token: string) => {
+    if (typeof window !== 'undefined') {
+      window.history.pushState({}, '', `/interview?token=${encodeURIComponent(token)}`);
+    }
     setParticipantToken(token);
     setCurrentView('participant');
   };
 
-  const handleSelectView = (view: 'admin' | 'participant' | 'conoceme' | 'demo' | 'mi_esencia') => {
+  const handleSelectView = (
+    view: 'admin' | 'participant' | 'conoceme' | 'demo' | 'free' | 'mi_esencia'
+  ) => {
     if (view === 'mi_esencia') {
       window.history.pushState({}, '', '/miesencia');
+    } else if (view === 'free') {
+      window.history.pushState({}, '', '/free');
     } else if (view === 'demo') {
       window.history.pushState({}, '', '/demo');
     } else if (view === 'conoceme') {
@@ -238,14 +257,18 @@ export default function App() {
   };
 
   const isParticipantInterviewActive = currentView === 'participant' && Boolean(participantToken);
-  const isNavbarHidden = isParticipantInterviewActive || currentView === 'conoceme' || currentView === 'demo';
+  const isNavbarHidden =
+    isParticipantInterviewActive ||
+    currentView === 'conoceme' ||
+    currentView === 'demo' ||
+    currentView === 'free';
 
   return (
     <ThemeProvider>
       {currentView === 'mi_esencia' ? (
         <MiEsenciaFamilyPortal initialCode={miEsenciaCode} />
       ) : (
-        <div className="min-h-screen bg-stone-100/70 dark:bg-stone-950 text-stone-900 dark:text-stone-100 font-sans flex flex-col selection:bg-amber-200 transition-colors">
+        <div className="min-h-screen w-full max-w-full overflow-x-hidden bg-stone-100/70 dark:bg-stone-950 text-stone-900 dark:text-stone-100 font-sans flex flex-col selection:bg-amber-200 transition-colors">
           {!isNavbarHidden ? (
             <Navbar
               currentView={currentView}
@@ -257,13 +280,22 @@ export default function App() {
               onOpenPrivacyNotice={() => setIsPrivacyNoticeOpen(true)}
             />
           ) : (
-            <div className="fixed bottom-4 right-4 z-50">
+            <div
+              className={`fixed right-3 sm:right-4 z-50 ${
+                isParticipantInterviewActive ? 'bottom-20 sm:bottom-24' : 'bottom-4'
+              }`}
+            >
               <ThemeToggleButton className="shadow-lg" />
             </div>
           )}
 
           <main className={isNavbarHidden ? 'flex-1' : 'flex-1 py-6'}>
-            {currentView === 'demo' ? (
+            {currentView === 'free' ? (
+              <FreeSelfRegisterView
+                onEnterParticipantWithToken={handleEnterParticipantWithToken}
+                onNavigateToPortal={() => handleSelectView('participant')}
+              />
+            ) : currentView === 'demo' ? (
               <DemoFreeTrialView
                 onNavigateToConoceme={() => handleSelectView('conoceme')}
               />
@@ -323,7 +355,7 @@ export default function App() {
                   </button>
                   <span>•</span>
                   <span className="text-stone-500">
-                    Fidelidad testimonial estricta • Criptografía SHA-256
+                    Tus recuerdos conservados con respeto y privacidad
                   </span>
                 </div>
               </div>

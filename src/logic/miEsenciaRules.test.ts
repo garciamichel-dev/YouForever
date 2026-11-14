@@ -1269,8 +1269,121 @@ describe('Mi Esencia — Clasificación Interna (Tipo 1–8), Información Desco
     assert.equal(suggestionsTurn2.length, 3);
     assert.notDeepEqual(suggestionsTurn0, suggestionsTurn2);
   });
+
+  it('Compilado Testimonial Fidedigno PDF incluye preguntas, respuestas, transcripciones de voz, fotografías con descripciones e información adicional, y pasa validación como fuente obligatoria del libro', async () => {
+    const { validateCompilationPdfRecord } = await import('./miEsenciaRules.ts');
+    const {
+      DEFAULT_LITERARY_PROMPTS_CONFIG,
+      DEFAULT_LITERARY_PROMPT_VERSIONS,
+      INITIAL_APP_CONFIG,
+    } = await import('./interviewRules.ts');
+
+    // Un PNG 1x1 válido en base64
+    const tinyPngDataUrl =
+      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+
+    const testimoniesWithPhotosAndAdditional: MiEsenciaTestimonyBlock[] = [
+      {
+        testimonyId: 'test_q1',
+        avatarId: 'av_1',
+        personId: 'p_1',
+        sourcePdfId: 'pdf_1',
+        sourceQuestionId: 'q_1',
+        lifeStage: 'infancia',
+        topic: 'Infancia y Hogar',
+        questionLiteral: '¿Cómo era la casa donde creciste?',
+        answerLiteral:
+          'Crecí en una casa con patio grande en Oaxaca.\n\n[Transcripción de grabación de voz]:\nRecuerdo el aroma de los jazmines cada tarde.',
+        participantName: 'Doña Elena',
+        photoAttachments: [
+          {
+            id: 'photo_1',
+            caption: 'Patio familiar en Oaxaca en 1962',
+            fileName: 'patio.png',
+            mimeType: 'image/png',
+            dataUrl: tinyPngDataUrl,
+          },
+        ],
+        entitiesMentioned: ['Oaxaca'],
+        keywords: ['casa', 'patio', 'Oaxaca', 'jazmines'],
+        recordedAt: '2026-11-10T10:00:00.000Z',
+        immutable: true,
+      },
+      {
+        testimonyId: 'test_add_1',
+        avatarId: 'av_1',
+        personId: 'p_1',
+        sourcePdfId: 'pdf_1',
+        sourceQuestionId: 'additional_memory_1',
+        isAdditionalMemory: true,
+        lifeStage: 'legado_general',
+        topic: 'Información adicional',
+        questionLiteral: 'Información adicional incorporada posteriormente #1',
+        answerLiteral:
+          'Quise agregar este recuerdo sobre la receta secreta del mole de mi abuela.\n\n[Transcripción de grabación de voz]:\nEl secreto estaba en tostar los chiles al comal de barro.',
+        participantName: 'Doña Elena',
+        photoAttachments: [
+          {
+            id: 'photo_add_1',
+            caption: 'Recetario manuscrito de la abuela',
+            fileName: 'recetario.png',
+            mimeType: 'image/png',
+            dataUrl: tinyPngDataUrl,
+          },
+        ],
+        entitiesMentioned: [],
+        keywords: ['receta', 'mole', 'abuela'],
+        recordedAt: '2026-11-10T11:00:00.000Z',
+        immutable: true,
+      },
+    ];
+
+    const built = buildCompilationPdfBase64({
+      interviewTitle: 'Legado de Doña Elena',
+      participantNames: ['Doña Elena'],
+      rawTextContent: 'Texto íntegro de respaldo con transcripciones y fotos',
+      testimonies: testimoniesWithPhotosAndAdditional,
+    });
+
+    const pdfBuffer = Buffer.from(built.pdfBase64, 'base64');
+    assert.equal(pdfBuffer.subarray(0, 5).toString('ascii'), '%PDF-');
+    assert.equal(built.sha256Hash.length, 64);
+
+    const extracted = extractTextFromUploadedPdfBase64(built.pdfBase64);
+    assert.ok(extracted.includes('jazmines'));
+    assert.ok(extracted.includes('Patio familiar en Oaxaca en 1962'));
+    assert.ok(extracted.includes('comal de barro'));
+    assert.ok(extracted.includes('Recetario manuscrito de la abuela'));
+
+    const validCheck = validateCompilationPdfRecord({
+      pdfId: 'pdf_1',
+      sourceInterviewId: 'int_1',
+      avatarId: 'av_1',
+      fileName: 'compilado.pdf',
+      origin: 'auto_generated_from_interview',
+      sha256Hash: built.sha256Hash,
+      rawTextContent: extracted,
+      pdfBase64: built.pdfBase64,
+      totalQuestions: 2,
+      totalLiteralAnswers: 2,
+      totalAudiosTranscribed: 2,
+      totalPhotosReferenced: 2,
+      createdAt: new Date().toISOString(),
+      createdBy: 'system',
+    });
+    assert.equal(validCheck.valid, true);
+
+    const invalidCheck = validateCompilationPdfRecord(null);
+    assert.equal(invalidCheck.valid, false);
+    assert.ok(invalidCheck.reason && invalidCheck.reason.includes('Compilado Testimonial Fidedigno'));
+
+    // Verificar Gestor de Prompts Literarios y Configuración de Proveedores IA
+    assert.ok(DEFAULT_LITERARY_PROMPTS_CONFIG.first_person_simple.promptText.length > 50);
+    assert.ok(DEFAULT_LITERARY_PROMPTS_CONFIG.first_person_literary.promptText.length > 50);
+    assert.ok(DEFAULT_LITERARY_PROMPTS_CONFIG.third_person_biography.promptText.length > 50);
+    assert.ok(DEFAULT_LITERARY_PROMPT_VERSIONS.length >= 3);
+    assert.equal(INITIAL_APP_CONFIG.bookAiProvider, 'gemini');
+    assert.ok((INITIAL_APP_CONFIG.bookAiGeminiModel || '').length > 0);
+    assert.ok((INITIAL_APP_CONFIG.bookAiOpenAiModel || '').length > 0);
+  });
 });
-
-
-
-

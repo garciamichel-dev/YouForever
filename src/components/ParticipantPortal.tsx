@@ -39,6 +39,9 @@ import {
   validatePhotoAttachments,
   extractCleanTokenOrCode,
   shouldDisplayReopenedBanner,
+  mergeVoiceTranscriptText,
+  shouldAutoAdvanceAfterVoiceSubmit,
+  resolvePostSaveFeedbackNotice,
 } from '../logic/interviewRules.ts';
 import { QuestionPhotoUploader, DraftPhotoItem } from './QuestionPhotoUploader.tsx';
 import { VoiceRecorder, VoiceRecorderHandle, SavedVoiceAudiosList } from './VoiceRecorder.tsx';
@@ -118,14 +121,36 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
   const currentAudio = currentAudios.length > 0 ? currentAudios[currentAudios.length - 1] : null;
   const voiceRecorderRef = useRef<VoiceRecorderHandle | null>(null);
   const adaptiveVoiceRecorderRef = useRef<VoiceRecorderHandle | null>(null);
+  const additionalVoiceRecorderRef = useRef<VoiceRecorderHandle | null>(null);
   const answerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const adaptiveTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const additionalTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const questionViewTopRef = useRef<HTMLDivElement | null>(null);
   const adaptiveCardRef = useRef<HTMLDivElement | null>(null);
   const initialLoadedQuestionIdRef = useRef<string | null>(null);
+  const isSubmittingFromSaveButtonRef = useRef<boolean>(false);
+  const isSubmittingAdaptiveFromSaveRef = useRef<boolean>(false);
+  const saveNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearTemporarySaveNotice = () => {
+    if (saveNoticeTimerRef.current) {
+      clearTimeout(saveNoticeTimerRef.current);
+      saveNoticeTimerRef.current = null;
+    }
+    setSaveSuccessNotice(null);
+  };
+  const showTemporarySaveNotice = (message: string, durationMs = 3500) => {
+    if (saveNoticeTimerRef.current) {
+      clearTimeout(saveNoticeTimerRef.current);
+    }
+    setSaveSuccessNotice(message);
+    saveNoticeTimerRef.current = setTimeout(() => {
+      setSaveSuccessNotice(null);
+      saveNoticeTimerRef.current = null;
+    }, durationMs);
+  };
   const [branchChoice, setBranchChoice] = useState<'yes' | 'no' | null>(null);
   const [savingAnswer, setSavingAnswer] = useState(false);
+  const [voiceProcessingFlow, setVoiceProcessingFlow] = useState<'base' | 'adaptive' | null>(null);
   const [saveSuccessNotice, setSaveSuccessNotice] = useState<string | null>(null);
   const [flowTransitionNotice, setFlowTransitionNotice] = useState<string | null>(null);
   const [validationNotice, setValidationNotice] = useState<string | null>(null);
@@ -151,10 +176,28 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
 
   // Additional free information modal ("Añadir Información Adicional")
   const [showAdditionalMemoryModal, setShowAdditionalMemoryModal] = useState(false);
+  const [additionalSessionQuestionId, setAdditionalSessionQuestionId] = useState<string>(
+    () => `free_memory_${Date.now()}`
+  );
   const [additionalMemoryText, setAdditionalMemoryText] = useState('');
   const [additionalPhotos, setAdditionalPhotos] = useState<DraftPhotoItem[]>([]);
+  const [additionalAudios, setAdditionalAudios] = useState<AnswerVoiceAttachment[]>([]);
   const [additionalAudio, setAdditionalAudio] = useState<AnswerVoiceAttachment | null>(null);
+  const [isAdditionalTextareaExpanded, setIsAdditionalTextareaExpanded] = useState(false);
   const [additionalModalError, setAdditionalModalError] = useState<string | null>(null);
+
+  const openAdditionalMemoryModal = () => {
+    setAdditionalSessionQuestionId(
+      `free_memory_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`
+    );
+    setAdditionalMemoryText('');
+    setAdditionalPhotos([]);
+    setAdditionalAudios([]);
+    setAdditionalAudio(null);
+    setIsAdditionalTextareaExpanded(false);
+    setAdditionalModalError(null);
+    setShowAdditionalMemoryModal(true);
+  };
 
   // Voluntary completion modal
   const [showFinishModal, setShowFinishModal] = useState(false);
@@ -269,6 +312,31 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
       setLoading(true);
       setErrorMsg(null);
 
+      const stripCachedPhotoRef = (photo: any) => {
+        if (!photo || typeof photo !== 'object') return photo;
+        const pid = typeof photo.id === 'string' ? photo.id : '';
+        if (pid.startsWith('photo_')) {
+          const apiUrl = `/api/photos/${pid}`;
+          return { ...photo, objectUrl: apiUrl, dataUrl: apiUrl };
+        }
+        return photo;
+      };
+      const sanitizeCachedBookVersion = (bv: any) => {
+        if (!bv || typeof bv !== 'object') return bv;
+        const { allPhotosById: _dropAll, coverPhoto, chapterPhotos, ...rest } = bv;
+        const cleanChapterPhotos =
+          chapterPhotos && typeof chapterPhotos === 'object'
+            ? Object.fromEntries(
+                Object.entries(chapterPhotos).map(([k, v]) => [k, stripCachedPhotoRef(v)])
+              )
+            : chapterPhotos;
+        return {
+          ...rest,
+          coverPhoto: stripCachedPhotoRef(coverPhoto),
+          chapterPhotos: cleanChapterPhotos,
+        };
+      };
+
       let cachedInterviews: unknown[] | undefined = undefined;
       let cachedBookVersions: unknown[] | undefined = undefined;
       try {
@@ -276,14 +344,18 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
         if (rawCache) {
           const parsedCache = JSON.parse(rawCache);
           if (Array.isArray(parsedCache) && parsedCache.length > 0) {
-            cachedInterviews = parsedCache;
+            cachedInterviews = parsedCache.map((inv: any) =>
+              inv && typeof inv === 'object' && Array.isArray(inv.bookVersions)
+                ? { ...inv, bookVersions: inv.bookVersions.map(sanitizeCachedBookVersion) }
+                : inv
+            );
           }
         }
         const rawBvCache = localStorage.getItem('foreveryou_book_versions_cache');
         if (rawBvCache) {
           const parsedBvCache = JSON.parse(rawBvCache);
           if (Array.isArray(parsedBvCache) && parsedBvCache.length > 0) {
-            cachedBookVersions = parsedBvCache;
+            cachedBookVersions = parsedBvCache.map(sanitizeCachedBookVersion);
           }
         }
       } catch (_e) {
@@ -296,8 +368,16 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
         body: JSON.stringify({ token: cleanToken, cachedInterviews, cachedBookVersions }),
       });
 
-      const data = await res.json();
-      if (data.success && data.data) {
+      const rawText = await res.text();
+      let data: any = null;
+      if (rawText && rawText.trim()) {
+        try {
+          data = JSON.parse(rawText);
+        } catch (_parseErr) {
+          data = null;
+        }
+      }
+      if (res.ok && data?.success && data?.data) {
         setSessionData(data.data);
 
         const participantId: string = data.data.participant.id;
@@ -383,10 +463,15 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
           setCurrentQuestionId(landingQuestionId);
         }
       } else {
-        setErrorMsg(data.error || 'No se pudo validar el enlace de invitación.');
+        setErrorMsg(
+          data?.error ||
+            (res.ok
+              ? 'No se pudo validar el enlace de invitación.'
+              : 'No pudimos abrir tu entrevista en este momento. Inténtalo nuevamente en unos segundos.')
+        );
       }
-    } catch (err: unknown) {
-      setErrorMsg('Error de conexión al cargar la sesión.');
+    } catch (_err: unknown) {
+      setErrorMsg('No pudimos abrir tu entrevista en este momento. Revisa tu conexión e inténtalo nuevamente.');
     } finally {
       setLoading(false);
     }
@@ -628,7 +713,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
       ...sessionData,
       answers: updatedAnswers,
     });
-    setSaveSuccessNotice('Fotografía eliminada del servidor correctamente.');
+    setSaveSuccessNotice('Tu fotografía se eliminó correctamente.');
     setTimeout(() => setSaveSuccessNotice(null), 3000);
   };
 
@@ -671,7 +756,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
         answers: updatedAnswers,
       });
 
-      setSaveSuccessNotice('Archivo de voz eliminado del servidor correctamente.');
+      setSaveSuccessNotice('Tu nota de voz se eliminó correctamente.');
       setTimeout(() => setSaveSuccessNotice(null), 3000);
     } catch (err: any) {
       console.warn('Error deleting voice audio:', err);
@@ -773,6 +858,42 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
           setTimeout(() => setSilentAutosaveNotice(null), 4500);
 
           const savedAns: AnswerRecord = data.data.answer;
+          if (
+            Array.isArray(savedAns.photos) &&
+            savedAns.photos.length > 0 &&
+            currentQuestionRef.current?.id === savedAns.questionId
+          ) {
+            setCurrentPhotos((prevPhotos) => {
+              const usedServerIds = new Set<string>();
+              return prevPhotos.map((localPhoto, idx) => {
+                if (
+                  localPhoto.isPersisted &&
+                  localPhoto.id &&
+                  savedAns.photos?.some((sp) => sp.id === localPhoto.id)
+                ) {
+                  usedServerIds.add(localPhoto.id);
+                  return localPhoto;
+                }
+                const matchByMeta = savedAns.photos?.find(
+                  (sp) =>
+                    !usedServerIds.has(sp.id) &&
+                    ((sp.fileName && sp.fileName === localPhoto.fileName) ||
+                      (sp.caption && sp.caption.trim() === (localPhoto.caption || '').trim()))
+                );
+                const serverPhoto = matchByMeta || savedAns.photos?.[idx];
+                if (serverPhoto && serverPhoto.id && !usedServerIds.has(serverPhoto.id)) {
+                  usedServerIds.add(serverPhoto.id);
+                  return {
+                    ...localPhoto,
+                    id: serverPhoto.id,
+                    isPersisted: true,
+                  };
+                }
+                return localPhoto;
+              });
+            });
+          }
+
           setSessionData((prev) => {
             if (!prev) return prev;
             const updated = [...prev.answers];
@@ -825,12 +946,12 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
 
     if (nextStep.enteredSubFlowId) {
       setFlowTransitionNotice(
-        `Ingresando al sub-flujo «${nextStep.enteredSubFlowId}». Al terminar estas preguntas retornarás automáticamente al hilo principal.`
+        `Continuando con preguntas sobre «${nextStep.enteredSubFlowId}». Al terminar regresarás automáticamente al cuestionario principal.`
       );
       setTimeout(() => setFlowTransitionNotice(null), 6000);
     } else if (nextStep.returnedToMainFlow) {
       setFlowTransitionNotice(
-        'Has completado las preguntas del sub-flujo. Retornando al hilo principal del cuestionario.'
+        'Has terminado esta sección especial. Regresamos a las preguntas principales.'
       );
       setTimeout(() => setFlowTransitionNotice(null), 6000);
     }
@@ -854,34 +975,52 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
   // Save current question answer
   const handleSaveAnswer = async (
     notRecalled: boolean = false,
-    explicitBranchChoice?: 'yes' | 'no' | null
+    explicitBranchChoice?: 'yes' | 'no' | null,
+    overrides?: {
+      answerTextOverride?: string;
+      audiosOverride?: AnswerVoiceAttachment[];
+      skipFinalizeVoice?: boolean;
+    }
   ) => {
     if (!sessionData || !currentQuestion) return;
 
-    let activeAudios = [...currentAudios];
-    let textToSave = currentAnswerText.trim();
+    let activeAudios = overrides?.audiosOverride
+      ? [...overrides.audiosOverride]
+      : [...currentAudios];
+    let textToSave = (
+      overrides?.answerTextOverride !== undefined
+        ? overrides.answerTextOverride
+        : currentAnswerText
+    ).trim();
 
-    // 2da Corrección: Si el entrevistado está grabando audio al pulsar "Guardar respuesta" o "Enviar",
+    clearTemporarySaveNotice();
+
+    // Si el entrevistado está grabando audio al pulsar "Guardar respuesta" o "Enviar",
     // finalizar y subir automáticamente el audio con su transcripción antes de avanzar.
-    if (!notRecalled && voiceRecorderRef.current?.isRecordingOrActive()) {
+    let finalizedVoiceDuringSave = false;
+    if (
+      !notRecalled &&
+      !overrides?.skipFinalizeVoice &&
+      voiceRecorderRef.current?.isRecordingOrActive()
+    ) {
+      finalizedVoiceDuringSave = true;
       try {
         setSavingAnswer(true);
+        setVoiceProcessingFlow('base');
+        isSubmittingFromSaveButtonRef.current = true;
         const freshlyRecorded = await voiceRecorderRef.current.finalizeAndUpload();
         if (freshlyRecorded) {
           if (!activeAudios.some((a) => a.id === freshlyRecorded.id)) {
             activeAudios.push(freshlyRecorded);
           }
           if (freshlyRecorded.transcription && freshlyRecorded.transcription.trim().length > 0) {
-            const transcript = freshlyRecorded.transcription.trim();
-            if (!textToSave || textToSave === 'No aplica a mi historia.') {
-              textToSave = transcript;
-            } else if (!textToSave.includes(transcript)) {
-              textToSave = `${textToSave}\n\n[Nota de voz]: ${transcript}`;
-            }
+            textToSave = mergeVoiceTranscriptText(textToSave, freshlyRecorded.transcription);
           }
         }
       } catch (voiceErr) {
         console.warn('Error auto-finalizing voice recording:', voiceErr);
+      } finally {
+        isSubmittingFromSaveButtonRef.current = false;
       }
     }
 
@@ -891,6 +1030,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
       if (!photoCheck.valid) {
         setValidationNotice(photoCheck.error || 'Por favor describe la fotografía adjunta.');
         setSavingAnswer(false);
+        if (finalizedVoiceDuringSave) setVoiceProcessingFlow(null);
         return;
       }
     }
@@ -917,6 +1057,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
         'Por favor escribe tu respuesta, graba una nota de voz o pulsa «Omitir y continuar» para avanzar.'
       );
       setSavingAnswer(false);
+      if (finalizedVoiceDuringSave) setVoiceProcessingFlow(null);
       return;
     }
 
@@ -959,14 +1100,6 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
       const data = await res.json();
       if (data.success) {
         clearQuestionDraft(sessionData.participant.id, currentQuestion.id);
-        setSaveSuccessNotice(
-          activeAudios.length > 0
-            ? 'Respuesta, grabaciones de voz y transcripción guardadas con éxito en la base de datos. Avanzando...'
-            : currentPhotos.length > 0
-            ? 'Respuesta y fotografías guardadas con éxito en el servidor. Avanzando...'
-            : 'Respuesta guardada con éxito en la base de datos. Avanzando...'
-        );
-        setTimeout(() => setSaveSuccessNotice(null), 3500);
 
         const savedAns: AnswerRecord = data.data.answer;
         setCurrentPhotos(mapAttachmentsToDraftItems(savedAns.photos));
@@ -995,17 +1128,26 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
 
         setSessionData({
           ...sessionData,
-          interview: data.data.interview,
+          interview: data.data.interview || sessionData.interview,
           answers: updatedAnswers,
         });
 
-        // If the server generated an autonomous deepening question for this answer, show it before advancing
-        if (
+        const hasAdaptiveFollowUp = Boolean(
           !notRecalled &&
-          chosenBranch !== 'no' &&
-          data.data.adaptiveQuestion &&
-          data.data.adaptiveQuestion.text
-        ) {
+            chosenBranch !== 'no' &&
+            data.data.adaptiveQuestion &&
+            data.data.adaptiveQuestion.text
+        );
+        const feedback = resolvePostSaveFeedbackNotice({
+          flowType: 'base',
+          hasAdaptiveFollowUp,
+          hasVoiceAudio: activeAudios.length > 0,
+          hasPhotos: currentPhotos.length > 0,
+          notRecalled,
+        });
+
+        // If the server generated an autonomous deepening question for this answer, show it before advancing
+        if (hasAdaptiveFollowUp) {
           setAdaptiveQuestion({
             text: data.data.adaptiveQuestion.text,
             parentQuestionId: currentQuestion.id,
@@ -1019,56 +1161,77 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
           setAdaptivePhotos([]);
           setAdaptiveAudio(null);
           setIsAdaptiveTextareaExpanded(false);
-          setSaveSuccessNotice(
-            'Respuesta guardada. Hemos preparado una pregunta para profundizar en este recuerdo.'
-          );
-          setTimeout(() => setSaveSuccessNotice(null), 4000);
           scrollAndFocusAdaptiveCard();
+          showTemporarySaveNotice(feedback.message, feedback.durationMs);
         } else {
-          // Clear any pending adaptive state and advance to the next question in the flow
+          // Clear any pending adaptive state, advance to the next question, and ONLY THEN show the confirmation notice
           setAdaptiveQuestion(null);
           setAdaptiveAnswerText('');
           setAdaptivePhotos([]);
           setAdaptiveAudio(null);
           setIsAdaptiveTextareaExpanded(false);
           advanceInFlowAfterQuestion(currentQuestion.id, updatedAnswers);
+          showTemporarySaveNotice(feedback.message, feedback.durationMs);
         }
       } else {
         setValidationNotice(data.error || 'Error al guardar la respuesta.');
       }
     } catch (err: unknown) {
       console.error('Error saving answer:', err);
-      setValidationNotice('Error de red al guardar la respuesta. Por favor intenta de nuevo.');
+      setValidationNotice('No pudimos guardar tu respuesta por un problema de conexión. Por favor intenta de nuevo.');
     } finally {
       setSavingAnswer(false);
+      if (finalizedVoiceDuringSave) {
+        setVoiceProcessingFlow(null);
+      }
     }
   };
 
   // Submit Autonomous Deepening Follow-up Answer
-  const handleSaveAdaptive = async () => {
+  const handleSaveAdaptive = async (overrides?: {
+    answerTextOverride?: string;
+    audioOverride?: AnswerVoiceAttachment | null;
+    skipFinalizeVoice?: boolean;
+  }) => {
     if (!sessionData || !adaptiveQuestion) return;
 
-    let currentAdaptAudio = adaptiveAudio;
-    let currentAdaptText = adaptiveAnswerText.trim();
+    let currentAdaptAudio =
+      overrides?.audioOverride !== undefined ? overrides.audioOverride : adaptiveAudio;
+    let currentAdaptText = (
+      overrides?.answerTextOverride !== undefined
+        ? overrides.answerTextOverride
+        : adaptiveAnswerText
+    ).trim();
 
-    if (adaptiveVoiceRecorderRef.current?.isRecordingOrActive()) {
+    clearTemporarySaveNotice();
+
+    let finalizedAdaptiveVoice = false;
+    if (
+      !overrides?.skipFinalizeVoice &&
+      adaptiveVoiceRecorderRef.current?.isRecordingOrActive()
+    ) {
+      finalizedAdaptiveVoice = true;
       try {
         setSavingAnswer(true);
+        setVoiceProcessingFlow('adaptive');
+        isSubmittingAdaptiveFromSaveRef.current = true;
         const freshlyRecorded = await adaptiveVoiceRecorderRef.current.finalizeAndUpload();
         if (freshlyRecorded) {
           currentAdaptAudio = freshlyRecorded;
           setAdaptiveAudio(freshlyRecorded);
           if (freshlyRecorded.transcription && freshlyRecorded.transcription.trim().length > 0) {
-            const transcript = freshlyRecorded.transcription.trim();
-            currentAdaptText = currentAdaptText
-              ? `${currentAdaptText}\n\n[Nota de voz]: ${transcript}`
-              : transcript;
+            currentAdaptText = mergeVoiceTranscriptText(
+              currentAdaptText,
+              freshlyRecorded.transcription
+            );
             setAdaptiveAnswerText(currentAdaptText);
             setIsAdaptiveTextareaExpanded(true);
           }
         }
       } catch (voiceErr) {
         console.warn('Error auto-finalizing adaptive voice recording:', voiceErr);
+      } finally {
+        isSubmittingAdaptiveFromSaveRef.current = false;
       }
     }
 
@@ -1077,6 +1240,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
       if (!photoCheck.valid) {
         setValidationNotice(photoCheck.error || 'Por favor describe la fotografía adjunta.');
         setSavingAnswer(false);
+        if (finalizedAdaptiveVoice) setVoiceProcessingFlow(null);
         return;
       }
     }
@@ -1093,6 +1257,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
         'Escribe una respuesta o graba una nota de voz para la profundización, o pulsa «Omitir profundización y avanzar».'
       );
       setSavingAnswer(false);
+      if (finalizedAdaptiveVoice) setVoiceProcessingFlow(null);
       return;
     }
 
@@ -1125,12 +1290,17 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
         const updatedAnswers = [...sessionData.answers, data.data.answer];
         setSessionData({
           ...sessionData,
-          interview: data.data.interview,
+          interview: data.data.interview || sessionData.interview,
           answers: updatedAnswers,
         });
 
-        setSaveSuccessNotice('Profundización guardada e integrada a tu historia.');
-        setTimeout(() => setSaveSuccessNotice(null), 3000);
+        const feedback = resolvePostSaveFeedbackNotice({
+          flowType: 'adaptive',
+          hasAdaptiveFollowUp: Boolean(data.data.adaptiveQuestion),
+          hasVoiceAudio: Boolean(currentAdaptAudio),
+          hasPhotos: adaptivePhotos.length > 0,
+          notRecalled: false,
+        });
 
         // If the system generated a second autonomous deepening question (within maxFollowUps limit)
         if (data.data.adaptiveQuestion) {
@@ -1146,6 +1316,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
           setAdaptiveAudio(null);
           setIsAdaptiveTextareaExpanded(false);
           scrollAndFocusAdaptiveCard();
+          showTemporarySaveNotice(feedback.message, feedback.durationMs);
         } else {
           setAdaptiveQuestion(null);
           setAdaptiveAnswerText('');
@@ -1153,15 +1324,19 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
           setAdaptiveAudio(null);
           setIsAdaptiveTextareaExpanded(false);
           advanceInFlowAfterQuestion(parentId, updatedAnswers);
+          showTemporarySaveNotice(feedback.message, feedback.durationMs);
         }
       } else {
         setValidationNotice(data.error || 'Error al guardar la profundización.');
       }
     } catch (err) {
       console.error(err);
-      setValidationNotice('Error de red al guardar la profundización.');
+      setValidationNotice('No pudimos guardar tu respuesta adicional por un problema de conexión. Inténtalo nuevamente.');
     } finally {
       setSavingAnswer(false);
+      if (finalizedAdaptiveVoice) {
+        setVoiceProcessingFlow(null);
+      }
     }
   };
 
@@ -1170,42 +1345,96 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
     if (!sessionData) return;
     setAdditionalModalError(null);
 
+    let currentAddAudio = additionalAudio;
+    let currentAddAudios = [...additionalAudios];
+    let currentAddText = additionalMemoryText.trim();
+
+    if (additionalVoiceRecorderRef.current?.isRecordingOrActive()) {
+      try {
+        setSavingAnswer(true);
+        const freshlyRecorded = await additionalVoiceRecorderRef.current.finalizeAndUpload();
+        if (freshlyRecorded) {
+          currentAddAudio = freshlyRecorded;
+          currentAddAudios = [...currentAddAudios.filter((a) => a.id !== freshlyRecorded.id), freshlyRecorded];
+          setAdditionalAudio(freshlyRecorded);
+          setAdditionalAudios(currentAddAudios);
+          if (freshlyRecorded.transcription && freshlyRecorded.transcription.trim().length > 0) {
+            const transcript = freshlyRecorded.transcription.trim();
+            currentAddText = currentAddText
+              ? currentAddText.includes(transcript)
+                ? currentAddText
+                : `${currentAddText}\n\n${transcript}`
+              : transcript;
+            setAdditionalMemoryText(currentAddText);
+            setIsAdditionalTextareaExpanded(true);
+          }
+        }
+      } catch (voiceErr) {
+        console.warn('Error auto-finalizing additional voice recording:', voiceErr);
+      }
+    }
+
     if (additionalPhotos.length > 0) {
       const photoCheck = validatePhotoAttachments(additionalPhotos);
       if (!photoCheck.valid) {
         setAdditionalModalError(photoCheck.error || 'Por favor describe la fotografía adjunta.');
+        setSavingAnswer(false);
         return;
       }
     }
 
     const textToSave =
-      additionalMemoryText.trim() ||
-      (additionalAudio ? additionalAudio.transcription : '') ||
+      currentAddText ||
+      (currentAddAudio ? (currentAddAudio.transcription || '').trim() : '') ||
       (additionalPhotos.length > 0
         ? additionalPhotos.map((p) => p.caption.trim()).join('. ')
         : '');
 
-    if (textToSave.length === 0) {
-      setAdditionalModalError('Escribe un recuerdo, graba una nota de voz o adjunta una fotografía.');
+    if (textToSave.length === 0 && additionalPhotos.length === 0 && !currentAddAudio) {
+      setAdditionalModalError('Graba una nota de voz, escribe un recuerdo o adjunta una fotografía.');
+      setSavingAnswer(false);
       return;
     }
 
+    // Ensure the user's edited transcription is synchronized onto the audio attachment
+    const syncedAudioAttachment = currentAddAudio
+      ? {
+          ...currentAddAudio,
+          transcription: currentAddText || currentAddAudio.transcription || textToSave,
+        }
+      : undefined;
+
+    const syncedAudioRecordings =
+      currentAddAudios.length > 0
+        ? currentAddAudios.map((aud, idx) =>
+            idx === currentAddAudios.length - 1 && currentAddText
+              ? { ...aud, transcription: currentAddText }
+              : aud
+          )
+        : syncedAudioAttachment
+        ? [syncedAudioAttachment]
+        : [];
+
     try {
       setSavingAnswer(true);
-      const idempotencyKey = `free_${sessionData.participant.id}_${Date.now()}`;
+      const stableQuestionId =
+        additionalSessionQuestionId ||
+        `free_memory_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+      const idempotencyKey = `free_${sessionData.participant.id}_${stableQuestionId}`;
 
       const res = await fetch('/api/participant/answer', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           token: activeToken,
-          questionId: `free_memory_${Date.now()}`,
+          questionId: stableQuestionId,
           questionText: 'Información adicional incorporada por el entrevistado',
           answerText: textToSave,
           notRecalled: false,
           isAdditionalMemory: true,
           photos: additionalPhotos,
-          audio: additionalAudio || undefined,
+          audio: syncedAudioAttachment,
+          audioRecordings: syncedAudioRecordings,
           idempotencyKey,
         }),
       });
@@ -1215,15 +1444,20 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
         setShowAdditionalMemoryModal(false);
         setAdditionalMemoryText('');
         setAdditionalPhotos([]);
+        setAdditionalAudios([]);
         setAdditionalAudio(null);
+        setIsAdditionalTextareaExpanded(false);
         setAdditionalModalError(null);
         setSessionData({
           ...sessionData,
           interview: data.data.interview,
-          answers: [...sessionData.answers, data.data.answer],
+          answers: [
+            ...sessionData.answers.filter((a) => a.id !== data.data.answer.id),
+            data.data.answer,
+          ],
         });
         setSaveSuccessNotice(
-          '¡Tu información adicional ha sido guardada e integrada permanentemente a tu legado!'
+          '¡Tu información adicional (grabación, texto y fotografías) se guardó correctamente y ya forma parte de tus recuerdos para tu libro!'
         );
         setTimeout(() => setSaveSuccessNotice(null), 4000);
       } else {
@@ -1231,7 +1465,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
       }
     } catch (err) {
       console.error(err);
-      setAdditionalModalError('Error de red al guardar la información adicional.');
+      setAdditionalModalError('No pudimos guardar esta información por un problema de conexión. Inténtalo nuevamente.');
     } finally {
       setSavingAnswer(false);
     }
@@ -1333,7 +1567,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
   // If no session loaded, show invitation token access screen
   if (!sessionData) {
     return (
-      <div className="max-w-md mx-auto my-12 bg-white p-8 rounded-2xl border border-stone-200 shadow-md text-stone-800">
+      <div className="max-w-md w-full mx-auto my-6 sm:my-12 bg-white p-5 sm:p-8 rounded-2xl border border-stone-200 shadow-md text-stone-800">
         <div className="flex justify-center mb-4">
           <ForeverYouLogo variant="stacked" theme="navy" size="lg" />
         </div>
@@ -1341,7 +1575,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
           Bienvenido a tu Entrevista de Legado
         </h2>
         <p className="text-xs text-stone-500 text-center mb-6">
-          Ingresa el código o token de invitación que recibiste por correo o mensaje para comenzar.
+          Ingresa el código o enlace de invitación que recibiste por correo o mensaje para comenzar.
         </p>
 
         {logoutNotice && (
@@ -1385,7 +1619,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
               className="w-full px-3.5 py-2.5 border border-stone-300 rounded-lg text-xs font-mono text-stone-900 focus:outline-none focus:ring-2 focus:ring-amber-200 focus:border-amber-600 uppercase"
             />
             <p className="text-[11px] text-stone-400 mt-1.5">
-              Puedes escribir tu código alfanumérico (ej.{' '}
+              Puedes escribir tu código de acceso (ej.{' '}
               <code className="bg-stone-100 text-stone-700 px-1 py-0.5 rounded font-bold">
                 YF-8K4M2
               </code>
@@ -1434,7 +1668,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
             });
             const json = await res.json();
             if (!json.success) {
-              throw new Error(json.error || 'No se pudo registrar el consentimiento en el servidor.');
+              throw new Error(json.error || 'No pudimos guardar tu confirmación. Inténtalo nuevamente.');
             }
             setSessionData({
               ...sessionData,
@@ -1469,7 +1703,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
       : [];
 
   return (
-    <div className="min-h-screen bg-stone-50/70 text-stone-900 flex flex-col">
+    <div className="min-h-screen w-full max-w-full overflow-x-hidden bg-stone-50/70 text-stone-900 flex flex-col">
       {/* 1. Compact Sticky Top Header: ForeverYou + Quick Icons + Single Gear Menu */}
       <header className="sticky top-0 z-40 bg-white/95 backdrop-blur-md border-b border-stone-200/90 shadow-2xs">
         <div className="max-w-4xl mx-auto w-full px-3 sm:px-4 h-14 flex items-center justify-between gap-2">
@@ -1741,10 +1975,10 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                     Cuestionario Completado
                   </span>
                   <h3 className="font-serif text-2xl font-bold text-stone-900">
-                    ¡Has completado todas las preguntas del instrumento!
+                    ¡Has completado todas las preguntas de tu entrevista!
                   </h3>
                   <p className="text-sm text-stone-600 leading-relaxed">
-                    Ya has completado el recorrido del cuestionario biográfico. Si lo deseas, puedes incorporar información adicional dando clic en <strong>«Añadir Información Adicional»</strong>, o bien confirmar el cierre definitivo para pasar a las <strong>opciones de maquetación editorial y descargar tu libro en PDF</strong>.
+                    Ya has respondido todas las preguntas principales de tu historia. Si lo deseas, puedes agregar algún recuerdo adicional en <strong>«Añadir Información Adicional»</strong>, o confirmar que terminaste para <strong>diseñar y descargar tu libro</strong>.
                   </p>
                 </div>
 
@@ -1752,7 +1986,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                   {sessionData.allowAdditionalMemories && isInterviewOpen && !isExpired && (
                     <button
                       type="button"
-                      onClick={() => setShowAdditionalMemoryModal(true)}
+                      onClick={openAdditionalMemoryModal}
                       className="inline-flex items-center space-x-2 px-5 py-2.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl text-xs sm:text-sm font-semibold shadow-xs transition cursor-pointer"
                     >
                       <PlusCircle className="w-4 h-4" />
@@ -1776,7 +2010,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                       className="inline-flex items-center space-x-1.5 px-5 py-2.5 bg-amber-700 hover:bg-amber-800 text-white rounded-xl text-xs sm:text-sm font-semibold transition shadow-xs cursor-pointer"
                     >
                       <BookOpen className="w-4 h-4" />
-                      <span>Confirmar Cierre y Maquetar Mi Libro</span>
+                      <span>Confirmar Cierre y Diseñar Mi Libro</span>
                     </button>
                   )}
                 </div>
@@ -1816,12 +2050,12 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                   <div className="flex items-center space-x-2">
                     <GitBranch className="w-4 h-4 text-emerald-700 shrink-0" />
                     <span>
-                      <strong>Sub-flujo: «{currentFlowItem.flowId}»</strong> (Paso{' '}
+                      <strong>Sección: «{currentFlowItem.flowId}»</strong> (Paso{' '}
                       {currentFlowItem.subFlowStepIndex} de {currentFlowItem.subFlowTotalSteps})
                     </span>
                   </div>
                   <span className="text-[11px] text-emerald-700 font-medium">
-                    Retornará al hilo principal
+                    Después continuarás con tu historia
                   </span>
                 </div>
               )}
@@ -1933,33 +2167,50 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                       answerTextareaRef.current?.focus();
                     }, 100);
                   }}
-                  onVoiceSubmitted={(audio, transcription, allAudios, diagnosis) => {
+                  onVoiceSubmitted={async (audio, transcription, allAudios, diagnosis) => {
                     setCurrentAudios(allAudios);
                     const cleanTranscript = (transcription || '').trim();
+                    const nextText = cleanTranscript
+                      ? mergeVoiceTranscriptText(currentAnswerText, cleanTranscript)
+                      : currentAnswerText;
+
                     if (cleanTranscript.length > 0) {
                       setIsTextareaExpanded(true);
-                      setCurrentAnswerText((prev) => {
-                        const cleanPrev = prev.trim();
-                        if (!cleanPrev || cleanPrev === 'No aplica a mi historia.') {
-                          return cleanTranscript;
-                        }
-                        if (cleanPrev.includes(cleanTranscript)) {
-                          return cleanPrev;
-                        }
-                        return `${cleanPrev}\n\n[Nota de voz]: ${cleanTranscript}`;
-                      });
-                      if (diagnosis?.audioQuality !== 'noisy') {
-                        setSaveSuccessNotice(
-                          'Archivo de voz y transcripción guardados con éxito.'
-                        );
-                        setTimeout(() => setSaveSuccessNotice(null), 3500);
+                      setCurrentAnswerText(nextText);
+                    }
+
+                    if (isSubmittingFromSaveButtonRef.current) {
+                      return;
+                    }
+
+                    if (
+                      shouldAutoAdvanceAfterVoiceSubmit({
+                        transcript: cleanTranscript,
+                        audioQuality: diagnosis?.audioQuality,
+                      })
+                    ) {
+                      setVoiceProcessingFlow('base');
+                      try {
+                        await handleSaveAnswer(false, undefined, {
+                          answerTextOverride: nextText,
+                          audiosOverride: allAudios,
+                          skipFinalizeVoice: true,
+                        });
+                      } finally {
+                        setVoiceProcessingFlow(null);
                       }
+                    } else {
+                      clearTemporarySaveNotice();
+                      setValidationNotice(
+                        'No pudimos transcribir con claridad el audio. Revisa la grabación, vuelve a intentarlo o escribe tu respuesta con el teclado para continuar.'
+                      );
                     }
                   }}
                   onVoiceDeleted={(delId) => {
                     setCurrentAudios((prev) => prev.filter((a) => a.id !== delId));
                   }}
-                  disabled={!isInterviewOpen || Boolean(adaptiveQuestion)}
+                  isExternalProcessing={voiceProcessingFlow === 'base'}
+                  disabled={!isInterviewOpen || Boolean(adaptiveQuestion) || savingAnswer}
                 />
               </div>
 
@@ -2033,7 +2284,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                 {sessionData.allowAdditionalMemories && isInterviewOpen && !isExpired && (
                   <button
                     type="button"
-                    onClick={() => setShowAdditionalMemoryModal(true)}
+                    onClick={openAdditionalMemoryModal}
                     className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-white text-stone-700 border border-stone-300 hover:bg-stone-50 transition cursor-pointer"
                   >
                     <PlusCircle className="w-3.5 h-3.5 text-emerald-600" />
@@ -2099,21 +2350,21 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
 
               {/* 6. FIXED BOTTOM ACTION BAR (Omitir y continuar secondary, Guardar y continuar primary) */}
               {isInterviewOpen && !adaptiveQuestion && (
-                <div className="fixed bottom-0 inset-x-0 z-30 bg-white/95 backdrop-blur-md border-t border-stone-200/90 shadow-[0_-4px_20px_rgba(0,0,0,0.06)] px-3 sm:px-4 py-2.5 sm:py-3">
-                  <div className="max-w-2xl mx-auto flex items-center justify-between gap-2 sm:gap-4">
+                <div className="fixed bottom-0 inset-x-0 z-30 bg-white/95 backdrop-blur-md border-t border-stone-200/90 shadow-[0_-4px_20px_rgba(0,0,0,0.06)] px-2 sm:px-4 py-2 sm:py-3">
+                  <div className="max-w-2xl mx-auto flex items-center justify-between gap-1.5 sm:gap-4">
                     {/* Secondary Action: Omitir y continuar */}
                     <button
                       type="button"
                       onClick={() => handleSaveAnswer(true, 'no')}
                       disabled={savingAnswer}
                       title="Esta acción te permite avanzar a la siguiente pregunta respetando tu ritmo y sin forzar el recuerdo"
-                      className="px-3.5 sm:px-4 py-2.5 rounded-xl border border-stone-300 text-stone-700 hover:bg-stone-100 font-semibold text-xs sm:text-sm transition cursor-pointer disabled:opacity-40"
+                      className="px-2.5 sm:px-4 py-2 sm:py-2.5 rounded-xl border border-stone-300 text-stone-700 hover:bg-stone-100 font-semibold text-[11px] sm:text-sm whitespace-nowrap transition cursor-pointer disabled:opacity-40"
                     >
                       « Omitir y continuar
                     </button>
 
                     {/* Step Navigation Arrows */}
-                    <div className="flex items-center gap-1 text-stone-500">
+                    <div className="flex items-center gap-0.5 sm:gap-1 text-stone-500 shrink-0">
                       <button
                         type="button"
                         aria-label="Pregunta anterior"
@@ -2126,13 +2377,13 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                             scrollAndFocusQuestionTop();
                           }
                         }}
-                        className="p-2 border border-stone-200 text-stone-600 rounded-lg hover:bg-stone-100 disabled:opacity-30 transition cursor-pointer"
+                        className="p-1.5 sm:p-2 border border-stone-200 text-stone-600 rounded-lg hover:bg-stone-100 disabled:opacity-30 transition cursor-pointer"
                       >
-                        <ChevronLeft className="w-4 h-4" />
+                        <ChevronLeft className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
                       </button>
 
                       <span
-                        className="text-xs font-semibold text-stone-600 px-1.5"
+                        className="text-[11px] sm:text-xs font-semibold text-stone-600 px-1 sm:px-1.5"
                         title={`Avance de tu historia: ${progressPercent}%`}
                       >
                         {progressPercent}%
@@ -2154,9 +2405,9 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                             scrollAndFocusQuestionTop();
                           }
                         }}
-                        className="p-2 border border-stone-200 text-stone-600 rounded-lg hover:bg-stone-100 transition cursor-pointer"
+                        className="p-1.5 sm:p-2 border border-stone-200 text-stone-600 rounded-lg hover:bg-stone-100 transition cursor-pointer"
                       >
-                        <ChevronRight className="w-4 h-4" />
+                        <ChevronRight className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
                       </button>
                     </div>
 
@@ -2165,9 +2416,9 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                       type="button"
                       onClick={() => handleSaveAnswer(false)}
                       disabled={savingAnswer}
-                      className="inline-flex items-center gap-1.5 sm:gap-2 px-5 sm:px-6 py-2.5 sm:py-3 bg-gradient-to-r from-amber-700 via-amber-800 to-amber-900 hover:from-amber-800 hover:to-amber-950 text-white rounded-xl text-xs sm:text-sm font-bold shadow-md hover:shadow-lg transition cursor-pointer disabled:opacity-50"
+                      className="inline-flex items-center gap-1 sm:gap-2 px-3 sm:px-6 py-2 sm:py-3 bg-gradient-to-r from-amber-700 via-amber-800 to-amber-900 hover:from-amber-800 hover:to-amber-950 text-white rounded-xl text-[11px] sm:text-sm font-bold whitespace-nowrap shadow-md hover:shadow-lg transition cursor-pointer disabled:opacity-50"
                     >
-                      <Save className="w-4 h-4" />
+                      <Save className="w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0" />
                       <span>{savingAnswer ? 'Guardando...' : 'Guardar y Continuar »'}</span>
                     </button>
                   </div>
@@ -2184,18 +2435,15 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                     <div className="flex items-center space-x-2 text-amber-950">
                       <Sparkles className="w-4 h-4 text-amber-700" />
                       <span className="font-serif font-bold text-sm">
-                        Pregunta Autónoma de Profundización ({adaptiveQuestion.followUpIndex || 1}{' '}
+                        Pregunta para profundizar en tu recuerdo ({adaptiveQuestion.followUpIndex || 1}{' '}
                         de {adaptiveQuestion.maxFollowUps || interview.maxFollowUpsAtCreation})
                       </span>
                     </div>
-                    <span className="text-[11px] px-2 py-0.5 rounded bg-amber-100 text-amber-900 font-semibold">
-                      Generada por el sistema a partir de tu respuesta
-                    </span>
                   </div>
 
                   {adaptiveQuestion.reason && (
                     <p className="text-xs text-amber-900 bg-white/80 px-3 py-2 rounded-lg border border-amber-200/80">
-                      <strong>Aspecto relevante detectado:</strong> {adaptiveQuestion.reason}
+                      <strong>Sobre este recuerdo:</strong> {adaptiveQuestion.reason}
                     </p>
                   )}
 
@@ -2219,26 +2467,48 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                           adaptiveTextareaRef.current?.focus();
                         }, 100);
                       }}
-                      onVoiceSubmitted={(audio, transcription, _allAudios, diagnosis) => {
+                      onVoiceSubmitted={async (audio, transcription, _allAudios, diagnosis) => {
                         setAdaptiveAudio(audio);
                         const cleanTranscript = (transcription || '').trim();
+                        const nextAdaptText = cleanTranscript
+                          ? mergeVoiceTranscriptText(adaptiveAnswerText, cleanTranscript)
+                          : adaptiveAnswerText;
+
                         if (cleanTranscript.length > 0) {
                           setIsAdaptiveTextareaExpanded(true);
-                          setAdaptiveAnswerText((prev) => {
-                            const cleanPrev = prev.trim();
-                            if (!cleanPrev) return cleanTranscript;
-                            if (cleanPrev.includes(cleanTranscript)) return cleanPrev;
-                            return `${cleanPrev}\n\n[Nota de voz]: ${cleanTranscript}`;
-                          });
-                          if (diagnosis?.audioQuality !== 'noisy') {
-                            setSaveSuccessNotice(
-                              'Archivo de voz para profundización guardado con éxito en la base de datos.'
-                            );
-                            setTimeout(() => setSaveSuccessNotice(null), 3500);
+                          setAdaptiveAnswerText(nextAdaptText);
+                        }
+
+                        if (isSubmittingAdaptiveFromSaveRef.current) {
+                          return;
+                        }
+
+                        if (
+                          shouldAutoAdvanceAfterVoiceSubmit({
+                            transcript: cleanTranscript,
+                            audioQuality: diagnosis?.audioQuality,
+                          })
+                        ) {
+                          setVoiceProcessingFlow('adaptive');
+                          try {
+                            await handleSaveAdaptive({
+                              answerTextOverride: nextAdaptText,
+                              audioOverride: audio,
+                              skipFinalizeVoice: true,
+                            });
+                          } finally {
+                            setVoiceProcessingFlow(null);
                           }
+                        } else {
+                          clearTemporarySaveNotice();
+                          setValidationNotice(
+                            'No pudimos transcribir con claridad la nota de voz de profundización. Revisa la grabación, inténtalo de nuevo o escribe con el teclado.'
+                          );
                         }
                       }}
                       onVoiceDeleted={(_id) => setAdaptiveAudio(null)}
+                      isExternalProcessing={voiceProcessingFlow === 'adaptive'}
+                      disabled={savingAnswer}
                     />
                   </div>
 
@@ -2296,7 +2566,20 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                     label="Fotografías relacionadas con esta profundización (Opcional)"
                   />
 
-                  <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
+                  <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
+                    <button
+                      type="button"
+                      onClick={() => void handleSaveAdaptive()}
+                      disabled={savingAnswer}
+                      data-testid="adaptive-btn-save"
+                      className="inline-flex items-center justify-center space-x-1.5 min-h-[44px] px-5 py-2 bg-amber-800 hover:bg-amber-900 text-white rounded-lg text-xs font-semibold shadow-xs disabled:opacity-50 cursor-pointer whitespace-nowrap shrink-0"
+                    >
+                      <Save className="w-3.5 h-3.5" />
+                      <span>
+                        {savingAnswer ? 'Guardando...' : 'Guardar Profundización y Continuar'}
+                      </span>
+                    </button>
+
                     <button
                       type="button"
                       onClick={() => {
@@ -2308,21 +2591,10 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                         setIsAdaptiveTextareaExpanded(false);
                         advanceInFlowAfterQuestion(parentId, sessionData.answers);
                       }}
-                      className="px-3.5 py-2 text-stone-600 hover:text-stone-900 bg-white border border-stone-300 rounded-lg text-xs font-medium cursor-pointer"
+                      data-testid="adaptive-btn-skip"
+                      className="inline-flex items-center justify-center min-h-[44px] px-4 py-2 text-stone-600 hover:text-stone-900 bg-white border border-stone-300 rounded-lg text-xs font-medium cursor-pointer whitespace-nowrap shrink-0"
                     >
                       Omitir profundización y avanzar
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={handleSaveAdaptive}
-                      disabled={savingAnswer}
-                      className="inline-flex items-center space-x-1.5 px-5 py-2 bg-amber-800 hover:bg-amber-900 text-white rounded-lg text-xs font-semibold shadow-xs disabled:opacity-50 cursor-pointer"
-                    >
-                      <Save className="w-3.5 h-3.5" />
-                      <span>
-                        {savingAnswer ? 'Guardando...' : 'Guardar Profundización y Continuar'}
-                      </span>
                     </button>
                   </div>
                 </div>
@@ -2380,7 +2652,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
             {isInterviewOpen && !isExpired && (
               <button
                 type="button"
-                onClick={() => setShowAdditionalMemoryModal(true)}
+                onClick={openAdditionalMemoryModal}
                 className="inline-flex items-center space-x-1.5 px-3.5 py-2 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg text-xs font-semibold transition self-start"
               >
                 <PlusCircle className="w-3.5 h-3.5" />
@@ -2402,7 +2674,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                 q?.text ||
                 (ans.isAdditionalMemory
                   ? 'Información Adicional Incorporada'
-                  : 'Pregunta Autónoma de Profundización');
+                  : 'Pregunta de profundización');
 
               return (
                 <div
@@ -2413,7 +2685,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                     <div className="flex items-center space-x-2">
                       {ans.isFollowUp && (
                         <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-900 text-[10px] font-semibold">
-                          Profundización Autónoma
+                          Detalle ampliado
                         </span>
                       )}
                       {ans.isAdditionalMemory && (
@@ -2423,7 +2695,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                       )}
                       {q?.flowId && q.flowId !== 'principal' && (
                         <span className="px-2 py-0.5 rounded bg-stone-100 text-stone-700 text-[10px] font-semibold">
-                          Sub-flujo: {q.flowId}
+                          Sección: {q.flowId}
                         </span>
                       )}
                       <span className="font-medium text-amber-900 font-serif">
@@ -2488,7 +2760,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                           audioUrl={ans.audio.audioUrl}
                           durationSeconds={ans.audio.durationSeconds}
                           transcription={ans.audio.transcription}
-                          title="Nota de voz guardada en la base de datos"
+                          title="Nota de voz guardada"
                         />
                       )}
 
@@ -2586,66 +2858,127 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
         </div>
       )}
 
-      {/* Modal: Añadir Información Adicional */}
+      {/* Modal: Añadir Información Adicional (1. Grabación de voz, 2. Texto escrito desplegable/transcripción editable, 3. Fotografías adjuntas) */}
       {showAdditionalMemoryModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl max-w-xl w-full p-6 shadow-2xl border border-stone-200 space-y-4 max-h-[90vh] overflow-y-auto">
-            <h3 className="font-serif text-lg font-bold text-stone-900">
-              Añadir Información Adicional
-            </h3>
-            <p className="text-xs text-stone-500">
-              Incorpora cualquier anécdota, reflexión, nombre, fecha, recuerdo o fotografía adicional que desees integrar a tu manuscrito biográfico.
-            </p>
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4">
+          <div className="bg-white rounded-2xl max-w-xl w-full p-5 sm:p-6 shadow-2xl border border-stone-200 space-y-4 max-h-[90vh] overflow-y-auto">
+            <div>
+              <h3 className="font-serif text-lg font-bold text-stone-900">
+                Añadir Información Adicional
+              </h3>
+              <p className="text-xs text-stone-500 mt-0.5">
+                Incorpora cualquier anécdota, reflexión, nombre, fecha, recuerdo o fotografía adicional que desees sumar a tus recuerdos y a tu libro autobiográfico.
+              </p>
+            </div>
 
-            <textarea
-              ref={additionalTextareaRef}
-              rows={4}
-              placeholder="Escribe aquí la información adicional que deseas incorporar..."
-              value={additionalMemoryText}
-              onChange={(e) => setAdditionalMemoryText(e.target.value)}
-              className="w-full p-3 border border-stone-300 rounded-lg text-xs text-stone-900 focus:outline-none focus:ring-2 focus:ring-amber-200"
-            />
-
-            {/* Voice recording for additional information */}
-            <VoiceRecorder
-              token={activeToken}
-              questionId={`free_info_${Date.now()}`}
-              questionText="Información adicional incorporada por el entrevistado"
-              initialAudio={additionalAudio}
-              onFocusKeyboard={() => {
-                additionalTextareaRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                additionalTextareaRef.current?.focus();
-              }}
-              onVoiceSubmitted={(audio, transcription, _allAudios, diagnosis) => {
-                setAdditionalAudio(audio);
-                const cleanTranscript = (transcription || '').trim();
-                if (cleanTranscript.length > 0) {
-                  setAdditionalMemoryText((prev) => {
-                    const cleanPrev = prev.trim();
-                    if (!cleanPrev) return cleanTranscript;
-                    return `${cleanPrev}\n\n[Nota de voz]: ${cleanTranscript}`;
-                  });
-                  if (diagnosis?.audioQuality !== 'noisy') {
-                    setSaveSuccessNotice(
-                      'Archivo de voz para información adicional guardado en la base de datos.'
-                    );
-                    setTimeout(() => setSaveSuccessNotice(null), 3500);
+            {/* 1. PRIMERO: Grabación de voz en la parte superior */}
+            <div className="pt-1 pb-1">
+              <VoiceRecorder
+                ref={additionalVoiceRecorderRef}
+                token={activeToken}
+                questionId={additionalSessionQuestionId}
+                questionText="Información adicional incorporada por el entrevistado"
+                initialAudio={additionalAudio}
+                initialAudios={additionalAudios}
+                frameless={true}
+                onFocusKeyboard={() => {
+                  setIsAdditionalTextareaExpanded(true);
+                  setTimeout(() => {
+                    additionalTextareaRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    additionalTextareaRef.current?.focus();
+                  }, 100);
+                }}
+                onVoiceSubmitted={(audio, transcription, allAudios, diagnosis) => {
+                  setAdditionalAudio(audio);
+                  setAdditionalAudios(allAudios);
+                  const cleanTranscript = (transcription || '').trim();
+                  if (cleanTranscript.length > 0) {
+                    setIsAdditionalTextareaExpanded(true);
+                    setAdditionalMemoryText((prev) => {
+                      const cleanPrev = prev.trim();
+                      if (!cleanPrev) return cleanTranscript;
+                      if (cleanPrev.includes(cleanTranscript)) return cleanPrev;
+                      return `${cleanPrev}\n\n${cleanTranscript}`;
+                    });
+                    if (diagnosis?.audioQuality !== 'noisy') {
+                      setSaveSuccessNotice(
+                        'Grabación de voz y transcripción generadas. Puedes revisar y editar el texto antes de guardar.'
+                      );
+                      setTimeout(() => setSaveSuccessNotice(null), 3500);
+                    }
                   }
-                }
-              }}
-              onVoiceDeleted={(_id) => setAdditionalAudio(null)}
-            />
+                }}
+                onVoiceDeleted={(delId) => {
+                  setAdditionalAudios((prev) => {
+                    const next = prev.filter((a) => a.id !== delId);
+                    setAdditionalAudio(next.length > 0 ? next[next.length - 1] : null);
+                    return next;
+                  });
+                }}
+              />
+            </div>
 
-            <QuestionPhotoUploader
-              photos={additionalPhotos}
-              onChange={(updated) => {
-                setAdditionalPhotos(updated);
-                if (additionalModalError) setAdditionalModalError(null);
-              }}
-              onDeletePersistedPhoto={handleDeletePersistedPhoto}
-              compact
-              label="Fotografías adicionales para tu legado (Opcional)"
-            />
+            {/* 2. DEBAJO DE LA GRABACIÓN: Campo de texto escrito opcional desplegable (igual que en la entrevista principal) que permite visualizar y editar la transcripción */}
+            {!isAdditionalTextareaExpanded && !additionalMemoryText.trim() ? (
+              <div className="text-center pt-0.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsAdditionalTextareaExpanded(true);
+                    setTimeout(() => additionalTextareaRef.current?.focus(), 100);
+                  }}
+                  className="inline-flex items-center gap-2 px-3.5 py-1.5 text-xs text-stone-600 hover:text-amber-900 hover:bg-stone-100 rounded-lg transition font-medium cursor-pointer"
+                >
+                  <Edit3 className="w-3.5 h-3.5 text-stone-400" />
+                  <span>O si lo prefieres, escribe tu respuesta con el teclado</span>
+                </button>
+              </div>
+            ) : (
+              <div className="bg-stone-50/70 p-3.5 sm:p-4 rounded-xl border border-stone-200/90 shadow-2xs space-y-2 transition-all">
+                <div className="flex items-center justify-between text-xs text-stone-600">
+                  <span className="font-semibold text-stone-800 flex items-center gap-1.5">
+                    <Edit3 className="w-3.5 h-3.5 text-amber-700" />
+                    <span>
+                      {additionalAudio
+                        ? 'Transcripción de tu voz y texto escrito (puedes revisarla y corregirla):'
+                        : 'Tu recuerdo o información adicional por escrito:'}
+                    </span>
+                  </span>
+                  {!additionalMemoryText.trim() && (
+                    <button
+                      type="button"
+                      onClick={() => setIsAdditionalTextareaExpanded(false)}
+                      className="text-[11px] text-stone-400 hover:text-stone-600 cursor-pointer"
+                    >
+                      Ocultar teclado
+                    </button>
+                  )}
+                </div>
+                <textarea
+                  ref={additionalTextareaRef}
+                  rows={4}
+                  placeholder="Escribe aquí la información adicional o corrige la transcripción de tu grabación antes de guardar..."
+                  value={additionalMemoryText}
+                  onChange={(e) => setAdditionalMemoryText(e.target.value)}
+                  className="w-full p-3 border border-stone-300 bg-white rounded-xl text-sm text-stone-900 focus:outline-none focus:ring-2 focus:ring-amber-200 focus:border-amber-600 leading-relaxed"
+                />
+              </div>
+            )}
+
+            {/* 3. AL FINAL: Fotografías adjuntas con sus respectivas descripciones */}
+            <div className="pt-1 border-t border-stone-100">
+              <QuestionPhotoUploader
+                key={`add_photos_${additionalSessionQuestionId}`}
+                photos={additionalPhotos}
+                onChange={(updated) => {
+                  setAdditionalPhotos(updated);
+                  if (additionalModalError) setAdditionalModalError(null);
+                }}
+                onDeletePersistedPhoto={handleDeletePersistedPhoto}
+                compact
+                label="Fotografías adjuntas con su descripción (Opcional)"
+              />
+            </div>
 
             {additionalModalError && (
               <div className="p-2.5 bg-rose-50 border border-rose-200 rounded-lg text-rose-800 text-xs flex items-center space-x-2">
@@ -2654,14 +2987,14 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
               </div>
             )}
 
-            <div className="flex justify-end space-x-2">
+            <div className="flex justify-end space-x-2 pt-2">
               <button
                 type="button"
                 onClick={() => {
                   setShowAdditionalMemoryModal(false);
                   setAdditionalModalError(null);
                 }}
-                className="px-4 py-2 border border-stone-300 text-stone-700 rounded-lg text-xs"
+                className="px-4 py-2 border border-stone-300 text-stone-700 rounded-lg text-xs font-medium cursor-pointer"
               >
                 Cancelar
               </button>
@@ -2670,9 +3003,11 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                 onClick={handleSaveAdditionalMemory}
                 disabled={
                   savingAnswer ||
-                  (!additionalMemoryText.trim() && additionalPhotos.length === 0)
+                  (!additionalMemoryText.trim() &&
+                    !additionalAudio &&
+                    additionalPhotos.length === 0)
                 }
-                className="px-4 py-2 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg text-xs font-semibold disabled:opacity-50"
+                className="px-4 py-2 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg text-xs font-semibold disabled:opacity-50 cursor-pointer"
               >
                 {savingAnswer ? 'Guardando...' : 'Guardar Información Adicional'}
               </button>

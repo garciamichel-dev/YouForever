@@ -107,7 +107,7 @@ export const ParticipantAdminPanel: React.FC<ParticipantAdminPanelProps> = ({
         setPmInstructions(json.data.postMortemInstructions.instructions || '');
       }
     } catch (err: any) {
-      setErrorMsg(err.message || 'Error de conexión con Firebase.');
+      setErrorMsg(err.message || 'No pudimos cargar tu información en este momento.');
     } finally {
       setLoading(false);
     }
@@ -210,7 +210,7 @@ Generado de forma segura desde la infraestructura Cloud Firestore de YouForever.
       setShareRecipientName('');
       setShareRecipientEmail('');
       setShareNote('');
-      showSuccess('Destinatario de libro autobiográfico registrado en Firebase.');
+      showSuccess('Destinatario agregado correctamente.');
       await fetchProfile();
     } catch (err: any) {
       setErrorMsg(err.message || 'Error al autorizar destinatario.');
@@ -259,7 +259,7 @@ Generado de forma segura desde la infraestructura Cloud Firestore de YouForever.
       setSchedRecipientEmail('');
       setSchedDate('');
       setSchedNote('');
-      showSuccess('Entrega futura del libro programada con éxito en Firebase.');
+      showSuccess('Entrega futura del libro programada correctamente.');
       await fetchProfile();
     } catch (err: any) {
       setErrorMsg(err.message || 'Error al programar entrega.');
@@ -351,7 +351,7 @@ Generado de forma segura desde la infraestructura Cloud Firestore de YouForever.
       });
       const data = await res.json();
       if (!data.success) throw new Error(data.error);
-      showSuccess('Instrucciones post-mortem registradas con éxito en Firebase.');
+      showSuccess('Instrucciones registradas correctamente.');
       await fetchProfile();
     } catch (err: any) {
       setErrorMsg(err.message || 'Error al guardar instrucciones.');
@@ -566,7 +566,7 @@ Generado de forma segura desde la infraestructura Cloud Firestore de YouForever.
           {loading ? (
             <div className="flex flex-col items-center justify-center py-20 text-stone-500 space-y-2">
               <RefreshCw className="w-6 h-6 animate-spin text-amber-700" />
-              <p className="text-xs">Cargando tus configuraciones desde Firebase...</p>
+              <p className="text-xs">Cargando tus preferencias...</p>
             </div>
           ) : (
             <>
@@ -579,7 +579,7 @@ Generado de forma segura desde la infraestructura Cloud Firestore de YouForever.
                       <div className="flex items-center gap-2">
                         <span className="w-2.5 h-2.5 rounded-full bg-emerald-500" />
                         <h4 className="font-serif font-bold text-stone-900 text-sm">
-                          Consentimiento Informado Registrado en Firebase
+                          Consentimiento Informado Registrado
                         </h4>
                       </div>
                       <p className="text-xs text-stone-600">
@@ -767,7 +767,7 @@ Generado de forma segura desde la infraestructura Cloud Firestore de YouForever.
                         disabled={submittingArco || !arcoDetails.trim()}
                         className="px-4 py-2 bg-amber-800 hover:bg-amber-900 text-white text-xs font-bold rounded-xl transition cursor-pointer"
                       >
-                        {submittingArco ? 'Enviando a Firebase...' : 'Enviar solicitud ARCO'}
+                        {submittingArco ? 'Enviando solicitud...' : 'Enviar solicitud ARCO'}
                       </button>
                     </form>
 
@@ -877,7 +877,7 @@ Generado de forma segura desde la infraestructura Cloud Firestore de YouForever.
                       disabled={sharingBook}
                       className="px-4 py-2 bg-amber-800 hover:bg-amber-900 text-white text-xs font-bold rounded-xl transition cursor-pointer"
                     >
-                      {sharingBook ? 'Registrando...' : 'Autorizar y Guardar en Firebase'}
+                      {sharingBook ? 'Guardando...' : 'Autorizar y Guardar'}
                     </button>
                   </form>
 
@@ -1005,7 +1005,7 @@ Generado de forma segura desde la infraestructura Cloud Firestore de YouForever.
                       disabled={scheduling}
                       className="px-4 py-2 bg-amber-800 hover:bg-amber-900 text-white text-xs font-bold rounded-xl transition cursor-pointer"
                     >
-                      {scheduling ? 'Guardando en Firebase...' : 'Confirmar Programación de Entrega'}
+                      {scheduling ? 'Guardando...' : 'Confirmar Programación de Entrega'}
                     </button>
                   </form>
 
@@ -1242,7 +1242,7 @@ Generado de forma segura desde la infraestructura Cloud Firestore de YouForever.
                         disabled={savingPm}
                         className="px-4 py-2 bg-amber-800 hover:bg-amber-900 text-white text-xs font-bold rounded-xl transition cursor-pointer"
                       >
-                        {savingPm ? 'Guardando en Firebase...' : 'Guardar Instrucciones de Legado'}
+                        {savingPm ? 'Guardando...' : 'Guardar Instrucciones de Legado'}
                       </button>
 
                       {profileData?.postMortemInstructions && (
@@ -1298,7 +1298,7 @@ Generado de forma segura desde la infraestructura Cloud Firestore de YouForever.
                     Registro Electrónico de Eventos de Privacidad y Auditoría
                   </h4>
                   <p className="text-xs text-stone-500">
-                    Historial de eventos asociados a tu identidad verificable y consentimientos en Firebase:
+                    Historial de eventos y confirmaciones de privacidad asociadas a tu cuenta:
                   </p>
 
                   <div className="space-y-2">

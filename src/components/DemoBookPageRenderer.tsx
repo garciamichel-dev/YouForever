@@ -7,6 +7,8 @@ import {
   DemoInMemoryPhoto,
   DemoInteriorStyleSpec,
   DemoThematicIllustrationId,
+  formatPhotoEditorialCaption,
+  stripInlinePhotoMarkers,
 } from '../logic/demoStoryRules.ts';
 import { ForeverYouInfinitySymbol } from './ForeverYouLogo.tsx';
 
@@ -88,7 +90,8 @@ export const ThematicIllustrationSvg: React.FC<{
 };
 
 function renderFormattedInlineText(raw: string): React.ReactNode {
-  const parts = raw.split(/(\*\*.*?\*\*|\*.*?\*)/g);
+  const cleanedRaw = stripInlinePhotoMarkers(raw);
+  const parts = cleanedRaw.split(/(\*\*.*?\*\*|\*.*?\*)/g);
   return parts.map((part, idx) => {
     if (part.startsWith('**') && part.endsWith('**') && part.length > 4) {
       return <strong key={idx}>{part.slice(2, -2)}</strong>;
@@ -416,15 +419,25 @@ export const DemoComposedPageView: React.FC<{
         : photo.focusY === 'bottom'
         ? 'center bottom'
         : 'center center';
+    const editorialCaption = formatPhotoEditorialCaption(photo.caption);
+    const fallbackSvgDataUrl = `data:image/svg+xml;utf8,${encodeURIComponent(
+      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 200" fill="none"><rect width="320" height="200" rx="12" fill="#F5EFE6"/><rect x="16" y="16" width="288" height="168" rx="8" stroke="${borderColorHex}" stroke-width="1.5" stroke-dasharray="4 4" opacity="0.65"/><circle cx="122" cy="78" r="16" stroke="${borderColorHex}" stroke-width="2" opacity="0.75"/><path d="M58 156L114 106L158 142L206 94L262 156H58Z" stroke="${borderColorHex}" stroke-width="2" stroke-linejoin="round" opacity="0.75"/></svg>`
+    )}`;
     return (
-      <div className={`w-full ${heightClass} flex flex-col items-center justify-center my-2`}>
+      <div className="w-full flex flex-col items-center justify-center my-2 shrink-0 overflow-hidden">
         <div
-          className="relative w-4/5 h-full rounded-lg overflow-hidden border shadow-xs flex items-center justify-center bg-black/5"
+          className={`relative w-4/5 ${heightClass} shrink-0 rounded-lg overflow-hidden border shadow-xs flex items-center justify-center bg-black/5`}
           style={{ borderColor: borderColorHex }}
         >
           <img
-            src={photo.objectUrl || photo.dataUrl}
-            alt={photo.caption || 'Fotografía del recuerdo'}
+            src={photo.objectUrl || photo.dataUrl || fallbackSvgDataUrl}
+            alt="Fotografía del recuerdo"
+            onError={(e) => {
+              const target = e.currentTarget;
+              if (target.src !== fallbackSvgDataUrl) {
+                target.src = fallbackSvgDataUrl;
+              }
+            }}
             className="max-w-full max-h-full object-contain transition-transform"
             style={{
               objectPosition: objectPos,
@@ -432,9 +445,9 @@ export const DemoComposedPageView: React.FC<{
             }}
           />
         </div>
-        {photo.caption && (
-          <span className="text-[10px] italic mt-1 opacity-80 text-center px-2">
-            {photo.caption}
+        {editorialCaption && (
+          <span className="text-[9.5px] leading-tight italic mt-1 opacity-80 text-center px-3 line-clamp-2 max-w-[90%]">
+            {editorialCaption}
           </span>
         )}
       </div>
@@ -689,6 +702,104 @@ export const DemoComposedPageView: React.FC<{
     );
   }
 
+  if (page.kind === 'editorial_credits') {
+    return (
+      <div
+        data-testid="demo-editorial-credits-page"
+        className={`relative w-full overflow-hidden shadow-lg flex flex-col justify-between ${formatPaddingClass} ${className}`}
+        style={{
+          aspectRatio: `${format.widthMm} / ${format.heightMm}`,
+          backgroundColor: interiorStyle.pageBgHex,
+          color: interiorStyle.textHex,
+          fontFamily: interiorStyle.bodyFontFamily,
+        }}
+      >
+        {(interiorStyle.id === 'legado_familiar' || interiorStyle.id === 'diario_intimo') && (
+          <div
+            className="absolute inset-3 pointer-events-none"
+            style={{ border: `1px solid ${interiorStyle.accentHex}40` }}
+          />
+        )}
+        <div />
+        <div className="relative z-10 my-auto text-center px-4 space-y-3">
+          {renderOrnamentDivider(interiorStyle.ornamentStyle, interiorStyle.accentHex)}
+          <h3
+            className="text-xs font-bold uppercase tracking-widest"
+            style={{ fontFamily: interiorStyle.titleFontFamily }}
+          >
+            {page.title || 'Créditos Editoriales'}
+          </h3>
+          {page.editorialCreditsText && (
+            <p className="text-[11px] italic leading-relaxed" style={{ color: interiorStyle.mutedHex }}>
+              {page.editorialCreditsText}
+            </p>
+          )}
+        </div>
+        <div className="relative z-10 text-[10px] text-center opacity-75" style={{ color: interiorStyle.mutedHex }}>
+          Edición documental y biográfica • YouForever
+        </div>
+      </div>
+    );
+  }
+
+  if (page.kind === 'table_of_contents') {
+    return (
+      <div
+        data-testid="demo-table-of-contents-page"
+        className={`relative w-full overflow-hidden shadow-lg flex flex-col justify-between ${formatPaddingClass} ${className}`}
+        style={{
+          aspectRatio: `${format.widthMm} / ${format.heightMm}`,
+          backgroundColor: interiorStyle.pageBgHex,
+          color: interiorStyle.textHex,
+          fontFamily: interiorStyle.bodyFontFamily,
+        }}
+      >
+        {(interiorStyle.id === 'legado_familiar' || interiorStyle.id === 'diario_intimo') && (
+          <div
+            className="absolute inset-3 pointer-events-none"
+            style={{ border: `1px solid ${interiorStyle.accentHex}40` }}
+          />
+        )}
+        <div className="relative z-10 flex-1 flex flex-col">
+          <h2
+            className={`${chapterTitleSizeClass} font-bold text-center`}
+            style={{ fontFamily: interiorStyle.titleFontFamily }}
+          >
+            {page.title || 'Índice de Capítulos'}
+          </h2>
+          {renderOrnamentDivider(interiorStyle.ornamentStyle, interiorStyle.accentHex)}
+          <div className="mt-4 space-y-2.5">
+            {(page.tocEntries || []).map((entry) => (
+              <div
+                key={entry.chapterId}
+                className="flex items-baseline justify-between gap-2 border-b border-dotted pb-1 text-xs"
+                style={{ borderColor: `${interiorStyle.accentHex}33` }}
+              >
+                <div className="truncate">
+                  <span className="font-bold mr-1.5" style={{ color: interiorStyle.accentHex }}>
+                    Capítulo {entry.partNumber}.
+                  </span>
+                  <span>{entry.title}</span>
+                </div>
+                <span className="font-semibold shrink-0" style={{ color: interiorStyle.mutedHex }}>
+                  {entry.startPageNumber}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+        {page.showPageNumber && (
+          <div
+            className="relative z-10 pt-2 text-center text-[10px] tracking-widest"
+            style={{ color: interiorStyle.mutedHex }}
+          >
+            — {page.pageNumber} —
+          </div>
+        )}
+      </div>
+    );
+  }
+
   // MANDATORY FINAL PAGE (Section 21 & Criterion #15)
   if (page.kind === 'closing_mandatory') {
     return (
@@ -816,9 +927,10 @@ export const DemoComposedPageView: React.FC<{
 
             {sec.photo &&
               !sec.isContinuation &&
+              (!sec.paragraphPhotos || Object.keys(sec.paragraphPhotos).length === 0) &&
               renderPhotoBox(sec.photo, 'h-28 sm:h-32', interiorStyle.accentHex)}
 
-            <div className="space-y-2">
+            <div className="space-y-2.5">
               {sec.paragraphs.map((para, pIdx) => {
                 const cleanDropCheck = para.replace(/^(\*\*|\*)+/, '');
                 const useDrop =
@@ -828,26 +940,33 @@ export const DemoComposedPageView: React.FC<{
                   cleanDropCheck.length > 1;
                 const firstChar = useDrop ? cleanDropCheck.charAt(0) : '';
                 const restText = useDrop ? cleanDropCheck.slice(1) : para;
+                const paraPhotos = sec.paragraphPhotos?.[pIdx] || [];
 
                 return (
-                  <p
-                    key={pIdx}
-                    className={`${bodyFontSizeClass} leading-relaxed`}
-                    style={{ textAlign: interiorStyle.textAlign }}
-                  >
-                    {useDrop && (
-                      <span
-                        className="float-left text-2xl sm:text-3xl font-bold leading-none mr-2 mt-0.5"
-                        style={{
-                          color: interiorStyle.accentHex,
-                          fontFamily: interiorStyle.titleFontFamily,
-                        }}
-                      >
-                        {firstChar}
-                      </span>
-                    )}
-                    {renderFormattedInlineText(restText)}
-                  </p>
+                  <div key={pIdx} className="space-y-2">
+                    <p
+                      className={`${bodyFontSizeClass} leading-relaxed`}
+                      style={{ textAlign: interiorStyle.textAlign }}
+                    >
+                      {useDrop && (
+                        <span
+                          className="float-left text-2xl sm:text-3xl font-bold leading-none mr-2 mt-0.5"
+                          style={{
+                            color: interiorStyle.accentHex,
+                            fontFamily: interiorStyle.titleFontFamily,
+                          }}
+                        >
+                          {firstChar}
+                        </span>
+                      )}
+                      {renderFormattedInlineText(restText)}
+                    </p>
+                    {paraPhotos.map((pItem) => (
+                      <div key={pItem.id} className="pt-0.5">
+                        {renderPhotoBox(pItem, 'h-28 sm:h-32', interiorStyle.accentHex)}
+                      </div>
+                    ))}
+                  </div>
                 );
               })}
             </div>

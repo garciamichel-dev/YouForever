@@ -38,7 +38,7 @@ export async function apiFetch<T = any>(
           return {
             ok: false,
             status: res.status,
-            error: 'Respuesta con formato no válido del servidor.',
+            error: 'No pudimos procesar la respuesta en este momento. Por favor intenta de nuevo.',
           };
         }
       } else {
@@ -48,13 +48,13 @@ export async function apiFetch<T = any>(
           status: res.status,
           error: res.ok
             ? undefined
-            : `El servidor devolvió un contenido no-JSON (${res.status}): ${text.slice(0, 100)}`,
+            : 'Ocurrió un inconveniente al comunicar tu solicitud. Por favor intenta nuevamente.',
         };
       }
 
       if (!res.ok) {
         const errorMsg =
-          payload?.error || payload?.message || `Error del servidor (${res.status})`;
+          payload?.error || payload?.message || 'No pudimos completar esta acción en este momento. Inténtalo de nuevo.';
         return {
           ok: false,
           status: res.status,
@@ -88,7 +88,7 @@ export async function apiFetch<T = any>(
       return {
         ok: false,
         status: 0,
-        error: `Error de red al conectar con el servidor: ${errMsg}`,
+        error: 'No pudimos conectar en este momento. Revisa tu conexión a internet e intenta de nuevo.',
       };
     }
   }

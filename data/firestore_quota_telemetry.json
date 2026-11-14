@@ -1,0 +1,27 @@
+{
+  "dateKey": "2026-11-13",
+  "reads": 2506,
+  "writes": 183,
+  "deletes": 33,
+  "readsSavedByIncremental": 113334,
+  "bySource": {
+    "storage": {
+      "reads": 2506,
+      "writes": 146,
+      "deletes": 33
+    },
+    "miEsencia": {
+      "reads": 0,
+      "writes": 0,
+      "deletes": 0
+    },
+    "probe": {
+      "reads": 0,
+      "writes": 37,
+      "deletes": 0
+    }
+  },
+  "lastUpdatedAt": "2026-11-14T06:31:53.246Z",
+  "lastProbe": null,
+  "sharedCounters": null
+}

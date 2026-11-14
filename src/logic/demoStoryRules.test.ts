@@ -195,11 +195,13 @@ test('composeBookPages always generates between 5 and 10 pages and enforces mand
   assert.equal(lastPage.showPageNumber, false);
 });
 
-test('composeBookPages never exceeds 10 pages even with very extensive chapters', () => {
-  const longPara =
-    'Durante muchos años trabajamos con dedicación en aquel taller familiar donde aprendimos que la paciencia y la honestidad abren todas las puertas. '.repeat(
-      8
-    );
+test('composeBookPages paginates extensive chapters across physical continuation pages without crushing and caps preview at 6 pages', () => {
+  const buildRichParagraph = (chNum: number, pNum: number) =>
+    Array.from(
+      { length: 8 },
+      (_, sIdx) =>
+        `En el capítulo ${chNum}, párrafo ${pNum}, episodio ${sIdx + 1}, trabajamos con dedicación en aquel taller familiar donde aprendimos que la paciencia, el esfuerzo constante y la honestidad abren todas las puertas de la vida.`
+    ).join(' ');
 
   const manuscript = {
     title: 'Una vida entera',
@@ -214,7 +216,12 @@ test('composeBookPages never exceeds 10 pages even with very extensive chapters'
       partNumber: idx + 1,
       dimensionKey: q.dimensionKey,
       title: q.coupleBookPartTitle,
-      paragraphs: [longPara, longPara, longPara, longPara],
+      paragraphs: [
+        buildRichParagraph(idx + 1, 1),
+        buildRichParagraph(idx + 1, 2),
+        buildRichParagraph(idx + 1, 3),
+        buildRichParagraph(idx + 1, 4),
+      ],
       pullQuote: 'La paciencia y la honestidad abren todas las puertas.',
     })),
     closingMessage: 'Que siempre permanezcan unidos.',
@@ -235,8 +242,20 @@ test('composeBookPages never exceeds 10 pages even with very extensive chapters'
     dedication: manuscript.dedication,
   };
 
-  const composed = composeBookPages({ manuscript, editorialConfig });
-  assert.ok(composed.pages.length >= 5 && composed.pages.length <= 10);
+  const previewComposed = composeBookPages({
+    manuscript,
+    editorialConfig,
+    previewSampleOnly: true,
+  });
+  assert.equal(previewComposed.pages.length, 6);
+  assert.equal(previewComposed.pages[previewComposed.pages.length - 1].kind, 'closing_mandatory');
+
+  const composed = composeBookPages({
+    manuscript,
+    editorialConfig,
+    previewSampleOnly: false,
+  });
+  assert.ok(composed.pages.length > 10, 'Extensive chapters must expand to as many physical pages as needed without crushing');
   assert.equal(composed.pages[composed.pages.length - 1].kind, 'closing_mandatory');
 });
 

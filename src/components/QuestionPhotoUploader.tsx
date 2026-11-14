@@ -266,7 +266,7 @@ export const QuestionPhotoUploader: React.FC<QuestionPhotoUploaderProps> = ({
         await onDeletePersistedPhoto(item.id);
       } catch (err) {
         setUploadError(
-          err instanceof Error ? err.message : 'No se pudo eliminar la fotografía del servidor.'
+          err instanceof Error ? err.message : 'No pudimos eliminar la fotografía en este momento.'
         );
         setDeletingId(null);
         return;
@@ -426,7 +426,7 @@ export const QuestionPhotoUploader: React.FC<QuestionPhotoUploaderProps> = ({
                       {item.isPersisted ? (
                         <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-200 text-[10px] font-semibold">
                           <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                          <span>Guardada en el servidor</span>
+                          <span>Fotografía guardada</span>
                         </span>
                       ) : (
                         <span className="inline-flex items-center px-2 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200 text-[10px] font-semibold">
@@ -455,7 +455,7 @@ export const QuestionPhotoUploader: React.FC<QuestionPhotoUploaderProps> = ({
                       htmlFor={`photo-caption-${item.tempId}`}
                       className="block text-[11px] font-semibold text-stone-700 mb-1"
                     >
-                      Describe la imagen o dale contexto para el manuscrito{' '}
+                      Describe la imagen o cuéntanos qué momento muestra para incluirla en tu libro{' '}
                       <span className="text-amber-700">*</span>
                     </label>
                     <textarea
@@ -469,7 +469,7 @@ export const QuestionPhotoUploader: React.FC<QuestionPhotoUploaderProps> = ({
                     />
                     {missingContext && !disabled && (
                       <p className="text-[11px] text-amber-800 mt-1 font-medium">
-                        * Por favor escribe una breve descripción o contexto de esta fotografía para ubicarla correctamente en el manuscrito.
+                        * Por favor escribe una breve descripción de esta fotografía para ubicarla correctamente en tu libro.
                       </p>
                     )}
                   </div>

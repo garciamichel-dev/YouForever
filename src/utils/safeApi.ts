@@ -22,7 +22,7 @@ export async function safeFetchJson<T = any>(
     if (!res.ok) {
       return {
         success: false,
-        error: parsed?.error || `Error del servidor (${res.status})`,
+        error: parsed?.error || 'No pudimos completar tu solicitud en este momento. Inténtalo nuevamente.',
         status: res.status,
       };
     }

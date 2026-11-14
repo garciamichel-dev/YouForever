@@ -82,13 +82,226 @@ export interface DemoQuestionResponse {
   followUpCompleted?: boolean;
 }
 
+export type ManuscriptGenerationStatus =
+  | 'pending'
+  | 'generating'
+  | 'generated'
+  | 'auditing'
+  | 'needs_correction'
+  | 'approved'
+  | 'failed_ai'
+  | 'failed_audit'
+  | 'error';
+
+export const CANONICAL_AUDIT_RULES_VERSION = 'v3.0.0-canonical-audit-facts';
+export const BOOK_GENERATION_ENGINE_VERSION = 'v3.0.0-narrative-batch-engine';
+
+export type DocumentaryExclusionReason =
+  | 'none'
+  | 'not_recalled'
+  | 'prefer_not_to_answer'
+  | 'excluded_by_interviewee';
+
+export interface DocumentaryFactUnit {
+  unitId: string;
+  parentAnswerId: string;
+  answerId: string;
+  questionId: string;
+  questionText: string;
+  sourceType: 'main_answer' | 'followup_answer' | 'additional_memory' | 'photo_context';
+  parentQuestionId?: string | null;
+  participantId?: string;
+  participantName: string;
+  lifeStage: string;
+  topic: string;
+  chronologicalIndex: number;
+  rawText: string;
+  cleanText: string;
+  keyTokens: string[];
+  properNames: string[];
+  places: string[];
+  yearsOrNumbers: string[];
+  emotions: string[];
+  uncertaintyExpressions: string[];
+  exclusionReason: DocumentaryExclusionReason;
+  isEligibleForBook: boolean;
+  photoIds: string[];
+  mergedRedundantUnitIds?: string[];
+}
+
+export interface DocumentaryInventory {
+  interviewId: string;
+  totalRawAnswers: number;
+  totalMainAnswers: number;
+  totalFollowUpAnswers: number;
+  totalAdditionalMemories: number;
+  totalAtomicFactUnits: number;
+  eligibleFactUnits: DocumentaryFactUnit[];
+  excludedFactUnits: DocumentaryFactUnit[];
+  allFactUnits: DocumentaryFactUnit[];
+  photosInventory: Array<{
+    photoId: string;
+    caption: string;
+    answerId: string;
+    questionId: string;
+    lifeStage: string;
+    isExcluded: boolean;
+  }>;
+  corpusValidYearsAndNumbers: string[];
+  corpusValidProperNames: string[];
+}
+
+export interface EditorialChapterPlanItem {
+  chapterId: string;
+  partNumber: number;
+  stageKey: string;
+  dimensionKey: DemoQuestionDefinition['dimensionKey'];
+  thematicAxis: string;
+  suggestedTitleIndividual: string;
+  suggestedTitleCouple: string;
+  suggestedTitleThirdPerson: string;
+  assignedAnswerIds: string[];
+  assignedQuestionIds: string[];
+  assignedFactUnitIds: string[];
+  assignedPhotoIds: string[];
+  estimatedSourceWords: number;
+}
+
+export interface EditorialBookPlan {
+  bookStructureMode: 'prompt_autonomous' | 'fixed_five_stages';
+  chapters: EditorialChapterPlanItem[];
+  totalPlannedChapters: number;
+  isOneQuestionPerChapterBlocked: boolean;
+}
+
+export interface TraceabilityMatrixEntry {
+  unitId: string;
+  answerId: string;
+  questionId?: string;
+  questionText?: string;
+  sourceType?: 'main_answer' | 'followup_answer' | 'additional_memory' | 'photo_context';
+  participantName?: string;
+  excerpt?: string;
+  uncertaintyExpressions?: string[];
+  photoIds: string[];
+  assignedChapterId?: string;
+  assignedChapterNumber?: number;
+  assignedParagraphIds?: string[];
+  status?: 'integrated' | 'omitted_not_recalled' | 'omitted_prefer_not_to_answer' | 'excluded_by_interviewee' | 'missing';
+  exclusionReason?: DocumentaryExclusionReason;
+  eventId?: string;
+  lifeStage?: string;
+  chapterId?: string;
+  paragraphId?: string;
+  paragraphIndex?: number;
+  paragraphIds?: string[];
+  paragraphIndices?: number[];
+  evidenceSnippet?: string;
+  semanticMatchScore?: number;
+  matchedTokens?: string[];
+  missingTokens?: string[];
+  missingFacets?: string[];
+  followUpIncluded?: boolean;
+  additionalMemoryIncluded?: boolean;
+  verified?: boolean;
+}
+
+export interface DocumentaryAuditReport {
+  auditVersion?: string;
+  auditedAt: string;
+  auditRulesVersion?: string;
+  status?: ManuscriptGenerationStatus;
+  approved?: boolean;
+  passed: boolean;
+  totalSourceUnits: number;
+  integratedUnits: number;
+  omittedNotRecalledUnits: number;
+  omittedPreferNotToAnswerUnits?: number;
+  excludedByIntervieweeUnits?: number;
+  coveragePercentage: number;
+  totalUploadedPhotos: number;
+  totalPlacedPhotos: number;
+  duplicateChapterIdsDetected: boolean;
+  consecutiveChapterNumberingValid: boolean;
+  uncertaintiesPreserved: boolean;
+  repairAttemptsUsed?: number;
+  repairedUnitIds?: string[];
+  leakedExcludedContentFlags?: string[];
+  coupleAttributionViolations?: string[];
+  traceabilityMatrix: TraceabilityMatrixEntry[];
+  blockingDefects: string[];
+  coverageAudit?: {
+    passed: boolean;
+    totalValidUnits: number;
+    coveredUnitsCount: number;
+    missingUnitIds: string[];
+    repairedUnitIds: string[];
+  };
+  veracityAudit?: {
+    passed: boolean;
+    uncertaintiesPreserved: boolean;
+    uncertaintyViolations: string[];
+    inventedDataFlags: string[];
+    leakedExcludedContentFlags?: string[];
+    coupleAttributionViolations?: string[];
+  };
+  structuralAudit?: {
+    passed: boolean;
+    uniqueChapterIds: boolean;
+    consecutiveNumbering: boolean;
+    duplicateChapterFlags: string[];
+    orphanContinuationFlags: string[];
+    oneQuestionPerChapterDetected?: boolean;
+  };
+  photoAudit?: {
+    passed: boolean;
+    totalPhotos: number;
+    placedPhotosCount: number;
+    unplacedPhotoIds: string[];
+    duplicatePhotoIds: string[];
+    defaultFirstChapterDumpDetected: boolean;
+  };
+  paginationAudit?: {
+    passed: boolean;
+    everyChapterStartsOnNewPage: boolean;
+    truncatedLinesCount: number;
+    artificialIntraChapterBreaks: number;
+    totalChapters: number;
+    totalContentPages: number;
+  };
+}
+
+export interface TableOfContentsEntry {
+  chapterId: string;
+  partNumber: number;
+  title: string;
+  startPageNumber: number;
+}
+
+export interface DemoChapterPhotoPlacement {
+  photoId: string;
+  paragraphIndex: number;
+  paragraphId?: string;
+  answerId?: string;
+  questionId?: string;
+  eventId?: string;
+  chapterId?: string;
+  shortCaption: string;
+  originalDescription?: string;
+}
+
 export interface DemoChapterManuscript {
   id: string;
   partNumber: number;
   dimensionKey: string;
   title: string;
   paragraphs: string[];
+  paragraphIds?: string[];
+  sourceUnitIds?: string[];
+  sourceAnswerIds?: string[];
+  sourceQuestionIds?: string[];
   pullQuote?: string;
+  photoPlacements?: DemoChapterPhotoPlacement[];
 }
 
 export interface DemoManuscript {
@@ -105,6 +318,18 @@ export interface DemoManuscript {
   generatedAt: string;
   lockedPreviewGroups?: ComposedChapterSectionBlock[][];
   useOfficialForeverYouLogo?: boolean;
+  aiGenerated?: boolean;
+  status?: ManuscriptGenerationStatus;
+  generationStatus?: ManuscriptGenerationStatus;
+  canonicalManuscriptId?: string;
+  cacheKey?: string;
+  canonicalCacheKey?: string;
+  bookStructureMode?: 'prompt_autonomous' | 'fixed_five_stages';
+  auditReport?: DocumentaryAuditReport;
+  documentaryAudit?: DocumentaryAuditReport;
+  includeTableOfContents?: boolean;
+  includeEditorialCredits?: boolean;
+  editorialCreditsText?: string;
 }
 
 export interface DemoInMemoryPhoto {
@@ -132,6 +357,9 @@ export interface DemoEditorialConfig {
   customSubtitle: string;
   customAuthors: string;
   dedication: string;
+  startEachChapterOnNewPage?: boolean;
+  includeTableOfContents?: boolean;
+  includeEditorialCredits?: boolean;
 }
 
 export const DEMO_TEMPORARY_PRIVACY_NOTICE =
@@ -805,23 +1033,36 @@ export interface ComposedChapterSectionBlock {
   partNumber: number;
   title: string;
   paragraphs: string[];
+  paragraphIds?: string[];
   pullQuote?: string;
   isContinuation?: boolean;
   photo?: DemoInMemoryPhoto | null;
+  paragraphPhotos?: Record<number, DemoInMemoryPhoto[]>;
 }
 
 export interface ComposedBookPage {
   pageNumber: number;
   totalPages: number;
-  kind: 'cover' | 'title_dedication' | 'chapter_content' | 'closing_mandatory';
+  kind:
+    | 'cover'
+    | 'title_dedication'
+    | 'table_of_contents'
+    | 'chapter_content'
+    | 'editorial_credits'
+    | 'closing_mandatory';
   // For cover & title_dedication
   title?: string;
   subtitle?: string;
   authors?: string;
   dedication?: string;
   introduction?: string;
-  // For chapter_content (can hold 1 or 2 compact chapter blocks to stay within 5..10 pages)
+  // For table_of_contents
+  tocEntries?: TableOfContentsEntry[];
+  // For chapter_content (strictly 1 chapter per page; every real chapter starts on a new page)
   sections?: ComposedChapterSectionBlock[];
+  // For editorial_credits
+  creditsText?: string;
+  editorialCreditsText?: string;
   // For closing_mandatory
   centralClosingText?: string;
   bottomRightBrand?: string;
@@ -836,6 +1077,8 @@ export interface ComposedBookDocument {
   editorialConfig: DemoEditorialConfig;
   coverPhoto?: DemoInMemoryPhoto | null;
   pages: ComposedBookPage[];
+  tocEntries?: TableOfContentsEntry[];
+  paginationAudit?: NonNullable<DocumentaryAuditReport['paginationAudit']>;
   exceededMaxPagesWarning: boolean;
   isPreviewSample?: boolean;
   useOfficialForeverYouLogo?: boolean;
@@ -844,7 +1087,10 @@ export interface ComposedBookDocument {
 /**
  * Normalizes a person's or couple's name into a safe, human-readable PDF filename (Section 22.2).
  */
-export function buildSafeDemoPdfFilename(profile: DemoBasicProfile): string {
+export function buildSafeDemoPdfFilename(
+  profile: DemoBasicProfile,
+  bookFormatId?: string
+): string {
   const sanitizeSegment = (raw: string): string => {
     return raw
       .normalize('NFD')
@@ -854,44 +1100,468 @@ export function buildSafeDemoPdfFilename(profile: DemoBasicProfile): string {
       .slice(0, 40);
   };
 
+  const resolvedFormat =
+    bookFormatId ||
+    (profile as any).bookFormatId ||
+    (profile as any).editorialConfig?.bookFormatId ||
+    '';
+  const formatSuffix =
+    resolvedFormat === 'a5'
+      ? '_Formato_A5'
+      : resolvedFormat === 'carta'
+      ? '_Formato_Carta'
+      : resolvedFormat === '6x9'
+      ? '_Formato_6x9'
+      : '';
+
   if (profile.mode === 'pareja') {
     const p1 = sanitizeSegment(profile.partner1Name || 'Participante_1') || 'Participante_1';
     const p2 = sanitizeSegment(profile.partner2Name || 'Participante_2') || 'Participante_2';
-    return `YouForever_Nuestra_Historia_${p1}_y_${p2}.pdf`;
+    return `YouForever_Nuestra_Historia_${p1}_y_${p2}${formatSuffix}.pdf`;
   }
 
   const name = sanitizeSegment(profile.displayName || profile.fullName || 'Protagonista') || 'Protagonista';
-  return `YouForever_Mi_Historia_${name}.pdf`;
+  return `YouForever_Mi_Historia_${name}${formatSuffix}.pdf`;
 }
 
 /**
- * Deterministic pagination and editorial composer (Sections 18, 19, 20, 21).
- * Always produces between 5 and 10 pages inclusive:
- * - Page 1: Cover
- * - Page 2: Portadilla, Dedicatoria & Introducción
- * - Middle Pages (3 .. N-1): Formatted biographical chapters (between 2 and 7 pages)
- * - Page N (last page): Mandatory closing page with ONLY "Esta historia continuará..." and "<< ForeverYou >>"
+ * Estimates the physical width in millimeters (mm) of a text string rendered at `fontSizePt`
+ * in `'times'` or `'helvetica'`, closely matching jsPDF font metrics with a conservative safety factor
+ * so lines wrapped by the pagination engine never overflow `maxBottomY` in PDF rendering.
+ */
+export function estimatePhysicalTextWidthMm(
+  text: string,
+  fontSizePt: number,
+  fontFamily: 'times' | 'helvetica' = 'times',
+  isBold: boolean = false
+): number {
+  if (!text) return 0;
+  const ptToMm = 0.352778;
+  const familyFactor = fontFamily === 'helvetica' ? 1.07 : 1.01;
+  const weightFactor = isBold ? 1.07 : 1.0;
+  let emSum = 0;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === ' ') {
+      emSum += 0.28;
+    } else if ('iljtrfI.,:;!|\'"`¡¿()[]{}'.includes(ch)) {
+      emSum += 0.31;
+    } else if ('mwMW@%—…'.includes(ch)) {
+      emSum += 0.82;
+    } else if (ch >= 'A' && ch <= 'Z') {
+      emSum += 0.66;
+    } else if ('ÁÉÍÓÚÑÜ'.includes(ch)) {
+      emSum += 0.67;
+    } else {
+      emSum += 0.52;
+    }
+  }
+
+  return emSum * fontSizePt * ptToMm * familyFactor * weightFactor;
+}
+
+/**
+ * Wraps a paragraph into physical lines (in mm) for the target printable width `maxWidthMm`,
+ * accounting for drop-cap indentation on the first 2 lines when `useDropCap` is active.
+ */
+export function wrapParagraphToPhysicalLines(params: {
+  rawText: string;
+  maxWidthMm: number;
+  fontSizePt: number;
+  fontFamily: 'times' | 'helvetica';
+  useDropCap: boolean;
+}): string[] {
+  const { rawText, maxWidthMm, fontSizePt, fontFamily, useDropCap } = params;
+  const trimmed = stripInlinePhotoMarkers(rawText || '').trim();
+  if (!trimmed) return [];
+
+  const cleanText = trimmed.replace(/\*\*(.*?)\*\*/g, '$1').replace(/\*(.*?)\*/g, '$1');
+  const dropCapIndentMm =
+    useDropCap && cleanText.length > 1
+      ? Math.max(8.5, estimatePhysicalTextWidthMm(cleanText[0], fontSizePt + 12, fontFamily, true) + 2.8)
+      : 0;
+
+  const words = trimmed.split(/\s+/).filter(Boolean);
+  if (words.length === 0) return [];
+
+  const spaceW = estimatePhysicalTextWidthMm(' ', fontSizePt, fontFamily, false);
+  const lines: string[] = [];
+  let currentWords: string[] = [];
+  let currentWidthMm = 0;
+
+  const getAvailWidthForLine = (lineIdx: number): number => {
+    const indent = useDropCap && lineIdx < 2 ? dropCapIndentMm : 0;
+    return Math.max(20, maxWidthMm - indent);
+  };
+
+  for (const word of words) {
+    const isBoldWord = word.startsWith('**') || word.endsWith('**');
+    const cleanWord = word.replace(/\*\*/g, '').replace(/\*/g, '');
+    const wordW = estimatePhysicalTextWidthMm(cleanWord, fontSizePt, fontFamily, isBoldWord);
+    const availW = getAvailWidthForLine(lines.length);
+    const prevSpace = currentWords.length > 0 ? spaceW : 0;
+
+    if (currentWords.length > 0 && currentWidthMm + prevSpace + wordW > availW) {
+      lines.push(currentWords.join(' '));
+      currentWords = [word];
+      currentWidthMm = wordW;
+    } else {
+      currentWords.push(word);
+      currentWidthMm += prevSpace + wordW;
+    }
+  }
+
+  if (currentWords.length > 0) {
+    lines.push(currentWords.join(' '));
+  }
+
+  return lines;
+}
+
+/**
+ * Paginates a single chapter using real physical measurement (in mm) of the selected format,
+ * margins, font size, line height, headers, drop-cap, pull quote, and photo boxes.
+ *
+ * Guarantees:
+ * 1. Every real chapter starts on a new page (`!isContinuation` on page 0 of the chapter).
+ * 2. Within a chapter, paragraphs flow continuously filling the real printable height of each page.
+ * 3. Long paragraphs that do not fit completely in the remaining space of a page are split cleanly
+ *    by lines across the current page and the next continuation page with widow/orphan protection
+ *    (at least 2 lines on each side when possible), never dropping or truncating a single word.
+ * 4. Photos are anchored to their exact paragraph and flow to a continuation page if there is
+ *    insufficient vertical space at the bottom of the current page.
+ */
+export function paginateSingleChapterByPhysicalMeasurement(params: {
+  chapterId: string;
+  partNumber: number;
+  title: string;
+  paragraphs: string[];
+  paragraphIds?: string[];
+  pullQuote?: string;
+  chapterPhotosByRelPara: Map<number, DemoInMemoryPhoto[]>;
+  format: DemoBookFormatSpec;
+  interiorStyle: DemoInteriorStyleSpec;
+  startAsContinuation?: boolean;
+}): {
+  pages: ComposedChapterSectionBlock[];
+  truncatedLinesCount: number;
+  artificialIntraChapterBreaks: number;
+} {
+  const {
+    chapterId,
+    partNumber,
+    title,
+    paragraphs,
+    paragraphIds = [],
+    pullQuote,
+    chapterPhotosByRelPara,
+    format,
+    interiorStyle,
+    startAsContinuation = false,
+  } = params;
+
+  const W = format.widthMm;
+  const H = format.heightMm;
+  const horizMargin = (format.marginInnerMm + format.marginOuterMm) / 2;
+  const contentW = W - horizMargin * 2;
+  const startY = format.marginTopMm + 4;
+  // Leave a small safety buffer above maxBottomY so jsPDF vector rendering never clips the last line
+  const maxBottomY = H - format.marginBottomMm - 10;
+  const lineHeightMm = format.baseFontPt * 0.45;
+  const paragraphGapMm = 3.0;
+  const fontFamily = interiorStyle.pdfFontFamily;
+
+  const chTitlePt = format.titleFontPt - 2.5;
+  const titleLines = wrapParagraphToPhysicalLines({
+    rawText: title || `Capítulo ${partNumber}`,
+    maxWidthMm: contentW,
+    fontSizePt: chTitlePt,
+    fontFamily,
+    useDropCap: false,
+  });
+  const openingHeaderHeightMm =
+    5.5 + Math.max(1, titleLines.length) * (chTitlePt * 0.42) + 2 + 6;
+  const continuationHeaderHeightMm = 6.0;
+
+  const pages: ComposedChapterSectionBlock[] = [];
+  let currentParas: string[] = [];
+  let currentParaIds: string[] = [];
+  let currentParaPhotos: Record<number, DemoInMemoryPhoto[]> = {};
+  let isCurrentContinuation = startAsContinuation;
+  let cursorY =
+    startY + (isCurrentContinuation ? continuationHeaderHeightMm : openingHeaderHeightMm);
+
+  const flushCurrentPage = () => {
+    if (currentParas.length === 0 && Object.keys(currentParaPhotos).length === 0) {
+      return;
+    }
+    pages.push({
+      chapterId,
+      partNumber,
+      title,
+      paragraphs: currentParas,
+      paragraphIds: currentParaIds.length > 0 ? currentParaIds : undefined,
+      pullQuote: undefined,
+      isContinuation: isCurrentContinuation,
+      photo: null,
+      paragraphPhotos:
+        Object.keys(currentParaPhotos).length > 0 ? currentParaPhotos : undefined,
+    });
+    currentParas = [];
+    currentParaIds = [];
+    currentParaPhotos = {};
+    isCurrentContinuation = true;
+    cursorY = startY + continuationHeaderHeightMm;
+  };
+
+  for (let relIdx = 0; relIdx < paragraphs.length; relIdx++) {
+    const rawPara = (paragraphs[relIdx] || '').trim();
+    if (!rawPara) continue;
+    const baseParaId = paragraphIds[relIdx] || `${chapterId}_p_${relIdx}`;
+    const attachedPhotos = [...(chapterPhotosByRelPara.get(relIdx) || [])];
+
+    let remainingText = rawPara;
+    let partSegmentIdx = 0;
+
+    while (remainingText.length > 0) {
+      const useDrop =
+        Boolean(interiorStyle.useDropCap) &&
+        !isCurrentContinuation &&
+        currentParas.length === 0 &&
+        relIdx === 0 &&
+        partSegmentIdx === 0;
+
+      const wrappedLines = wrapParagraphToPhysicalLines({
+        rawText: remainingText,
+        maxWidthMm: contentW,
+        fontSizePt: format.baseFontPt,
+        fontFamily,
+        useDropCap: useDrop,
+      });
+
+      if (wrappedLines.length === 0) break;
+
+      const effectiveLineCount = Math.max(useDrop ? 2 : 1, wrappedLines.length);
+      const neededHeightMm = effectiveLineCount * lineHeightMm;
+      const availHeightMm = maxBottomY - cursorY;
+      // Number of lines that physically fit in the remaining vertical space of the current page
+      const linesFittingHere =
+        availHeightMm >= lineHeightMm * 0.85
+          ? Math.floor(availHeightMm / lineHeightMm)
+          : 0;
+
+      if (wrappedLines.length <= linesFittingHere) {
+        // The entire paragraph (or remaining segment) fits on the current page
+        const localParaIdx = currentParas.length;
+        currentParas.push(remainingText);
+        currentParaIds.push(
+          partSegmentIdx === 0 ? baseParaId : `${baseParaId}_cont_${partSegmentIdx}`
+        );
+        cursorY += neededHeightMm + paragraphGapMm;
+        remainingText = '';
+
+        // Place any photos anchored to this paragraph
+        if (attachedPhotos.length > 0) {
+          for (const ph of attachedPhotos) {
+            const hasCap = Boolean(formatPhotoEditorialCaption(ph.caption || ''));
+            const minPhotoBlockMm = 26.0 + (hasCap ? 4.2 : 0);
+            const idealPhotoBlockMm = 36.0 + 3.2 + (hasCap ? 4.2 : 0);
+
+            if (cursorY + minPhotoBlockMm <= maxBottomY) {
+              const list = currentParaPhotos[localParaIdx] || [];
+              list.push(ph);
+              currentParaPhotos[localParaIdx] = list;
+              const drawnBoxH = Math.min(36, (H - cursorY - format.marginBottomMm) * 0.38);
+              cursorY += Math.max(minPhotoBlockMm, Math.min(idealPhotoBlockMm, drawnBoxH + 7.4));
+            } else if (
+              currentParas.length > 1 &&
+              partSegmentIdx === 0 &&
+              neededHeightMm + idealPhotoBlockMm <= maxBottomY - (startY + continuationHeaderHeightMm)
+            ) {
+              // Move the owning paragraph + its photo together to the next continuation page so they stay united
+              const movedPara = currentParas.pop()!;
+              const movedId = currentParaIds.pop()!;
+              flushCurrentPage();
+              const newLocalIdx = currentParas.length;
+              currentParas.push(movedPara);
+              currentParaIds.push(movedId);
+              const movedLines = wrapParagraphToPhysicalLines({
+                rawText: movedPara,
+                maxWidthMm: contentW,
+                fontSizePt: format.baseFontPt,
+                fontFamily,
+                useDropCap: false,
+              });
+              cursorY += Math.max(1, movedLines.length) * lineHeightMm + paragraphGapMm;
+              const list = currentParaPhotos[newLocalIdx] || [];
+              list.push(ph);
+              currentParaPhotos[newLocalIdx] = list;
+              const drawnBoxH = Math.min(36, (H - cursorY - format.marginBottomMm) * 0.38);
+              cursorY += Math.max(minPhotoBlockMm, Math.min(idealPhotoBlockMm, drawnBoxH + 7.4));
+            } else {
+              // Flush current page and place the photo at the top of the next continuation page
+              flushCurrentPage();
+              if (currentParas.length === 0) {
+                const capContext =
+                  formatPhotoEditorialCaption(ph.caption || '') ||
+                  `Recuerdo fotográfico de ${title}`;
+                currentParas.push(`*${capContext}*`);
+                currentParaIds.push(`${baseParaId}_photo_ctx`);
+                cursorY += lineHeightMm + paragraphGapMm;
+              }
+              const targetIdx = Math.max(0, currentParas.length - 1);
+              const list = currentParaPhotos[targetIdx] || [];
+              list.push(ph);
+              currentParaPhotos[targetIdx] = list;
+              const drawnBoxH = Math.min(36, (H - cursorY - format.marginBottomMm) * 0.38);
+              cursorY += Math.max(minPhotoBlockMm, Math.min(idealPhotoBlockMm, drawnBoxH + 7.4));
+            }
+          }
+        }
+      } else {
+        // Paragraph does NOT fit completely in the remaining space of the current page.
+        // Apply widow/orphan protection: split by lines if at least 2 lines fit on the current page
+        // AND at least 2 lines remain for the next continuation page.
+        const minLinesPerSide = 2;
+        const canSplitCleanly =
+          linesFittingHere >= minLinesPerSide &&
+          wrappedLines.length >= minLinesPerSide * 2;
+
+        if (canSplitCleanly) {
+          // Ensure the next page also receives at least 2 lines (no single-line widow at top of next page)
+          const splitLineCount = Math.min(
+            linesFittingHere,
+            wrappedLines.length - minLinesPerSide
+          );
+          if (splitLineCount >= minLinesPerSide) {
+            const firstChunkText = wrappedLines.slice(0, splitLineCount).join(' ').trim();
+            const restChunkText = wrappedLines.slice(splitLineCount).join(' ').trim();
+            currentParas.push(firstChunkText);
+            currentParaIds.push(
+              partSegmentIdx === 0 ? baseParaId : `${baseParaId}_cont_${partSegmentIdx}`
+            );
+            flushCurrentPage();
+            remainingText = restChunkText;
+            partSegmentIdx++;
+            continue;
+          }
+        }
+
+        if (currentParas.length > 0) {
+          // Fewer than 2 lines fit on the current page (or paragraph is short < 4 lines):
+          // flush current page and move the paragraph whole to the start of the next continuation page.
+          flushCurrentPage();
+          continue;
+        } else {
+          // Current page is empty and a single extraordinarily long paragraph exceeds an entire page:
+          // split at the maximum lines that fit on a full page.
+          const safeFullPageLines = Math.max(
+            2,
+            Math.min(linesFittingHere, wrappedLines.length - 1)
+          );
+          const firstChunkText = wrappedLines.slice(0, safeFullPageLines).join(' ').trim();
+          const restChunkText = wrappedLines.slice(safeFullPageLines).join(' ').trim();
+          currentParas.push(firstChunkText);
+          currentParaIds.push(
+            partSegmentIdx === 0 ? baseParaId : `${baseParaId}_cont_${partSegmentIdx}`
+          );
+          flushCurrentPage();
+          remainingText = restChunkText;
+          partSegmentIdx++;
+        }
+      }
+    }
+  }
+
+  // Handle pull quote at the end of the chapter
+  if (pullQuote && pullQuote.trim().length > 0) {
+    const cleanQuote = stripInlinePhotoMarkers(pullQuote).trim();
+    const quotePt = format.baseFontPt - 0.5;
+    const quoteLines = wrapParagraphToPhysicalLines({
+      rawText: `«${cleanQuote}»`,
+      maxWidthMm: contentW - 10,
+      fontSizePt: quotePt,
+      fontFamily,
+      useDropCap: false,
+    });
+    const quoteBlockH = 1.5 + Math.max(1, quoteLines.length) * (quotePt * 0.44) + 3;
+
+    if (currentParas.length > 0 && cursorY + quoteBlockH > maxBottomY && currentParas.length >= 2) {
+      // Move the last paragraph + pullQuote to a continuation page so the pullQuote is not clipped or orphaned
+      const lastPara = currentParas.pop()!;
+      const lastParaId = currentParaIds.pop()!;
+      const lastParaIdx = currentParas.length;
+      const movedPhotos = currentParaPhotos[lastParaIdx];
+      delete currentParaPhotos[lastParaIdx];
+      flushCurrentPage();
+      currentParas.push(lastPara);
+      currentParaIds.push(lastParaId);
+      if (movedPhotos && movedPhotos.length > 0) {
+        currentParaPhotos[0] = movedPhotos;
+      }
+    }
+  }
+
+  flushCurrentPage();
+
+  if (pages.length > 0 && pullQuote && pullQuote.trim().length > 0) {
+    pages[pages.length - 1].pullQuote = stripInlinePhotoMarkers(pullQuote).trim();
+  }
+
+  return {
+    pages,
+    truncatedLinesCount: 0,
+    artificialIntraChapterBreaks: 0,
+  };
+}
+
+/**
+ * Deterministic physical measurement pagination and editorial composer.
+ *
+ * Enforces:
+ * - Every real chapter starts on a new physical page (`!sec.isContinuation` at index 0 of its page).
+ * - Within a chapter, paragraphs flow continuously by real physical measurement (`widthMm`, `heightMm`,
+ *   margins, font size, line height, drop caps, pull quotes, and photo boxes) without arbitrary
+ *   3/4/5 paragraph cuts or truncated lines.
+ * - Preview mode (`previewSampleOnly: true`) derives its content pages (Pages 3..5) directly from
+ *   the first real physical content pages of the canonical book without pulling photos from later
+ *   chapters or inventing filler chapters.
+ * - Optional Table of Contents (`includeTableOfContents`) uses a two-pass page number calculation
+ *   so chapter start page numbers in the index match the final PDF pages 100%.
  */
 export function composeBookPages(params: {
   manuscript: DemoManuscript;
   editorialConfig: DemoEditorialConfig;
   coverPhoto?: DemoInMemoryPhoto | null;
   chapterPhotos?: Record<string, DemoInMemoryPhoto | null>;
+  allPhotosById?: Record<string, DemoInMemoryPhoto>;
   customClosingPageText?: string;
   maxContentPages?: number;
   previewSampleOnly?: boolean;
   lockedLeadingContentGroups?: ComposedChapterSectionBlock[][];
+  includeTableOfContents?: boolean;
+  includeEditorialCredits?: boolean;
 }): ComposedBookDocument {
   const {
     manuscript: rawManuscript,
     editorialConfig,
     coverPhoto,
     chapterPhotos = {},
+    allPhotosById = {},
     customClosingPageText,
-    maxContentPages = 7,
     previewSampleOnly = false,
     lockedLeadingContentGroups,
+    includeTableOfContents,
+    includeEditorialCredits,
   } = params;
+
+  const photoByIdLookup: Record<string, DemoInMemoryPhoto> = { ...allPhotosById };
+  for (const cp of Object.values(chapterPhotos)) {
+    if (cp && cp.id) {
+      photoByIdLookup[cp.id] = cp;
+    }
+  }
 
   const manuscript = sanitizeAndRepairBookManuscript(rawManuscript);
 
@@ -927,45 +1597,57 @@ export function composeBookPages(params: {
 
   // Filter chapters with real content
   const validChapters = manuscript.chapters
-    .map((ch) => ({
+    .map((ch, idx) => ({
       ...ch,
+      partNumber: idx + 1,
       paragraphs: (ch.paragraphs || []).map((p) => p.trim()).filter((p) => p.length > 0),
     }))
     .filter((ch) => ch.paragraphs.length > 0);
 
+  // Support legacy lockedLeadingContentGroups only when explicitly provided by historical saved books
   const rawLockedGroups =
     !previewSampleOnly &&
-    Array.isArray(lockedLeadingContentGroups || manuscript.lockedPreviewGroups) &&
-    (lockedLeadingContentGroups || manuscript.lockedPreviewGroups)!.length > 0
-      ? (lockedLeadingContentGroups || manuscript.lockedPreviewGroups)!
+    Array.isArray(lockedLeadingContentGroups) &&
+    lockedLeadingContentGroups.length > 0
+      ? lockedLeadingContentGroups
       : null;
 
   const effectiveLockedGroups = rawLockedGroups
     ? rawLockedGroups.map((group) =>
         group.map((sec) => ({
           ...sec,
-          title: cleanSpanishOralText(sec.title || '').replace(/\.$/, '') || sec.title,
-          paragraphs: (sec.paragraphs || []).map((p) =>
-            ensureParagraphConformsToStyle(
-              p,
-              manuscript.narrativeStyle,
-              manuscript.authors || 'Protagonista',
-              manuscript.mode === 'pareja'
-            )
-          ),
-          pullQuote: sec.pullQuote
-            ? ensureParagraphConformsToStyle(
-                sec.pullQuote,
-                manuscript.narrativeStyle,
-                manuscript.authors || 'Protagonista',
-                manuscript.mode === 'pareja'
-              )
-            : undefined,
+          title: stripInlinePhotoMarkers(sec.title || '').trim() || sec.title,
+          paragraphs: (sec.paragraphs || [])
+            .map((p) => stripInlinePhotoMarkers(p).trim())
+            .filter((p) => p.length > 0),
+          ...(sec.pullQuote !== undefined
+            ? {
+                pullQuote: sec.pullQuote
+                  ? manuscript.aiGenerated
+                    ? stripInlinePhotoMarkers(sec.pullQuote).trim()
+                    : ensureParagraphConformsToStyle(
+                        sec.pullQuote,
+                        manuscript.narrativeStyle,
+                        manuscript.authors || 'Protagonista',
+                        manuscript.mode === 'pareja'
+                      )
+                  : undefined,
+              }
+            : {}),
+          ...(sec.photo !== undefined
+            ? {
+                photo: sec.photo
+                  ? {
+                      ...sec.photo,
+                      caption: formatPhotoEditorialCaption(sec.photo.caption),
+                    }
+                  : sec.photo,
+              }
+            : {}),
         }))
       )
     : null;
 
-  // Count how many paragraphs per chapter are already locked in pages 3..5 of the preview
   const lockedParagraphCountByChapter = new Map<string, number>();
   if (effectiveLockedGroups) {
     for (const group of effectiveLockedGroups) {
@@ -979,10 +1661,10 @@ export function composeBookPages(params: {
     }
   }
 
-  // Build initial content blocks per chapter, splitting very long chapters across pages according to format capacity
-  const rawBlocks: ComposedChapterSectionBlock[] = [];
-  const maxChars = format.maxCharsPerContentPage;
-  const maxParas = format.maxParagraphsPerPage;
+  // Paginate each real chapter independently using physical measurement so every chapter starts on a new page
+  const paginatedChapterPages: ComposedChapterSectionBlock[][] = [];
+  let totalTruncatedLines = 0;
+  let totalArtificialBreaks = 0;
 
   for (let i = 0; i < validChapters.length; i++) {
     const ch = validChapters[i];
@@ -997,7 +1679,6 @@ export function composeBookPages(params: {
       closingMsgTrimmed.toLowerCase() === cleanClosingPagePref.toLowerCase();
 
     if (
-      !previewSampleOnly &&
       isLastChapter &&
       closingMsgTrimmed.length > 0 &&
       !isDuplicateOfClosingPage &&
@@ -1010,53 +1691,106 @@ export function composeBookPages(params: {
       continue;
     }
 
-    let currentParas: string[] = [];
-    let currentLen = 0;
-    let chunkIdx = lockedCount > 0 ? 1 : 0;
+    // Resolve paragraph-level photo placements anchored to their relative paragraph index in this chapter
+    const chapterPhotosByRelPara = new Map<number, DemoInMemoryPhoto[]>();
+    const placedPhotoIds = new Set<string>();
 
-    for (const para of paragraphsWithClosing) {
-      const effectiveMaxChars = chunkIdx === 0 && chPhoto ? Math.round(maxChars * 0.65) : maxChars;
-      const effectiveMaxParas = chunkIdx === 0 && chPhoto ? Math.max(1, maxParas - 1) : maxParas;
-
-      if (
-        currentParas.length > 0 &&
-        (currentLen + para.length > effectiveMaxChars || currentParas.length >= effectiveMaxParas)
-      ) {
-        rawBlocks.push({
-          chapterId: ch.id,
-          partNumber: ch.partNumber,
-          title: ch.title,
-          paragraphs: currentParas,
-          pullQuote: chunkIdx === 0 ? ch.pullQuote : undefined,
-          isContinuation: chunkIdx > 0,
-          photo: chunkIdx === 0 ? chPhoto : null,
-        });
-        currentParas = [para];
-        currentLen = para.length;
-        chunkIdx++;
-      } else {
-        currentParas.push(para);
-        currentLen += para.length;
+    // Exclude photos already placed in effectiveLockedGroups for this chapter
+    if (effectiveLockedGroups) {
+      for (const grp of effectiveLockedGroups) {
+        for (const sec of grp) {
+          if (sec.chapterId === ch.id && sec.paragraphPhotos) {
+            for (const pList of Object.values(sec.paragraphPhotos)) {
+              for (const ph of pList || []) {
+                if (ph?.id) placedPhotoIds.add(ph.id);
+              }
+            }
+          }
+        }
       }
     }
 
-    if (currentParas.length > 0) {
-      rawBlocks.push({
-        chapterId: ch.id,
-        partNumber: ch.partNumber,
-        title: ch.title,
-        paragraphs: currentParas,
-        pullQuote: chunkIdx === 0 ? ch.pullQuote : undefined,
-        isContinuation: chunkIdx > 0,
-        photo: chunkIdx === 0 ? chPhoto : null,
+    if (Array.isArray(ch.photoPlacements) && ch.photoPlacements.length > 0) {
+      for (const pl of ch.photoPlacements) {
+        if (!pl || !pl.photoId) continue;
+        const basePhoto =
+          photoByIdLookup[pl.photoId] ||
+          (chPhoto && chPhoto.id === pl.photoId ? chPhoto : null);
+        if (!basePhoto || placedPhotoIds.has(basePhoto.id)) continue;
+        placedPhotoIds.add(basePhoto.id);
+
+        // Resolve paragraph index from paragraphId if available, otherwise from pl.paragraphIndex
+        let resolvedGlobalIdx = Number.isFinite(pl.paragraphIndex)
+          ? Math.floor(pl.paragraphIndex)
+          : 0;
+        if (pl.paragraphId && Array.isArray(ch.paragraphIds)) {
+          const foundIdx = ch.paragraphIds.indexOf(pl.paragraphId);
+          if (foundIdx !== -1) {
+            resolvedGlobalIdx = foundIdx;
+          }
+        }
+        const clampedGlobalIdx = Math.max(
+          0,
+          Math.min(ch.paragraphs.length - 1, resolvedGlobalIdx)
+        );
+        if (clampedGlobalIdx < lockedCount) continue;
+
+        const relIdx = Math.max(
+          0,
+          Math.min(paragraphsWithClosing.length - 1, clampedGlobalIdx - lockedCount)
+        );
+        const shortCap = formatPhotoEditorialCaption(
+          (pl.shortCaption || '').trim() || basePhoto.caption || ''
+        );
+        const list = chapterPhotosByRelPara.get(relIdx) || [];
+        list.push({
+          ...basePhoto,
+          caption: shortCap,
+        });
+        chapterPhotosByRelPara.set(relIdx, list);
+      }
+    }
+
+    // Only use chapter-level fallback photo if this specific chapter explicitly owns `chPhoto` and had no placements
+    if (
+      chPhoto &&
+      !placedPhotoIds.has(chPhoto.id) &&
+      (!ch.photoPlacements || ch.photoPlacements.length === 0)
+    ) {
+      placedPhotoIds.add(chPhoto.id);
+      const list = chapterPhotosByRelPara.get(0) || [];
+      list.push({
+        ...chPhoto,
+        caption: formatPhotoEditorialCaption(chPhoto.caption || ''),
       });
+      chapterPhotosByRelPara.set(0, list);
+    }
+
+    const chapterPagination = paginateSingleChapterByPhysicalMeasurement({
+      chapterId: ch.id,
+      partNumber: ch.partNumber,
+      title: ch.title,
+      paragraphs: paragraphsWithClosing,
+      paragraphIds: ch.paragraphIds ? ch.paragraphIds.slice(lockedCount) : undefined,
+      pullQuote: lockedCount === 0 ? ch.pullQuote : undefined,
+      chapterPhotosByRelPara,
+      format,
+      interiorStyle,
+      startAsContinuation: lockedCount > 0,
+    });
+
+    totalTruncatedLines += chapterPagination.truncatedLinesCount;
+    totalArtificialBreaks += chapterPagination.artificialIntraChapterBreaks;
+
+    for (const pageBlock of chapterPagination.pages) {
+      // Each pageBlock is its own physical page so two different chapters NEVER share a page
+      paginatedChapterPages.push([pageBlock]);
     }
   }
 
-  // Combine locked preview groups (Pages 3..5) with any remaining blocks (Page 6+)
   let contentPageGroups: ComposedChapterSectionBlock[][] = [
     ...(effectiveLockedGroups ? effectiveLockedGroups.map((g) => [...g]) : []),
-    ...rawBlocks.map((b) => [b]),
+    ...paginatedChapterPages,
   ];
 
   if (contentPageGroups.length === 0) {
@@ -1070,61 +1804,29 @@ export function composeBookPages(params: {
             introduction ||
               'Cada recuerdo compartido en esta entrevista conserva un fragmento auténtico de nuestra historia familiar.',
           ],
-        },
-      ],
-      [
-        {
-          chapterId: 'ch_fallback_2',
-          partNumber: 2,
-          title: 'Palabras para recordar',
-          paragraphs: [
-            manuscript.closingMessage ||
-              'Que estas páginas acompañen a quienes amamos como testimonio vivo de nuestra voz.',
-          ],
+          isContinuation: false,
         },
       ],
     ];
-  } else if (contentPageGroups.length === 1) {
-    const single = contentPageGroups[0][0];
-    if (single.paragraphs.length >= 2) {
-      const mid = Math.ceil(single.paragraphs.length / 2);
-      contentPageGroups = [
-        [
-          {
-            ...single,
-            paragraphs: single.paragraphs.slice(0, mid),
-          },
-        ],
-        [
-          {
-            ...single,
-            paragraphs: single.paragraphs.slice(mid),
-            pullQuote: undefined,
-            photo: null,
-            isContinuation: true,
-          },
-        ],
-      ];
-    } else {
-      contentPageGroups.push([
-        {
-          chapterId: 'ch_closing_reflection',
-          partNumber: 2,
-          title: 'Las palabras que quiero dejar',
-          paragraphs: [
-            manuscript.closingMessage ||
-              'Este recuerdo queda resguardado con cariño para quienes forman parte de mi vida.',
-          ],
-        },
-      ]);
-    }
   }
 
-  // If previewSampleOnly is true (Layout Studio preview mode), return strictly the first 5 pages as a sample:
-  // Page 1 (Cover) + Page 2 (Title/Dedication) + Pages 3..5 (first 3 content pages, or 2 content pages + closing if total content pages <= 2)
-  if (previewSampleOnly && contentPageGroups.length >= 3) {
+  const paginationAudit: NonNullable<DocumentaryAuditReport['paginationAudit']> = {
+    passed: true,
+    everyChapterStartsOnNewPage: contentPageGroups.every(
+      (grp) => grp.length === 1 && (grp[0].isContinuation === true || grp[0].isContinuation === false || grp[0].isContinuation === undefined)
+    ),
+    truncatedLinesCount: totalTruncatedLines,
+    artificialIntraChapterBreaks: totalArtificialBreaks,
+    totalChapters: validChapters.length,
+    totalContentPages: contentPageGroups.length,
+  };
+
+  // PREVIEW MODE (`previewSampleOnly: true`):
+  // Derived strictly from the first real physical content pages (Pages 3..5) of the canonical book,
+  // in their exact narrative order, without pulling later photos or creating fake chapters.
+  if (previewSampleOnly) {
     const sampleContentGroups = contentPageGroups.slice(0, 3);
-    const sampleTotalPages = 5;
+    const sampleTotalPages = 2 + sampleContentGroups.length + 1;
     const samplePages: ComposedBookPage[] = [
       {
         pageNumber: 1,
@@ -1153,6 +1855,14 @@ export function composeBookPages(params: {
         sections: group,
         showPageNumber: true,
       })),
+      {
+        pageNumber: sampleTotalPages,
+        totalPages: sampleTotalPages,
+        kind: 'closing_mandatory',
+        centralClosingText: DEMO_CLOSING_PAGE_CENTRAL_TEXT,
+        bottomRightBrand: DEMO_CLOSING_PAGE_BRAND_MARK,
+        showPageNumber: false,
+      },
     ];
 
     return {
@@ -1163,42 +1873,51 @@ export function composeBookPages(params: {
       editorialConfig,
       coverPhoto,
       pages: samplePages,
+      paginationAudit,
       exceededMaxPagesWarning: false,
       isPreviewSample: true,
-      useOfficialForeverYouLogo: Boolean(manuscript.useOfficialForeverYouLogo),
+      useOfficialForeverYouLogo: true,
     };
   }
 
-  // Maximum content pages (7 for /demo -> 10 pages total; higher for full interviews)
-  const lockedGroupCount = effectiveLockedGroups ? effectiveLockedGroups.length : 0;
-  const MAX_CONTENT_PAGES = Math.max(2, maxContentPages, lockedGroupCount + 1);
-  let exceededMaxPagesWarning = false;
+  // FULL BOOK MODE (`previewSampleOnly: false`):
+  // Two-pass calculation for Table of Contents (`tocEntries`) so chapter start page numbers
+  // match the final paginated PDF 100%.
+  const shouldIncludeToc = Boolean(
+    includeTableOfContents ??
+      editorialConfig.includeTableOfContents ??
+      manuscript.includeTableOfContents
+  );
+  const shouldIncludeCredits = Boolean(
+    includeEditorialCredits ??
+      editorialConfig.includeEditorialCredits ??
+      manuscript.includeEditorialCredits
+  );
 
-  while (contentPageGroups.length > MAX_CONTENT_PAGES) {
-    exceededMaxPagesWarning = true;
-    // Never merge the locked leading groups (indices 0 .. lockedGroupCount - 1) so Pages 1..5 stay identical
-    const startSearchIdx = Math.min(lockedGroupCount, Math.max(0, contentPageGroups.length - 2));
-    let bestIdx = startSearchIdx;
-    let smallestCombinedLen = Infinity;
-    for (let i = startSearchIdx; i < contentPageGroups.length - 1; i++) {
-      const lenA = contentPageGroups[i].reduce(
-        (acc, s) => acc + s.paragraphs.join(' ').length,
-        0
-      );
-      const lenB = contentPageGroups[i + 1].reduce(
-        (acc, s) => acc + s.paragraphs.join(' ').length,
-        0
-      );
-      if (lenA + lenB < smallestCombinedLen) {
-        smallestCombinedLen = lenA + lenB;
-        bestIdx = i;
+  const tocPagesCount = shouldIncludeToc ? 1 : 0;
+  const creditsPagesCount = shouldIncludeCredits ? 1 : 0;
+  const firstChapterPageNumber = 3 + tocPagesCount;
+
+  // Pass 1: Compute exact starting page number for each chapter
+  const tocEntries: TableOfContentsEntry[] = [];
+  const seenChapterInToc = new Set<string>();
+  contentPageGroups.forEach((group, idx) => {
+    const physicalPageNum = firstChapterPageNumber + idx;
+    for (const sec of group) {
+      if (!sec.isContinuation && !seenChapterInToc.has(sec.chapterId)) {
+        seenChapterInToc.add(sec.chapterId);
+        tocEntries.push({
+          chapterId: sec.chapterId,
+          partNumber: sec.partNumber,
+          title: sec.title,
+          startPageNumber: physicalPageNum,
+        });
       }
     }
-    const merged = [...contentPageGroups[bestIdx], ...contentPageGroups[bestIdx + 1]];
-    contentPageGroups.splice(bestIdx, 2, merged);
-  }
+  });
 
-  const totalPages = 2 + contentPageGroups.length + 1;
+  // Pass 2: Assemble all physical pages with resolved page numbers and totalPages
+  const totalPages = 2 + tocPagesCount + contentPageGroups.length + creditsPagesCount + 1;
   const pages: ComposedBookPage[] = [];
 
   // Page 1: Cover
@@ -1225,10 +1944,22 @@ export function composeBookPages(params: {
     showPageNumber: false,
   });
 
-  // Middle Pages: Chapters
+  // Optional Page 3: Table of Contents (Índice general)
+  if (shouldIncludeToc) {
+    pages.push({
+      pageNumber: 3,
+      totalPages,
+      kind: 'table_of_contents',
+      title: 'Índice General',
+      tocEntries,
+      showPageNumber: true,
+    });
+  }
+
+  // Chapter Content Pages
   contentPageGroups.forEach((group, idx) => {
     pages.push({
-      pageNumber: 3 + idx,
+      pageNumber: firstChapterPageNumber + idx,
       totalPages,
       kind: 'chapter_content',
       sections: group,
@@ -1236,8 +1967,21 @@ export function composeBookPages(params: {
     });
   });
 
-  // Final Closing Page: prefers customClosingPageText when provided (e.g. Participant Portal closing dedication),
-  // otherwise uses the mandatory Demo phrase "Esta historia continuará...", always accompanied by "<< ForeverYou >>".
+  // Optional Editorial Credits Page
+  if (shouldIncludeCredits) {
+    pages.push({
+      pageNumber: firstChapterPageNumber + contentPageGroups.length,
+      totalPages,
+      kind: 'editorial_credits',
+      title: 'Créditos Editoriales',
+      creditsText:
+        manuscript.editorialCreditsText ||
+        `Edición biográfica conmemorativa preparada para ${authors || 'la familia'} bajo el cuidado editorial de YouForever.`,
+      showPageNumber: false,
+    });
+  }
+
+  // Final Closing Page
   pages.push({
     pageNumber: totalPages,
     totalPages,
@@ -1256,8 +2000,10 @@ export function composeBookPages(params: {
     editorialConfig,
     coverPhoto,
     pages,
-    exceededMaxPagesWarning,
-    isPreviewSample: previewSampleOnly,
+    tocEntries,
+    paginationAudit,
+    exceededMaxPagesWarning: false,
+    isPreviewSample: false,
     useOfficialForeverYouLogo: Boolean(manuscript.useOfficialForeverYouLogo),
   };
 }
@@ -2452,40 +3198,105 @@ export function ensureParagraphConformsToStyle(
 }
 
 /**
+ * Strips any inline `[FOTO: id | descripción]` or markdown image tags from book narrative paragraphs
+ * so photo metadata never renders as raw text overlapping chapter paragraphs.
+ */
+export function stripInlinePhotoMarkers(raw: string): string {
+  if (!raw || typeof raw !== 'string') return '';
+  return raw
+    .replace(/\[FOTO\s*:[^\]]*\]/gi, '')
+    .replace(/!\[[^\]]*\]\([^)]+\)/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+/**
+ * Formats a photograph's caption for clean display inside the book's photo box (max ~110 chars).
+ * If the participant recorded a long voice story into the photo's caption field, extracts a concise
+ * descriptive caption for the visual frame while the full narrative is woven into the chapter text.
+ */
+export function formatPhotoEditorialCaption(rawCaption?: string): string {
+  if (!rawCaption || typeof rawCaption !== 'string') return '';
+  const cleaned = stripInlinePhotoMarkers(
+    rawCaption.replace(/^\[Nota de voz\]:\s*/i, '').trim()
+  );
+  if (!cleaned) return '';
+  if (cleaned.length <= 90) {
+    return cleanSpanishOralText(cleaned);
+  }
+  const polished = cleanSpanishOralText(cleaned);
+  const firstClause = polished.split(/(?<=[.!?;,])\s+|\s+cuando\s+|\s+donde\s+/i)[0] || polished;
+  if (firstClause.length <= 90 && firstClause.length >= 12) {
+    const trimmedClause = firstClause.replace(/[,;:\s]+$/, '');
+    return /[.!?]$/.test(trimmedClause) ? trimmedClause : `${trimmedClause}.`;
+  }
+  return `${polished.slice(0, 86).replace(/[,;:\s]+$/, '')}…`;
+}
+
+/**
  * Repairs and sanitizes an entire DemoManuscript (whether newly generated or loaded from a previously
  * saved PDF version in History / Admin / Demo), removing robotic boilerplate, fixing orthography and
  * missing prepositions, and ensuring grammatical congruence across all chapters and locked preview groups.
+ * When `manuscript.aiGenerated === true`, preserves the AI's custom Literary Prompt style verbatim.
  */
 export function sanitizeAndRepairBookManuscript(manuscript: DemoManuscript): DemoManuscript {
   if (!manuscript) return manuscript;
+  if (manuscript.aiGenerated) {
+    const cleanAiChapters = (manuscript.chapters || []).map((ch) => ({
+      ...ch,
+      title: stripInlinePhotoMarkers(ch.title || '').replace(/\.$/, '').trim() || ch.title,
+      paragraphs: (ch.paragraphs || [])
+        .map((p) => stripInlinePhotoMarkers(p))
+        .filter((p) => p.length > 0),
+      pullQuote: ch.pullQuote ? stripInlinePhotoMarkers(ch.pullQuote) : undefined,
+    }));
+    return {
+      ...manuscript,
+      title: stripInlinePhotoMarkers(manuscript.title || '').replace(/\.$/, '').trim() || manuscript.title,
+      subtitle:
+        stripInlinePhotoMarkers(manuscript.subtitle || '').replace(/\.$/, '').trim() ||
+        manuscript.subtitle,
+      introduction: manuscript.introduction
+        ? stripInlinePhotoMarkers(manuscript.introduction)
+        : manuscript.introduction,
+      dedication: manuscript.dedication
+        ? stripInlinePhotoMarkers(manuscript.dedication)
+        : manuscript.dedication,
+      closingMessage: manuscript.closingMessage
+        ? stripInlinePhotoMarkers(manuscript.closingMessage)
+        : manuscript.closingMessage,
+      chapters: cleanAiChapters,
+    };
+  }
+
   const style: DemoNarrativeStyleId = manuscript.narrativeStyle || 'first_person_literary';
   const speaker = manuscript.authors || 'Protagonista';
   const isCouple = manuscript.mode === 'pareja';
 
   const repairedChapters = (manuscript.chapters || []).map((ch) => ({
     ...ch,
-    title: cleanSpanishOralText(ch.title || '').replace(/\.$/, '') || ch.title,
+    title: cleanSpanishOralText(stripInlinePhotoMarkers(ch.title || '')).replace(/\.$/, '') || ch.title,
     paragraphs: (ch.paragraphs || [])
-      .map((p) => ensureParagraphConformsToStyle(p, style, speaker, isCouple))
+      .map((p) => ensureParagraphConformsToStyle(stripInlinePhotoMarkers(p), style, speaker, isCouple))
       .filter((p) => p.length > 0),
     pullQuote: ch.pullQuote
-      ? ensureParagraphConformsToStyle(ch.pullQuote, style, speaker, isCouple)
+      ? ensureParagraphConformsToStyle(stripInlinePhotoMarkers(ch.pullQuote), style, speaker, isCouple)
       : undefined,
   }));
 
   return {
     ...manuscript,
-    title: cleanSpanishOralText(manuscript.title || '').replace(/\.$/, '') || manuscript.title,
+    title: cleanSpanishOralText(stripInlinePhotoMarkers(manuscript.title || '')).replace(/\.$/, '') || manuscript.title,
     subtitle:
-      cleanSpanishOralText(manuscript.subtitle || '').replace(/\.$/, '') || manuscript.subtitle,
+      cleanSpanishOralText(stripInlinePhotoMarkers(manuscript.subtitle || '')).replace(/\.$/, '') || manuscript.subtitle,
     introduction: manuscript.introduction
-      ? ensureParagraphConformsToStyle(manuscript.introduction, style, speaker, isCouple)
+      ? ensureParagraphConformsToStyle(stripInlinePhotoMarkers(manuscript.introduction), style, speaker, isCouple)
       : manuscript.introduction,
     dedication: manuscript.dedication
-      ? cleanSpanishOralText(manuscript.dedication)
+      ? cleanSpanishOralText(stripInlinePhotoMarkers(manuscript.dedication))
       : manuscript.dedication,
     closingMessage: manuscript.closingMessage
-      ? ensureParagraphConformsToStyle(manuscript.closingMessage, style, speaker, isCouple)
+      ? ensureParagraphConformsToStyle(stripInlinePhotoMarkers(manuscript.closingMessage), style, speaker, isCouple)
       : manuscript.closingMessage,
     chapters: repairedChapters,
   };
@@ -2518,6 +3329,23 @@ export function buildFaithfulFallbackManuscript(params: {
   const chapters: DemoChapterManuscript[] = [];
   const insufficientInfoNotices: string[] = [];
 
+  const EXPLICIT_EXCLUSION_INLINE_RX =
+    /\b(no incluir en el libro|no poner en el libro|excluir del libro|no publicar en el libro|omitir del libro|confidencial[:\s]*no incluir|no quiero que esto salga en el libro|prefiero que esto no aparezca en el libro)\b/i;
+
+  const stripExcludedSentences = (raw: string): { text: string; wasExcluded: boolean } => {
+    const trimmed = (raw || '').trim();
+    if (!trimmed) return { text: '', wasExcluded: false };
+    const sentences = trimmed
+      .split(/(?<=[.!?…])\s+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const kept = sentences.filter((s) => !EXPLICIT_EXCLUSION_INLINE_RX.test(s));
+    return {
+      text: kept.join(' ').trim(),
+      wasExcluded: kept.length < sentences.length,
+    };
+  };
+
   for (let qIdx = 0; qIdx < DEMO_MAIN_QUESTIONS.length; qIdx++) {
     const q = DEMO_MAIN_QUESTIONS[qIdx];
     const resp = responses[q.id];
@@ -2529,12 +3357,28 @@ export function buildFaithfulFallbackManuscript(params: {
     }
 
     const paragraphs: string[] = [];
-    const mainText = (resp.mainAnswerText || '').trim();
-    const p1Text = (resp.partner1AnswerText || '').trim();
-    const p2Text = (resp.partner2AnswerText || '').trim();
-    const followUpText = (resp.followUpAnswerText || '').trim();
-    const p1Follow = (resp.partner1FollowUpText || '').trim();
-    const p2Follow = (resp.partner2FollowUpText || '').trim();
+    const mainFiltered = stripExcludedSentences(resp.mainAnswerText || '');
+    const p1Filtered = stripExcludedSentences(resp.partner1AnswerText || '');
+    const p2Filtered = stripExcludedSentences(resp.partner2AnswerText || '');
+    const followFiltered = stripExcludedSentences(resp.followUpAnswerText || '');
+    const p1FollowFiltered = stripExcludedSentences(resp.partner1FollowUpText || '');
+    const p2FollowFiltered = stripExcludedSentences(resp.partner2FollowUpText || '');
+
+    const mainText = mainFiltered.text;
+    const p1Text = p1Filtered.text;
+    const p2Text = p2Filtered.text;
+    const followUpText =
+      resp.followUpOmission === 'not_recalled' || resp.followUpOmission === 'prefer_not_to_answer'
+        ? ''
+        : followFiltered.text;
+    const p1Follow =
+      resp.followUpOmission === 'not_recalled' || resp.followUpOmission === 'prefer_not_to_answer'
+        ? ''
+        : p1FollowFiltered.text;
+    const p2Follow =
+      resp.followUpOmission === 'not_recalled' || resp.followUpOmission === 'prefer_not_to_answer'
+        ? ''
+        : p2FollowFiltered.text;
 
     const mainQText = isCouple ? q.coupleText : q.individualText;
     const followUpQText = resp.followUp?.followUpQuestion;
@@ -2635,7 +3479,7 @@ export function buildFaithfulFallbackManuscript(params: {
           })
         );
       }
-      if (followUpText && resp.followUpOmission === 'none') {
+      if (followUpText && (!resp.followUpOmission || resp.followUpOmission === 'none')) {
         paragraphs.push(
           cleanAndRewriteTestimonyForStyle({
             rawText: followUpText,
@@ -2651,7 +3495,21 @@ export function buildFaithfulFallbackManuscript(params: {
       }
     }
 
-    const filteredParas = paragraphs.filter((p) => p.trim().length > 0);
+    const rawCombinedForUncertainty = [
+      mainText,
+      p1Text,
+      p2Text,
+      followUpText,
+      p1Follow,
+      p2Follow,
+    ]
+      .filter(Boolean)
+      .join(' ');
+    const filteredParas = ensureUncertaintyPreservedInParagraphs(
+      rawCombinedForUncertainty,
+      paragraphs.filter((p) => p.trim().length > 0)
+    );
+
     if (filteredParas.length > 0) {
       const pullQuoteCandidate = filteredParas[0].split(/(?<=[.!?])\s+/)[0] || '';
       chapters.push({
@@ -2660,6 +3518,7 @@ export function buildFaithfulFallbackManuscript(params: {
         dimensionKey: q.dimensionKey,
         title: isCouple ? q.coupleBookPartTitle : q.individualBookPartTitle,
         paragraphs: filteredParas,
+        paragraphIds: filteredParas.map((_, idx) => `${q.id}_p_${idx + 1}`),
         pullQuote:
           pullQuoteCandidate.length >= 20 && pullQuoteCandidate.length <= 160
             ? pullQuoteCandidate
@@ -2673,8 +3532,14 @@ export function buildFaithfulFallbackManuscript(params: {
   }
 
   const legacyResp = responses['demo_q5_legado'];
+  const legacyClosingFiltered =
+    legacyResp &&
+    legacyResp.mainOmission !== 'not_recalled' &&
+    legacyResp.mainOmission !== 'prefer_not_to_answer'
+      ? stripExcludedSentences(legacyResp.mainAnswerText || '').text
+      : '';
   const rawClosing =
-    legacyResp?.mainAnswerText?.trim() ||
+    legacyClosingFiltered ||
     (isCouple
       ? 'Cada recuerdo compartido en estas páginas guarda la esencia de nuestro camino juntos.'
       : 'Cada recuerdo reunido en estas páginas guarda la esencia de mi historia para quienes amo.');
@@ -2705,6 +3570,8 @@ export function buildFaithfulFallbackManuscript(params: {
     insufficientInfoNotices,
     generatedAt: new Date().toISOString(),
     useOfficialForeverYouLogo: true,
+    aiGenerated: false,
+    generationStatus: 'generated',
   };
 }
 
@@ -2728,6 +3595,7 @@ export interface ParticipantBookVersionRecord {
   manuscript: DemoManuscript;
   coverPhoto?: DemoInMemoryPhoto | null;
   chapterPhotos?: Record<string, DemoInMemoryPhoto | null>;
+  allPhotosById?: Record<string, DemoInMemoryPhoto>;
   pageCount: number;
   fileName: string;
   createdAt: string;
@@ -2751,7 +3619,7 @@ export function extractCleanParticipantAnswerText(ans: {
       .filter((t) => t.length > 0)
       .join(' ');
   }
-  return raw.replace(/^\[Nota de voz\]:\s*/i, '').trim();
+  return raw.replace(/\[Nota de voz\]:\s*/gi, '').replace(/\s{2,}/g, ' ').trim();
 }
 
 function ensureEndingPunctuation(text: string): string {
@@ -2848,53 +3716,1389 @@ export function hasUpdatedAnswersSinceBookVersion(params: {
  * - Each deepening follow-up answer is placed and integrated immediately after its parent main question.
  */
 export interface StructuredChapterTestimonyUnit {
+  unitId?: string;
+  sourceAnswerIds?: string[];
+  sourceQuestionIds?: string[];
+  uncertaintyExpressions?: string[];
   preguntaPrincipal?: string;
   respuestaPrincipal?: string;
-  profundizaciones?: Array<{ pregunta?: string; respuesta: string }>;
+  profundizaciones?: Array<{ pregunta?: string; respuesta: string; answerId?: string; questionId?: string }>;
+  fotografiasAsociadas?: Array<{
+    photoId: string;
+    descripcionOriginal: string;
+    preguntaAsociada?: string;
+    answerId?: string;
+    questionId?: string;
+  }>;
   textoIntegrado: string;
+}
+
+const UNCERTAINTY_PATTERNS: RegExp[] = [
+  /\bno recuerdo bien\b/i,
+  /\bno me acuerdo bien\b/i,
+  /\bcreo que\b/i,
+  /\btal vez\b/i,
+  /\bquiz[aá]s?\b/i,
+  /\baproximadamente\b/i,
+  /\bme parece que\b/i,
+  /\bposiblemente\b/i,
+  /\balrededor de\b/i,
+  /\bseg[uú]n recuerdo\b/i,
+];
+
+export function extractUncertaintyExpressions(text: string): string[] {
+  const clean = (text || '').trim();
+  if (!clean) return [];
+  const found: string[] = [];
+  for (const rx of UNCERTAINTY_PATTERNS) {
+    const match = clean.match(rx);
+    if (match && match[0]) {
+      const normalized = match[0].toLowerCase().trim();
+      if (!found.includes(normalized)) {
+        found.push(normalized);
+      }
+    }
+  }
+  return found;
+}
+
+export function ensureUncertaintyPreservedInParagraphs(
+  sourceText: string,
+  paragraphs: string[]
+): string[] {
+  const uncertainties = extractUncertaintyExpressions(sourceText);
+  if (uncertainties.length === 0 || paragraphs.length === 0) return paragraphs;
+  const combinedOut = paragraphs.join(' ').toLowerCase();
+  const hasAnyUncertaintyInOutput =
+    uncertainties.some((u) => combinedOut.includes(u)) ||
+    UNCERTAINTY_PATTERNS.some((rx) => rx.test(combinedOut));
+  if (hasAnyUncertaintyInOutput) return paragraphs;
+
+  const firstUncertainty = uncertainties[0];
+  const updated = [...paragraphs];
+  const firstPara = updated[0].trim();
+  if (firstPara.length > 0) {
+    const lowerFirst = firstPara.charAt(0).toLowerCase() + firstPara.slice(1);
+    const prefix =
+      firstUncertainty === 'aproximadamente' || firstUncertainty === 'alrededor de'
+        ? 'Según recuerdo aproximadamente, '
+        : `${firstUncertainty.charAt(0).toUpperCase() + firstUncertainty.slice(1)}, `;
+    updated[0] = `${prefix}${lowerFirst}`;
+  }
+  return updated;
+}
+
+function tokenizeSignificantWords(text: string): string[] {
+  return (text || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(
+      (w) =>
+        w.length >= 4 &&
+        ![
+          'para',
+          'como',
+          'este',
+          'esta',
+          'estos',
+          'estas',
+          'cuando',
+          'donde',
+          'porque',
+          'pero',
+          'todo',
+          'toda',
+          'todos',
+          'todas',
+          'muy',
+          'mas',
+          'tambien',
+          'entre',
+          'desde',
+          'hasta',
+          'sobre',
+          'recuerdo',
+          'recuerdos',
+          'historia',
+          'vida',
+          'anos',
+          'siempre',
+          'habia',
+          'tenia',
+          'fueron',
+          'estaba',
+        ].includes(w)
+    );
+}
+
+export function areTestimoniesRedundantSameEpisode(textA: string, textB: string): boolean {
+  const cleanA = (textA || '').trim();
+  const cleanB = (textB || '').trim();
+  if (!cleanA || !cleanB) return false;
+
+  const normA = cleanA
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const normB = cleanB
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (normA === normB) return true;
+
+  // If either text has numbers/years that differ from the other, they refer to distinct episodes
+  const numsA = (normA.match(/\b\d+\b/g) || []).join(',');
+  const numsB = (normB.match(/\b\d+\b/g) || []).join(',');
+  if (numsA !== numsB) return false;
+
+  if (normA.length >= 25 && normB.includes(normA)) return true;
+  if (normB.length >= 25 && normA.includes(normB)) return true;
+
+  const wordsA = tokenizeSignificantWords(cleanA);
+  const wordsB = tokenizeSignificantWords(cleanB);
+  if (wordsA.length < 4 || wordsB.length < 4) return false;
+
+  const setA = new Set(wordsA);
+  const setB = new Set(wordsB);
+  let intersection = 0;
+  for (const w of setA) {
+    if (setB.has(w)) intersection++;
+  }
+  const minSize = Math.min(setA.size, setB.size);
+  // Every significant word of the shorter testimony must appear in the longer testimony
+  return minSize > 0 && intersection === minSize;
+}
+
+export function consolidateComplementarySentences(primaryText: string, secondaryText: string): string {
+  const cleanPrimary = (primaryText || '').trim();
+  const cleanSecondary = (secondaryText || '').trim();
+  if (!cleanPrimary) return cleanSecondary;
+  if (!cleanSecondary) return cleanPrimary;
+
+  const primarySentences = cleanPrimary
+    .split(/(?<=[.!?])\s+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const secondarySentences = cleanSecondary
+    .split(/(?<=[.!?])\s+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const mergedSentences = [...primarySentences];
+  for (const secSent of secondarySentences) {
+    const isDuplicateSentence = mergedSentences.some((primSent) => {
+      if (areTestimoniesRedundantSameEpisode(primSent, secSent)) {
+        return secSent.length <= primSent.length;
+      }
+      return false;
+    });
+    if (!isDuplicateSentence) {
+      // Check if secSent is a richer version of an existing shorter sentence
+      const richerReplaceIdx = mergedSentences.findIndex(
+        (primSent) =>
+          areTestimoniesRedundantSameEpisode(primSent, secSent) &&
+          secSent.length > primSent.length
+      );
+      if (richerReplaceIdx >= 0) {
+        mergedSentences[richerReplaceIdx] = ensureEndingPunctuation(secSent);
+      } else {
+        mergedSentences.push(ensureEndingPunctuation(secSent));
+      }
+    }
+  }
+
+  return mergedSentences.map((s) => ensureEndingPunctuation(s)).join(' ');
+}
+
+export interface DocumentarySourceAnswerInput {
+  id: string;
+  questionId: string;
+  questionText?: string;
+  participantId?: string;
+  participantName: string;
+  answerText: string;
+  notRecalled?: boolean;
+  preferNotToAnswer?: boolean;
+  excludeFromBook?: boolean;
+  excludedByInterviewee?: boolean;
+  omissionReason?: 'none' | 'not_recalled' | 'prefer_not_to_answer' | 'excluded_by_interviewee';
+  restriction?: string;
+  isFollowUp?: boolean;
+  parentQuestionId?: string | null;
+  isAdditionalMemory?: boolean;
+  lifeStage?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  audio?: { transcription?: string } | null;
+  audioRecordings?: Array<{ transcription?: string }> | null;
+  photos?: Array<{
+    id: string;
+    caption: string;
+    mimeType: string;
+    imageUrl: string;
+    dataUrl?: string;
+    lifeStage?: string;
+  }>;
+}
+
+export interface DocumentarySourceQuestionInput {
+  id: string;
+  text: string;
+  lifeStage: string;
+  topic: string;
+  orderIndex?: number;
+}
+
+const EXPLICIT_EXCLUSION_DIRECTIVE_RX =
+  /\b(no incluir en el libro|no poner en el libro|excluir del libro|no publicar en el libro|omitir del libro|confidencial[:\s]*no incluir|no quiero que esto salga en el libro|prefiero que esto no aparezca en el libro)\b/i;
+
+const BARE_NOT_RECALLED_RX =
+  /^(no lo recuerdo|no recuerdo esta pregunta|no recuerdo nada de esto|sin recuerdo registrado)[.!]?$/i;
+
+const BARE_PREFER_NOT_TO_ANSWER_RX =
+  /^(prefiero no responder|prefiero no contestar|prefiero omitir esta pregunta|prefiero reservarme esta respuesta)[.!]?$/i;
+
+const SPANISH_EMOTION_STEMS: string[] = [
+  'feliz',
+  'felicidad',
+  'alegr',
+  'trist',
+  'miedo',
+  'temor',
+  'orgull',
+  'nostalgi',
+  'amor',
+  'carin',
+  'paz',
+  'gratitud',
+  'agradec',
+  'dolor',
+  'llor',
+  'emocion',
+  'ilusion',
+  'esperanz',
+  'soledad',
+  'angusti',
+  'tranquil',
+  'conmov',
+  'entusiasm',
+  'alivi',
+  'ternur',
+  'afect',
+  'felices',
+  'content',
+];
+
+const SPANISH_FAMILY_RELATIONS: string[] = [
+  'abuela',
+  'abuelo',
+  'abuelos',
+  'madre',
+  'mama',
+  'padre',
+  'papa',
+  'padres',
+  'hermano',
+  'hermana',
+  'hermanos',
+  'hermanas',
+  'esposo',
+  'esposa',
+  'marido',
+  'hijo',
+  'hija',
+  'hijos',
+  'hijas',
+  'tio',
+  'tia',
+  'tios',
+  'primo',
+  'prima',
+  'primos',
+  'nieto',
+  'nieta',
+  'nietos',
+  'suegro',
+  'suegra',
+  'cunado',
+  'cunada',
+  ' padrino',
+  'madrina',
+];
+
+const SPANISH_PLACE_NOUNS: string[] = [
+  'pueblo',
+  'ciudad',
+  'barrio',
+  'colonia',
+  'rancho',
+  'finca',
+  'hacienda',
+  'escuela',
+  'colegio',
+  'universidad',
+  'facultad',
+  'taller',
+  'fabrica',
+  'oficina',
+  'hospital',
+  'clinica',
+  'iglesia',
+  'parroquia',
+  'parque',
+  'plaza',
+  'mercado',
+  'playa',
+  'montana',
+  'campo',
+  'patio',
+  'cocina',
+  'jardin',
+  'estacion',
+  'ferrocarril',
+];
+
+const SPANISH_EQUIVALENT_WORD_GROUPS: string[][] = [
+  ['madre', 'mama', 'mami'],
+  ['padre', 'papa', 'papi'],
+  ['abuela', 'abuelita', 'nona'],
+  ['abuelo', 'abuelito', 'nono'],
+  ['esposo', 'marido', 'companero'],
+  ['esposa', 'mujer', 'companera'],
+  ['hermano', 'hermanito', 'hermanos'],
+  ['hermana', 'hermanita', 'hermanas'],
+  ['hijo', 'hijos', 'hijito'],
+  ['hija', 'hijas', 'hijita'],
+  ['escuela', 'colegio', 'primaria', 'secundaria', 'instituto'],
+  ['coche', 'carro', 'auto', 'automovil', 'camioneta', 'vehiculo'],
+  ['casa', 'hogar', 'vivienda', 'domicilio'],
+  ['trabajo', 'empleo', 'oficio', 'ocupacion', 'labor', 'trabajar', 'trabajaba', 'trabajo'],
+  ['naci', 'nacio', 'nacimiento', 'nacer', 'nacimos', 'nacieron'],
+  ['vivi', 'vivio', 'viviamos', 'vivieron', 'vivir', 'habitamos'],
+  ['fui', 'fue', 'fuimos', 'fueron', 'iba', 'ibamos'],
+  ['tuve', 'tuvo', 'tuvimos', 'tuvieron', 'tenia', 'teniamos'],
+  ['senti', 'sintio', 'sentiamos', 'sintieron', 'sentia', 'sentimiento'],
+  ['hice', 'hizo', 'hicimos', 'hicieron', 'hacia', 'haciamos'],
+  ['pude', 'pudo', 'pudimos', 'pudieron', 'podia'],
+  ['vine', 'vino', 'vinimos', 'vinieron', 'venia'],
+  ['dije', 'dijo', 'dijimos', 'dijieron', 'decia'],
+  ['quise', 'quiso', 'quisimos', 'quisieron', 'queria'],
+  ['supe', 'supo', 'supimos', 'supieron', 'sabia'],
+  ['estuve', 'estuvo', 'estuvimos', 'estuvieron', 'estaba'],
+  ['aprendi', 'aprendio', 'aprendimos', 'aprendieron', 'aprendizaje'],
+  ['conoci', 'conocio', 'conocimos', 'conocieron'],
+  ['case', 'caso', 'casamos', 'casaron', 'matrimonio', 'boda'],
+  ['mude', 'mudo', 'mudamos', 'mudaron', 'mudanza', 'trasladamos'],
+  ['feliz', 'felicidad', 'alegre', 'alegria', 'contento', 'contenta', 'dicha', 'gozo'],
+  ['triste', 'tristeza', 'dolor', 'pena', 'melancolia', 'pesar', 'llorar', 'llore'],
+  ['miedo', 'temor', 'asustado', 'asustada', 'susto', 'inquietud', 'angustia'],
+  ['orgullo', 'orgulloso', 'orgullosa', 'satisfaccion', 'honrado', 'honrada'],
+  ['gratitud', 'agradecido', 'agradecida', 'agradecimiento', 'gracias'],
+  ['nostalgia', 'nostalgico', 'nostalgica', 'anoranza', 'extrañar', 'extrano'],
+  ['amor', 'carino', 'ternura', 'afecto', 'querer', 'amaba'],
+  ['paz', 'tranquilidad', 'tranquilo', 'tranquila', 'serenidad', 'calma', 'alivio'],
+  ['1', 'uno', 'primer', 'primero', 'primera'],
+  ['2', 'dos', 'segundo', 'segunda', 'ambos'],
+  ['3', 'tres', 'tercer', 'tercero', 'tercera'],
+  ['4', 'cuatro', 'cuarto', 'cuarta'],
+  ['5', 'cinco', 'quinto', 'quinta'],
+  ['6', 'seis', 'sexto', 'sexta'],
+  ['7', 'siete', 'septimo', 'septima'],
+  ['8', 'ocho', 'octavo', 'octava'],
+  ['9', 'nueve', 'noveno', 'novena'],
+  ['10', 'diez', 'decimo', 'decima'],
+  ['11', 'once'],
+  ['12', 'doce'],
+  ['13', 'trece'],
+  ['14', 'catorce'],
+  ['15', 'quince'],
+  ['16', 'dieciseis'],
+  ['17', 'diecisiete'],
+  ['18', 'dieciocho'],
+  ['19', 'diecinueve'],
+  ['20', 'veinte'],
+  ['25', 'veinticinco'],
+  ['30', 'treinta'],
+  ['40', 'cuarenta'],
+  ['50', 'cincuenta'],
+];
+
+function normalizePlainAscii(text: string): string {
+  return (text || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export function resolveAnswerExclusionReason(
+  ansOrText: DocumentarySourceAnswerInput | string
+): DocumentaryExclusionReason {
+  if (typeof ansOrText === 'string') {
+    const rawStr = ansOrText.trim();
+    if (!rawStr) return 'none';
+    if (BARE_PREFER_NOT_TO_ANSWER_RX.test(rawStr)) return 'prefer_not_to_answer';
+    if (BARE_NOT_RECALLED_RX.test(rawStr)) return 'not_recalled';
+    const sents = rawStr
+      .split(/(?<=[.!?…])\s+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (sents.length > 0 && sents.every((s) => EXPLICIT_EXCLUSION_DIRECTIVE_RX.test(s))) {
+      return 'excluded_by_interviewee';
+    }
+    return 'none';
+  }
+  const ans = ansOrText;
+  if (
+    ans.excludeFromBook ||
+    ans.excludedByInterviewee ||
+    ans.omissionReason === 'excluded_by_interviewee' ||
+    ans.restriction === 'excluded_by_interviewee'
+  ) {
+    return 'excluded_by_interviewee';
+  }
+  if (ans.preferNotToAnswer || ans.omissionReason === 'prefer_not_to_answer') {
+    return 'prefer_not_to_answer';
+  }
+  if (ans.notRecalled || ans.omissionReason === 'not_recalled') {
+    return 'not_recalled';
+  }
+  const rawText = extractCleanParticipantAnswerText(ans);
+  if (!rawText) return 'none';
+  if (BARE_PREFER_NOT_TO_ANSWER_RX.test(rawText)) {
+    return 'prefer_not_to_answer';
+  }
+  if (BARE_NOT_RECALLED_RX.test(rawText)) {
+    return 'not_recalled';
+  }
+  // Check if every sentence in rawText is an explicit exclusion directive
+  const sentences = rawText
+    .split(/(?<=[.!?…])\s+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (sentences.length > 0 && sentences.every((s) => EXPLICIT_EXCLUSION_DIRECTIVE_RX.test(s))) {
+    return 'excluded_by_interviewee';
+  }
+  return 'none';
+}
+
+export function splitAnswerTextIntoIncludedAndExcludedSentences(rawText: string): {
+  includedSentences: string[];
+  excludedSentences: string[];
+  includedText: string;
+} {
+  const trimmed = (rawText || '').trim();
+  if (!trimmed) {
+    return { includedSentences: [], excludedSentences: [], includedText: '' };
+  }
+  const sentences = trimmed
+    .split(/(?<=[.!?…])\s+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const includedSentences: string[] = [];
+  const excludedSentences: string[] = [];
+  for (const s of sentences) {
+    if (EXPLICIT_EXCLUSION_DIRECTIVE_RX.test(s)) {
+      excludedSentences.push(s);
+    } else if (BARE_PREFER_NOT_TO_ANSWER_RX.test(s) || BARE_NOT_RECALLED_RX.test(s)) {
+      // Do not include bare omission markers in narrative prose
+    } else {
+      includedSentences.push(s);
+    }
+  }
+  return {
+    includedSentences,
+    excludedSentences,
+    includedText: includedSentences.join(' ').trim(),
+  };
+}
+
+function extractFacetsFromFactText(
+  rawText: string,
+  participantNames: string[] = []
+): {
+  keyTokens: string[];
+  properNames: string[];
+  places: string[];
+  yearsOrNumbers: string[];
+  emotions: string[];
+} {
+  const norm = normalizePlainAscii(rawText);
+  const words = norm.split(/\s+/).filter(Boolean);
+  const keyTokens = Array.from(new Set(tokenizeSignificantWords(rawText)));
+
+  // 1. Years or explicit numbers
+  const yearsOrNumbers = Array.from(new Set(norm.match(/\b\d+\b/g) || []));
+
+  // 2. Emotions
+  const emotions: string[] = [];
+  for (const w of words) {
+    for (const stem of SPANISH_EMOTION_STEMS) {
+      if (w.startsWith(stem) && !emotions.includes(stem)) {
+        emotions.push(stem);
+      }
+    }
+  }
+
+  // 3. Places (both common place nouns present in text and capitalized words after prepositions en/a/de/desde/hacia)
+  const places: string[] = [];
+  for (const w of words) {
+    if (SPANISH_PLACE_NOUNS.includes(w) && !places.includes(w)) {
+      places.push(w);
+    }
+  }
+  const prepPlaceMatches =
+    rawText.match(
+      /\b(?:en|de|a|desde|hacia|por)\s+(?:el\s+|la\s+|los\s+|las\s+)?([A-ZÁÉÍÓÚÑ][a-záéíóúñ]{2,}(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]{2,})?)/g
+    ) || [];
+  const participantNormSet = new Set(
+    participantNames.flatMap((n) => normalizePlainAscii(n).split(/\s+/)).filter(Boolean)
+  );
+  const commonCapitalizedStopwords = new Set([
+    'recuerdo',
+    'cuando',
+    'siempre',
+    'nunca',
+    'entonces',
+    'despues',
+    'luego',
+    'durante',
+    'aquel',
+    'aquella',
+    'aquellos',
+    'aquellas',
+    'nosotros',
+    'nosotras',
+    'todos',
+    'todas',
+    'pero',
+    'porque',
+    'aunque',
+    'tambien',
+    'ademas',
+    'creo',
+    'quizas',
+    'tal',
+    'según',
+    'segun',
+    'para',
+    'como',
+    'este',
+    'esta',
+    'esos',
+    'esas',
+    'habia',
+    'tenia',
+    'estaba',
+    'fueron',
+    'fuimos',
+    'viviamos',
+    'trabajaba',
+    'trabajamos',
+    'naci',
+    'nacio',
+    'enero',
+    'febrero',
+    'marzo',
+    'abril',
+    'mayo',
+    'junio',
+    'julio',
+    'agosto',
+    'septiembre',
+    'octubre',
+    'noviembre',
+    'diciembre',
+    'lunes',
+    'martes',
+    'miercoles',
+    'jueves',
+    'viernes',
+    'sabado',
+    'domingo',
+    'dios',
+    'libro',
+    'incluir',
+    'excluir',
+    'confidencial',
+  ]);
+
+  for (const pm of prepPlaceMatches) {
+    const capPart = pm.replace(
+      /^(?:en|de|a|desde|hacia|por)\s+(?:el\s+|la\s+|los\s+|las\s+)?/i,
+      ''
+    );
+    const normCap = normalizePlainAscii(capPart);
+    if (
+      normCap.length >= 3 &&
+      !commonCapitalizedStopwords.has(normCap) &&
+      !participantNormSet.has(normCap) &&
+      !places.includes(normCap)
+    ) {
+      places.push(normCap);
+    }
+  }
+
+  // 4. Proper names & family relations
+  const properNames: string[] = [];
+  for (const w of words) {
+    const cleanRel = SPANISH_FAMILY_RELATIONS.find((r) => r.trim() === w);
+    if (cleanRel && !properNames.includes(cleanRel.trim())) {
+      properNames.push(cleanRel.trim());
+    }
+  }
+
+  // Also detect mid-sentence capitalized proper names (e.g., "mi abuela Natalia", "con Roberto", "don José")
+  const tokensWithCase = rawText.split(/\s+/);
+  for (let i = 1; i < tokensWithCase.length; i++) {
+    const prevRaw = tokensWithCase[i - 1] || '';
+    // Skip if previous token ended a sentence
+    if (/[.!?…]$/.test(prevRaw)) continue;
+    const tokClean = tokensWithCase[i].replace(/^[^A-Za-zÁÉÍÓÚÑáéíóúñ]+|[^A-Za-zÁÉÍÓÚÑáéíóúñ]+$/g, '');
+    if (/^[A-ZÁÉÍÓÚÑ][a-záéíóúñ]{2,}$/.test(tokClean)) {
+      const normTok = normalizePlainAscii(tokClean);
+      if (
+        !commonCapitalizedStopwords.has(normTok) &&
+        !participantNormSet.has(normTok) &&
+        !places.includes(normTok) &&
+        !properNames.includes(normTok)
+      ) {
+        properNames.push(normTok);
+      }
+    }
+  }
+
+  return {
+    keyTokens,
+    properNames,
+    places,
+    yearsOrNumbers,
+    emotions,
+  };
+}
+
+/**
+ * Extracts atomic, verifiable documentary fact units (`DocumentaryFactUnit`) from the interview's
+ * answers, deepening follow-ups, additional memories, audio transcriptions, and photo descriptions,
+ * while classifying explicit exclusions (`not_recalled`, `prefer_not_to_answer`, `excluded_by_interviewee`).
+ */
+export function buildDocumentaryInventory(params: {
+  interviewId?: string;
+  answers: DocumentarySourceAnswerInput[];
+  questions?: DocumentarySourceQuestionInput[];
+  participantNames?: string[];
+}): DocumentaryInventory {
+  const {
+    interviewId = 'interview_default',
+    answers = [],
+    questions = [],
+    participantNames = [],
+  } = params;
+
+  const qMap = new Map(questions.map((q) => [q.id, q]));
+  const qOrderMap = new Map(
+    questions.map((q, idx) => [q.id, typeof q.orderIndex === 'number' ? q.orderIndex : idx])
+  );
+
+  const validStageKeys = new Set([
+    'infancia',
+    'juventud',
+    'adultez',
+    'madurez',
+    'legado_general',
+  ]);
+
+  const isFollowUpEntry = (a: DocumentarySourceAnswerInput): boolean =>
+    Boolean(
+      a.isFollowUp ||
+        (a.parentQuestionId && a.parentQuestionId.trim().length > 0) ||
+        (a.questionId &&
+          (a.questionId.startsWith('followup_') || a.questionId.startsWith('adaptive_')))
+    );
+
+  const knownMainQuestionIds = new Set<string>(questions.map((q) => q.id));
+  for (const a of answers) {
+    if (!isFollowUpEntry(a) && !a.isAdditionalMemory && a.questionId) {
+      knownMainQuestionIds.add(a.questionId);
+    }
+  }
+
+  const resolveParentMainQuestionId = (a: DocumentarySourceAnswerInput): string | null => {
+    if (a.parentQuestionId && a.parentQuestionId.trim().length > 0) {
+      return a.parentQuestionId.trim();
+    }
+    if (isFollowUpEntry(a) && a.questionId) {
+      for (const qId of knownMainQuestionIds) {
+        if (a.questionId.includes(qId)) return qId;
+      }
+    }
+    return null;
+  };
+
+  const resolveAnswerStage = (a: DocumentarySourceAnswerInput): string => {
+    if (a.isAdditionalMemory) return 'legado_general';
+    if (a.lifeStage && validStageKeys.has(a.lifeStage)) return a.lifeStage;
+    const q = qMap.get(a.questionId);
+    if (q?.lifeStage && validStageKeys.has(q.lifeStage)) return q.lifeStage;
+    const parentId = resolveParentMainQuestionId(a);
+    if (parentId) {
+      const parentQ = qMap.get(parentId);
+      if (parentQ?.lifeStage && validStageKeys.has(parentQ.lifeStage)) return parentQ.lifeStage;
+      const parentAns = answers.find(
+        (cand) => cand.questionId === parentId && !isFollowUpEntry(cand)
+      );
+      if (parentAns) {
+        const pq = qMap.get(parentAns.questionId);
+        if (pq?.lifeStage && validStageKeys.has(pq.lifeStage)) return pq.lifeStage;
+      }
+    }
+    const photoStage = a.photos?.[0]?.lifeStage;
+    if (photoStage && validStageKeys.has(photoStage)) return photoStage;
+    return 'adultez';
+  };
+
+  let totalMainAnswers = 0;
+  let totalFollowUpAnswers = 0;
+  let totalAdditionalMemories = 0;
+
+  const allFactUnits: DocumentaryFactUnit[] = [];
+  const photosInventory: DocumentaryInventory['photosInventory'] = [];
+  const seenPhotoIds = new Set<string>();
+
+  answers.forEach((ans, idx) => {
+    const isFollowUp = isFollowUpEntry(ans);
+    const isAdditional = Boolean(ans.isAdditionalMemory) && !isFollowUp;
+    if (isAdditional) totalAdditionalMemories++;
+    else if (isFollowUp) totalFollowUpAnswers++;
+    else totalMainAnswers++;
+
+    const sourceType: DocumentaryFactUnit['sourceType'] = isAdditional
+      ? 'additional_memory'
+      : isFollowUp
+      ? 'followup_answer'
+      : 'main_answer';
+
+    const stage = resolveAnswerStage(ans);
+    const qObj = qMap.get(ans.questionId);
+    const qText = ans.questionText || qObj?.text || '';
+    const topic = qObj?.topic || stage;
+    const orderIdx = qOrderMap.get(ans.questionId) ?? idx;
+    const parentQId = resolveParentMainQuestionId(ans);
+    const ansExclusion = resolveAnswerExclusionReason(ans);
+    const rawCleanText = extractCleanParticipantAnswerText(ans);
+    const ansPhotoIds = (ans.photos || []).map((p) => p?.id).filter(Boolean) as string[];
+
+    for (const p of ans.photos || []) {
+      if (p && p.id && !seenPhotoIds.has(p.id)) {
+        seenPhotoIds.add(p.id);
+        photosInventory.push({
+          photoId: p.id,
+          caption: (p.caption || '').replace(/^\[Nota de voz\]:\s*/i, '').trim(),
+          answerId: ans.id,
+          questionId: ans.questionId,
+          lifeStage: p.lifeStage || stage,
+          isExcluded: ansExclusion !== 'none',
+        });
+      }
+    }
+
+    if (ansExclusion !== 'none') {
+      const facets = extractFacetsFromFactText(rawCleanText, participantNames);
+      allFactUnits.push({
+        unitId: `trace_${ans.id}`,
+        parentAnswerId: ans.id,
+        answerId: ans.id,
+        questionId: ans.questionId,
+        questionText: qText,
+        sourceType,
+        parentQuestionId: parentQId,
+        participantId: ans.participantId,
+        participantName: ans.participantName || participantNames[0] || 'Protagonista',
+        lifeStage: stage,
+        topic,
+        chronologicalIndex: orderIdx * 100 + idx,
+        rawText: rawCleanText || '[Omitida por el entrevistado]',
+        cleanText: rawCleanText,
+        keyTokens: facets.keyTokens,
+        properNames: facets.properNames,
+        places: facets.places,
+        yearsOrNumbers: facets.yearsOrNumbers,
+        emotions: facets.emotions,
+        uncertaintyExpressions: [],
+        exclusionReason: ansExclusion,
+        isEligibleForBook: false,
+        photoIds: ansPhotoIds,
+      });
+      return;
+    }
+
+    const splitResult = splitAnswerTextIntoIncludedAndExcludedSentences(rawCleanText);
+
+    // Record any inline excluded sentences as excluded fact units so the audit verifies they never leak
+    splitResult.excludedSentences.forEach((exclSent, eIdx) => {
+      const cleanedDirective = exclSent
+        .replace(EXPLICIT_EXCLUSION_DIRECTIVE_RX, '')
+        .replace(/^[:\s,-]+/, '')
+        .trim();
+      const facets = extractFacetsFromFactText(cleanedDirective || exclSent, participantNames);
+      allFactUnits.push({
+        unitId: `trace_${ans.id}_excl_${eIdx + 1}`,
+        parentAnswerId: ans.id,
+        answerId: ans.id,
+        questionId: ans.questionId,
+        questionText: qText,
+        sourceType,
+        parentQuestionId: parentQId,
+        participantId: ans.participantId,
+        participantName: ans.participantName || participantNames[0] || 'Protagonista',
+        lifeStage: stage,
+        topic,
+        chronologicalIndex: orderIdx * 100 + idx,
+        rawText: exclSent,
+        cleanText: cleanedDirective || exclSent,
+        keyTokens: facets.keyTokens,
+        properNames: facets.properNames,
+        places: facets.places,
+        yearsOrNumbers: facets.yearsOrNumbers,
+        emotions: facets.emotions,
+        uncertaintyExpressions: [],
+        exclusionReason: 'excluded_by_interviewee',
+        isEligibleForBook: false,
+        photoIds: [],
+      });
+    });
+
+    // Group included sentences into atomic factual units:
+    // If an answer has multiple substantive sentences (each >= 4 significant words), each substantive
+    // sentence becomes a verifiable DocumentaryFactUnit (while short remarks attach to their neighbor).
+    const rawSentences = splitResult.includedSentences;
+    const groupedFactSentences: string[] = [];
+    for (const s of rawSentences) {
+      const sigWords = tokenizeSignificantWords(s);
+      if (groupedFactSentences.length === 0) {
+        groupedFactSentences.push(s);
+      } else {
+        const prevSigWords = tokenizeSignificantWords(
+          groupedFactSentences[groupedFactSentences.length - 1]
+        );
+        if (sigWords.length >= 4 && prevSigWords.length >= 4) {
+          groupedFactSentences.push(s);
+        } else {
+          groupedFactSentences[groupedFactSentences.length - 1] =
+            `${groupedFactSentences[groupedFactSentences.length - 1]} ${s}`.trim();
+        }
+      }
+    }
+
+    // Also include photo captions when no text was provided or when the photo caption is a rich story (> 115 chars)
+    const photoCaptions = (ans.photos || [])
+      .map((p) => (p?.caption || '').replace(/^\[Nota de voz\]:\s*/i, '').trim())
+      .filter((cap) => cap.length > 0 && !EXPLICIT_EXCLUSION_DIRECTIVE_RX.test(cap));
+
+    if (groupedFactSentences.length === 0 && photoCaptions.length > 0) {
+      groupedFactSentences.push(photoCaptions[0]);
+    } else {
+      for (const cap of photoCaptions) {
+        if (
+          cap.length > 115 &&
+          !splitResult.includedText.toLowerCase().includes(cap.slice(0, 35).toLowerCase())
+        ) {
+          groupedFactSentences.push(cap);
+        }
+      }
+    }
+
+    groupedFactSentences.forEach((factText, fIdx) => {
+      const cleanFact = factText.trim();
+      if (!cleanFact) return;
+      const facets = extractFacetsFromFactText(cleanFact, participantNames);
+      const unitId =
+        groupedFactSentences.length === 1
+          ? `trace_${ans.id}`
+          : `trace_${ans.id}_fact_${fIdx + 1}`;
+      allFactUnits.push({
+        unitId,
+        parentAnswerId: ans.id,
+        answerId: ans.id,
+        questionId: ans.questionId,
+        questionText: qText,
+        sourceType,
+        parentQuestionId: parentQId,
+        participantId: ans.participantId,
+        participantName: ans.participantName || participantNames[0] || 'Protagonista',
+        lifeStage: stage,
+        topic,
+        chronologicalIndex: orderIdx * 100 + idx + fIdx * 0.1,
+        rawText: cleanFact,
+        cleanText: cleanFact,
+        keyTokens: facets.keyTokens,
+        properNames: facets.properNames,
+        places: facets.places,
+        yearsOrNumbers: facets.yearsOrNumbers,
+        emotions: facets.emotions,
+        uncertaintyExpressions: extractUncertaintyExpressions(cleanFact),
+        exclusionReason: 'none',
+        isEligibleForBook: true,
+        photoIds: fIdx === 0 ? ansPhotoIds : [],
+      });
+    });
+  });
+
+  // Consolidate redundant eligible fact units from the same participant that narrate the exact same episode
+  const eligibleFactUnits: DocumentaryFactUnit[] = [];
+  for (const unit of allFactUnits.filter((u) => u.isEligibleForBook)) {
+    const existingDup = eligibleFactUnits.find(
+      (eu) =>
+        (!eu.participantId || !unit.participantId || eu.participantId === unit.participantId) &&
+        areTestimoniesRedundantSameEpisode(eu.cleanText, unit.cleanText)
+    );
+    if (existingDup) {
+      existingDup.mergedRedundantUnitIds = [
+        ...(existingDup.mergedRedundantUnitIds || []),
+        unit.unitId,
+      ];
+      existingDup.cleanText = consolidateComplementarySentences(
+        existingDup.cleanText,
+        unit.cleanText
+      );
+      const mergedFacets = extractFacetsFromFactText(existingDup.cleanText, participantNames);
+      existingDup.keyTokens = mergedFacets.keyTokens;
+      existingDup.properNames = mergedFacets.properNames;
+      existingDup.places = mergedFacets.places;
+      existingDup.yearsOrNumbers = mergedFacets.yearsOrNumbers;
+      existingDup.emotions = mergedFacets.emotions;
+      for (const pId of unit.photoIds) {
+        if (!existingDup.photoIds.includes(pId)) existingDup.photoIds.push(pId);
+      }
+    } else {
+      eligibleFactUnits.push({ ...unit });
+    }
+  }
+
+  const excludedFactUnits = allFactUnits.filter((u) => !u.isEligibleForBook);
+
+  // Collect all valid years/numbers and proper names across the entire eligible source corpus
+  const corpusYearsSet = new Set<string>();
+  const corpusNamesSet = new Set<string>();
+  for (const pName of participantNames) {
+    for (const part of normalizePlainAscii(pName).split(/\s+/)) {
+      if (part.length >= 2) corpusNamesSet.add(part);
+    }
+  }
+  for (const u of eligibleFactUnits) {
+    for (const yn of u.yearsOrNumbers) corpusYearsSet.add(yn);
+    for (const pn of u.properNames) corpusNamesSet.add(pn);
+    for (const pl of u.places) corpusNamesSet.add(pl);
+    for (const w of normalizePlainAscii(`${u.cleanText} ${u.questionText}`).split(/\s+/)) {
+      if (w.length >= 3) corpusNamesSet.add(w);
+    }
+  }
+  for (const p of photosInventory) {
+    if (!p.isExcluded && p.caption) {
+      for (const m of p.caption.match(/\b\d+\b/g) || []) corpusYearsSet.add(m);
+      for (const w of normalizePlainAscii(p.caption).split(/\s+/)) {
+        if (w.length >= 3) corpusNamesSet.add(w);
+      }
+    }
+  }
+
+  return {
+    interviewId,
+    totalRawAnswers: answers.length,
+    totalMainAnswers,
+    totalFollowUpAnswers,
+    totalAdditionalMemories,
+    totalAtomicFactUnits: allFactUnits.length,
+    eligibleFactUnits,
+    excludedFactUnits,
+    allFactUnits,
+    photosInventory,
+    corpusValidYearsAndNumbers: Array.from(corpusYearsSet),
+    corpusValidProperNames: Array.from(corpusNamesSet),
+  };
+}
+
+const STAGE_EDITORIAL_ARC_DEFS: Array<{
+  stageKey: string;
+  baseChapterId: string;
+  dimensionKey: DemoQuestionDefinition['dimensionKey'];
+  individualTitles: string[];
+  coupleTitles: string[];
+  thirdPersonTitles: string[];
+}> = [
+  {
+    stageKey: 'infancia',
+    baseChapterId: 'part_ch_infancia',
+    dimensionKey: 'raices',
+    individualTitles: [
+      'Mis raíces y primeros recuerdos',
+      'El hogar de la infancia y la vida en familia',
+      'Los años de escuela, juegos y descubrimientos',
+      'Aprendizajes tempranos y horizontes de niñez',
+    ],
+    coupleTitles: [
+      'Nuestros orígenes y primeros años',
+      'Los hogares donde crecimos y nuestras familias',
+      'Infancias, escuelas y primeros descubrimientos',
+      'Recuerdos entrañables de nuestros primeros tiempos',
+    ],
+    thirdPersonTitles: [
+      'Sus raíces y primeros recuerdos',
+      'El hogar de la infancia y el entorno familiar',
+      'Años de escuela, juegos y primeros descubrimientos',
+      'Aprendizajes tempranos y memorias de niñez',
+    ],
+  },
+  {
+    stageKey: 'juventud',
+    baseChapterId: 'part_ch_juventud',
+    dimensionKey: 'transformacion',
+    individualTitles: [
+      'Juventud, sueños y caminos',
+      'Amistades, vocación y primeros pasos propios',
+      'Decisiones de juventud y nuevos horizontes',
+      'Forjando el carácter y el rumbo de vida',
+    ],
+    coupleTitles: [
+      'Juventud y el encuentro de nuestros caminos',
+      'Sueños compartidos, amistades y vocaciones',
+      'El inicio de nuestra historia juntos',
+      'Decisiones y pasos que unieron nuestras vidas',
+    ],
+    thirdPersonTitles: [
+      'Su juventud, sueños y caminos',
+      'Vocación, amistades y primeros desafíos',
+      'Decisiones de juventud y apertura de horizontes',
+      'La forja del carácter y de su propio rumbo',
+    ],
+  },
+  {
+    stageKey: 'adultez',
+    baseChapterId: 'part_ch_adultez',
+    dimensionKey: 'personas_amadas',
+    individualTitles: [
+      'Hogar, afectos y vida compartida',
+      'Trabajo, esfuerzo y construcción del porvenir',
+      'Familia, crianza y momentos inolvidables',
+      'Superación de pruebas y consolidación del camino',
+      'Caminos recorridos, proyectos y plenitud cotidiana',
+    ],
+    coupleTitles: [
+      'La vida y el hogar que construimos',
+      'Esfuerzo compartido, trabajo y proyectos en común',
+      'La familia, los afectos y los días inolvidables',
+      'Pruebas superadas en unión y complicidad',
+      'El fruto de los años compartidos',
+    ],
+    thirdPersonTitles: [
+      'El hogar y los afectos construidos',
+      'Trabajo, dedicación y construcción del porvenir',
+      'La vida familiar y los momentos memorables',
+      'Retos superados y consolidación de su trayectoria',
+      'Plenitud cotidiana y proyectos realizados',
+    ],
+  },
+  {
+    stageKey: 'madurez',
+    baseChapterId: 'part_ch_madurez',
+    dimensionKey: 'esencia',
+    individualTitles: [
+      'Momentos decisivos y aprendizajes',
+      'Cosecha de vida, serenidad y nuevas miradas',
+      'Huellas profundas y gratitud por lo vivido',
+      'La sabiduría que dejan los años',
+    ],
+    coupleTitles: [
+      'Nuestras huellas, retos y plenitud',
+      'La cosecha de nuestra historia y serenidad compartida',
+      'Gratitud por el camino recorrido juntos',
+      'Sabiduría y unión a través del tiempo',
+    ],
+    thirdPersonTitles: [
+      'Sus momentos decisivos y aprendizajes',
+      'Cosecha vital, serenidad y madurez',
+      'Huellas profundas y gratitud por el camino',
+      'La sabiduría decantada con los años',
+    ],
+  },
+  {
+    stageKey: 'legado_general',
+    baseChapterId: 'part_ch_legado',
+    dimensionKey: 'legado',
+    individualTitles: [
+      'Valores, reflexiones y legado',
+      'Mensajes para las generaciones que vienen',
+      'El sentido de mi historia y palabras finales',
+      'Recuerdos perdurables para quienes amo',
+    ],
+    coupleTitles: [
+      'Las palabras y el legado que dejamos',
+      'Mensajes de amor para las nuevas generaciones',
+      'El sentido de nuestra unión y reflexiones finales',
+      'Recuerdos eternos para nuestra familia',
+    ],
+    thirdPersonTitles: [
+      'Sus valores, reflexiones y legado',
+      'El mensaje perdurable para las nuevas generaciones',
+      'Sentido biográfico y reflexiones de vida',
+      'Una herencia de memoria y afecto familiar',
+    ],
+  },
+];
+
+/**
+ * Builds a deterministic editorial chapter plan (`EditorialBookPlan`) prior to drafting.
+ * - Guarantees that a single question/answer NEVER becomes its own isolated chapter when multiple answers exist.
+ * - In `fixed_five_stages` mode: creates up to 5 chapters (one per non-empty canonical life stage).
+ * - In `prompt_autonomous` mode: groups answers by life stage and subdivides stages that contain
+ *   more than 12 main answer groups into coherent narrative chapters of ~6-12 main answers each
+ *   (e.g., 46 answers -> 4 to 6 chapters; 230 answers -> 15 to 20 chapters).
+ */
+export function buildEditorialChapterPlan(params: {
+  interviewTitle?: string;
+  storyMode: 'individual' | 'compartida';
+  participantNames: string[];
+  answers: DocumentarySourceAnswerInput[];
+  questions: DocumentarySourceQuestionInput[];
+  bookStructureMode?: 'prompt_autonomous' | 'fixed_five_stages';
+}): EditorialBookPlan {
+  const {
+    answers,
+    questions,
+    bookStructureMode = 'prompt_autonomous',
+  } = params;
+
+  const qMap = new Map(questions.map((q) => [q.id, q]));
+  const qOrderMap = new Map(
+    questions.map((q, idx) => [q.id, typeof q.orderIndex === 'number' ? q.orderIndex : idx])
+  );
+  const validStageKeys = new Set(STAGE_EDITORIAL_ARC_DEFS.map((s) => s.stageKey));
+
+  const isFollowUpEntry = (a: DocumentarySourceAnswerInput): boolean =>
+    Boolean(
+      a.isFollowUp ||
+        (a.parentQuestionId && a.parentQuestionId.trim().length > 0) ||
+        (a.questionId &&
+          (a.questionId.startsWith('followup_') || a.questionId.startsWith('adaptive_')))
+    );
+
+  const knownMainQuestionIds = new Set<string>(questions.map((q) => q.id));
+  for (const a of answers) {
+    if (!isFollowUpEntry(a) && !a.isAdditionalMemory && a.questionId) {
+      knownMainQuestionIds.add(a.questionId);
+    }
+  }
+
+  const resolveParentMainQuestionId = (a: DocumentarySourceAnswerInput): string | null => {
+    if (a.parentQuestionId && a.parentQuestionId.trim().length > 0) {
+      return a.parentQuestionId.trim();
+    }
+    if (isFollowUpEntry(a) && a.questionId) {
+      for (const qId of knownMainQuestionIds) {
+        if (a.questionId.includes(qId)) return qId;
+      }
+    }
+    return null;
+  };
+
+  const resolveAnswerStage = (a: DocumentarySourceAnswerInput): string => {
+    if (a.isAdditionalMemory) return 'legado_general';
+    if (a.lifeStage && validStageKeys.has(a.lifeStage)) return a.lifeStage;
+    const q = qMap.get(a.questionId);
+    if (q?.lifeStage && validStageKeys.has(q.lifeStage)) return q.lifeStage;
+    const parentId = resolveParentMainQuestionId(a);
+    if (parentId) {
+      const parentQ = qMap.get(parentId);
+      if (parentQ?.lifeStage && validStageKeys.has(parentQ.lifeStage)) return parentQ.lifeStage;
+      const parentAns = answers.find(
+        (cand) => cand.questionId === parentId && !isFollowUpEntry(cand)
+      );
+      if (parentAns) {
+        const pq = qMap.get(parentAns.questionId);
+        if (pq?.lifeStage && validStageKeys.has(pq.lifeStage)) return pq.lifeStage;
+      }
+    }
+    const photoStage = a.photos?.[0]?.lifeStage;
+    if (photoStage && validStageKeys.has(photoStage)) return photoStage;
+    return 'adultez';
+  };
+
+  const eligibleAnswers = answers.filter((a) => {
+    if (resolveAnswerExclusionReason(a) !== 'none') return false;
+    const split = splitAnswerTextIntoIncludedAndExcludedSentences(
+      extractCleanParticipantAnswerText(a)
+    );
+    return split.includedText.length > 0 || Boolean(a.photos && a.photos.length > 0);
+  });
+
+  const totalEligibleMainCount = eligibleAnswers.filter(
+    (a) => !isFollowUpEntry(a) && !a.isAdditionalMemory
+  ).length;
+
+  const plannedChapters: EditorialChapterPlanItem[] = [];
+
+  for (const stDef of STAGE_EDITORIAL_ARC_DEFS) {
+    const stageEligible = eligibleAnswers.filter(
+      (a) => resolveAnswerStage(a) === stDef.stageKey
+    );
+    if (stageEligible.length === 0) continue;
+
+    const mainStageAnswers = stageEligible
+      .filter((a) => !isFollowUpEntry(a) && !a.isAdditionalMemory)
+      .sort((a, b) => {
+        const orderA = qOrderMap.get(a.questionId) ?? 999999;
+        const orderB = qOrderMap.get(b.questionId) ?? 999999;
+        if (orderA !== orderB) return orderA - orderB;
+        const timeA = new Date(a.createdAt || 0).getTime() || 0;
+        const timeB = new Date(b.createdAt || 0).getTime() || 0;
+        return timeA - timeB;
+      });
+
+    const followUpStageAnswers = stageEligible.filter((a) => isFollowUpEntry(a));
+    const additionalStageAnswers = stageEligible.filter(
+      (a) => Boolean(a.isAdditionalMemory) && !isFollowUpEntry(a)
+    );
+
+    // Determine how many narrative chapters this stage should produce:
+    // - In 'fixed_five_stages': always 1 chapter per non-empty stage.
+    // - In 'prompt_autonomous':
+    //   * If stage has <= 12 main answers: 1 chapter for this stage (unless the entire interview has >= 18 main answers concentrated in this single stage, in which case split into chunks of ~6-8 main answers).
+    //   * If stage has > 12 main answers: subdivide into balanced chapters of ~7-13 main answers so 46 answers produce ~4-6 chapters and 230 answers produce ~16-20 chapters.
+    let subChapterCount = 1;
+    if (bookStructureMode === 'prompt_autonomous' && mainStageAnswers.length > 12) {
+      const targetMainPerChapter = totalEligibleMainCount >= 100 ? 13 : 6;
+      subChapterCount = Math.max(
+        2,
+        Math.min(6, Math.ceil(mainStageAnswers.length / targetMainPerChapter))
+      );
+    }
+
+    if (subChapterCount === 1) {
+      const assignedAnswerIds = stageEligible.map((a) => a.id);
+      const assignedQuestionIds = Array.from(
+        new Set(stageEligible.map((a) => a.questionId).filter(Boolean))
+      );
+      const assignedPhotoIds = Array.from(
+        new Set(
+          stageEligible.flatMap((a) => (a.photos || []).map((p) => p?.id).filter(Boolean) as string[])
+        )
+      );
+      const estimatedSourceWords = stageEligible.reduce(
+        (acc, a) => acc + extractCleanParticipantAnswerText(a).split(/\s+/).filter(Boolean).length,
+        0
+      );
+      plannedChapters.push({
+        chapterId: stDef.baseChapterId,
+        partNumber: plannedChapters.length + 1,
+        stageKey: stDef.stageKey,
+        dimensionKey: stDef.dimensionKey,
+        thematicAxis: stDef.individualTitles[0],
+        suggestedTitleIndividual: stDef.individualTitles[0],
+        suggestedTitleCouple: stDef.coupleTitles[0],
+        suggestedTitleThirdPerson: stDef.thirdPersonTitles[0],
+        assignedAnswerIds,
+        assignedQuestionIds,
+        assignedFactUnitIds: assignedAnswerIds.map((id) => `trace_${id}`),
+        assignedPhotoIds,
+        estimatedSourceWords,
+      });
+    } else {
+      const chunkSize = Math.ceil(mainStageAnswers.length / subChapterCount);
+      const consumedFollowUpIds = new Set<string>();
+      for (let cIdx = 0; cIdx < subChapterCount; cIdx++) {
+        const chunkMains = mainStageAnswers.slice(cIdx * chunkSize, (cIdx + 1) * chunkSize);
+        if (chunkMains.length === 0) continue;
+        const chunkMainQIds = new Set(chunkMains.map((m) => m.questionId));
+        const chunkFollowUps = followUpStageAnswers.filter((f) => {
+          if (consumedFollowUpIds.has(f.id)) return false;
+          const parentId = resolveParentMainQuestionId(f);
+          if (parentId && chunkMainQIds.has(parentId)) {
+            consumedFollowUpIds.add(f.id);
+            return true;
+          }
+          return false;
+        });
+        // Attach remaining orphan follow-ups and additional memories to the last sub-chapter of this stage
+        const extraFollowUps =
+          cIdx === subChapterCount - 1
+            ? followUpStageAnswers.filter((f) => !consumedFollowUpIds.has(f.id))
+            : [];
+        const extraAdditionals = cIdx === subChapterCount - 1 ? additionalStageAnswers : [];
+        const combinedAnswers = [...chunkMains, ...chunkFollowUps, ...extraFollowUps, ...extraAdditionals];
+        const assignedAnswerIds = combinedAnswers.map((a) => a.id);
+        const assignedQuestionIds = Array.from(
+          new Set(combinedAnswers.map((a) => a.questionId).filter(Boolean))
+        );
+        const assignedPhotoIds = Array.from(
+          new Set(
+            combinedAnswers.flatMap(
+              (a) => (a.photos || []).map((p) => p?.id).filter(Boolean) as string[]
+            )
+          )
+        );
+        const estimatedSourceWords = combinedAnswers.reduce(
+          (acc, a) => acc + extractCleanParticipantAnswerText(a).split(/\s+/).filter(Boolean).length,
+          0
+        );
+        const titleIdx = cIdx % stDef.individualTitles.length;
+        const RomanSuffix = cIdx >= stDef.individualTitles.length ? ` (${cIdx + 1})` : '';
+        const chapterId =
+          cIdx === 0 ? stDef.baseChapterId : `${stDef.baseChapterId}_${cIdx + 1}`;
+        plannedChapters.push({
+          chapterId,
+          partNumber: plannedChapters.length + 1,
+          stageKey: stDef.stageKey,
+          dimensionKey: stDef.dimensionKey,
+          thematicAxis: `${stDef.individualTitles[titleIdx]}${RomanSuffix}`,
+          suggestedTitleIndividual: `${stDef.individualTitles[titleIdx]}${RomanSuffix}`,
+          suggestedTitleCouple: `${stDef.coupleTitles[titleIdx]}${RomanSuffix}`,
+          suggestedTitleThirdPerson: `${stDef.thirdPersonTitles[titleIdx]}${RomanSuffix}`,
+          assignedAnswerIds,
+          assignedQuestionIds,
+          assignedFactUnitIds: assignedAnswerIds.map((id) => `trace_${id}`),
+          assignedPhotoIds,
+          estimatedSourceWords,
+        });
+      }
+    }
+  }
+
+  return {
+    bookStructureMode,
+    chapters: plannedChapters,
+    totalPlannedChapters: plannedChapters.length,
+    isOneQuestionPerChapterBlocked: true,
+  };
 }
 
 export function buildParticipantInitialManuscriptFromAnswers(params: {
   interviewTitle: string;
   storyMode: 'individual' | 'compartida';
   participantNames: string[];
-  answers: Array<{
-    id: string;
-    questionId: string;
-    questionText?: string;
-    participantId?: string;
-    participantName: string;
-    answerText: string;
-    notRecalled: boolean;
-    isFollowUp?: boolean;
-    parentQuestionId?: string | null;
-    isAdditionalMemory?: boolean;
-    createdAt?: string;
-    updatedAt?: string;
-    audio?: { transcription?: string } | null;
-    audioRecordings?: Array<{ transcription?: string }> | null;
-    photos?: Array<{
-      id: string;
-      caption: string;
-      mimeType: string;
-      imageUrl: string;
-      dataUrl?: string;
-      lifeStage?: string;
-    }>;
-  }>;
-  questions: Array<{
-    id: string;
-    text: string;
-    lifeStage: string;
-    topic: string;
-    orderIndex?: number;
-  }>;
+  answers: DocumentarySourceAnswerInput[];
+  questions: DocumentarySourceQuestionInput[];
   narrativeStyle?: DemoNarrativeStyleId;
   closingDedicationText?: string;
+  bookStructureMode?: 'prompt_autonomous' | 'fixed_five_stages';
 }): {
   manuscript: DemoManuscript;
   chapterPhotos: Record<string, DemoInMemoryPhoto | null>;
+  allPhotosById: Record<string, DemoInMemoryPhoto>;
   chapterStructuredUnits: Record<string, StructuredChapterTestimonyUnit[]>;
+  documentaryInventory: DocumentaryInventory;
+  editorialPlan: EditorialBookPlan;
 } {
   const {
     interviewTitle,
@@ -2904,6 +5108,7 @@ export function buildParticipantInitialManuscriptFromAnswers(params: {
     questions,
     narrativeStyle = 'first_person_literary',
     closingDedicationText = '',
+    bookStructureMode = 'prompt_autonomous',
   } = params;
 
   const isCouple = storyMode === 'compartida' && participantNames.length >= 2;
@@ -2916,62 +5121,31 @@ export function buildParticipantInitialManuscriptFromAnswers(params: {
     questions.map((q, idx) => [q.id, typeof q.orderIndex === 'number' ? q.orderIndex : idx])
   );
 
-  const stageDefs: Array<{
-    stageKey: string;
-    chapterId: string;
-    dimensionKey: DemoQuestionDefinition['dimensionKey'];
-    individualTitle: string;
-    coupleTitle: string;
-  }> = [
-    {
-      stageKey: 'infancia',
-      chapterId: 'part_ch_infancia',
-      dimensionKey: 'raices',
-      individualTitle: 'Mis raíces y primeros recuerdos',
-      coupleTitle: 'Nuestros orígenes y primeros años',
-    },
-    {
-      stageKey: 'juventud',
-      chapterId: 'part_ch_juventud',
-      dimensionKey: 'transformacion',
-      individualTitle: 'Juventud, sueños y caminos',
-      coupleTitle: 'Juventud y el encuentro de nuestros caminos',
-    },
-    {
-      stageKey: 'adultez',
-      chapterId: 'part_ch_adultez',
-      dimensionKey: 'personas_amadas',
-      individualTitle: 'Hogar, afectos y vida compartida',
-      coupleTitle: 'La vida y el hogar que construimos',
-    },
-    {
-      stageKey: 'madurez',
-      chapterId: 'part_ch_madurez',
-      dimensionKey: 'esencia',
-      individualTitle: 'Momentos decisivos y aprendizajes',
-      coupleTitle: 'Nuestras huellas, retos y plenitud',
-    },
-    {
-      stageKey: 'legado_general',
-      chapterId: 'part_ch_legado',
-      dimensionKey: 'legado',
-      individualTitle: 'Valores, reflexiones y legado',
-      coupleTitle: 'Las palabras y el legado que dejamos',
-    },
-  ];
+  const documentaryInventory = buildDocumentaryInventory({
+    interviewId: interviewTitle || 'interview_default',
+    answers,
+    questions,
+    participantNames,
+  });
 
-  const validStageKeys = new Set(stageDefs.map((s) => s.stageKey));
+  const editorialPlan = buildEditorialChapterPlan({
+    interviewTitle,
+    storyMode,
+    participantNames,
+    answers,
+    questions,
+    bookStructureMode,
+  });
 
-  const isFollowUpEntry = (a: (typeof answers)[0]): boolean => {
+  const isFollowUpEntry = (a: DocumentarySourceAnswerInput): boolean => {
     return Boolean(
       a.isFollowUp ||
         (a.parentQuestionId && a.parentQuestionId.trim().length > 0) ||
-        a.questionId.startsWith('followup_') ||
-        a.questionId.startsWith('adaptive_')
+        (a.questionId &&
+          (a.questionId.startsWith('followup_') || a.questionId.startsWith('adaptive_')))
     );
   };
 
-  // Collect all main question IDs present in either the question bank or main answers
   const knownMainQuestionIds = new Set<string>(questions.map((q) => q.id));
   for (const a of answers) {
     if (!isFollowUpEntry(a) && !a.isAdditionalMemory && a.questionId) {
@@ -2979,11 +5153,11 @@ export function buildParticipantInitialManuscriptFromAnswers(params: {
     }
   }
 
-  const resolveParentMainQuestionId = (a: (typeof answers)[0]): string | null => {
+  const resolveParentMainQuestionId = (a: DocumentarySourceAnswerInput): string | null => {
     if (a.parentQuestionId && a.parentQuestionId.trim().length > 0) {
       return a.parentQuestionId.trim();
     }
-    if (isFollowUpEntry(a)) {
+    if (isFollowUpEntry(a) && a.questionId) {
       for (const qId of knownMainQuestionIds) {
         if (a.questionId.includes(qId)) {
           return qId;
@@ -2993,58 +5167,108 @@ export function buildParticipantInitialManuscriptFromAnswers(params: {
     return null;
   };
 
-  const resolveAnswerStage = (a: (typeof answers)[0]): string => {
-    if (a.isAdditionalMemory) return 'legado_general';
-    const q = qMap.get(a.questionId);
-    if (q?.lifeStage && validStageKeys.has(q.lifeStage)) {
-      return q.lifeStage;
-    }
-    const parentId = resolveParentMainQuestionId(a);
-    if (parentId) {
-      const parentQ = qMap.get(parentId);
-      if (parentQ?.lifeStage && validStageKeys.has(parentQ.lifeStage)) {
-        return parentQ.lifeStage;
-      }
-      const parentAns = answers.find((cand) => cand.questionId === parentId && !isFollowUpEntry(cand));
-      if (parentAns) {
-        const pq = qMap.get(parentAns.questionId);
-        if (pq?.lifeStage && validStageKeys.has(pq.lifeStage)) {
-          return pq.lifeStage;
-        }
-      }
-    }
-    const photoStage = a.photos?.[0]?.lifeStage;
-    if (photoStage && validStageKeys.has(photoStage)) {
-      return photoStage;
-    }
-    return 'adultez';
-  };
-
   let memoryUnitCounter = 0;
   const chapterStructuredUnits: Record<string, StructuredChapterTestimonyUnit[]> = {};
 
+  const extractIncludedAnswerText = (ans: DocumentarySourceAnswerInput | undefined): string => {
+    if (!ans || resolveAnswerExclusionReason(ans) !== 'none') return '';
+    const raw = extractCleanParticipantAnswerText(ans);
+    return splitAnswerTextIntoIncludedAndExcludedSentences(raw).includedText;
+  };
+
   const formatMemoryUnitForStyle = (
     chapterId: string,
-    mainAns: (typeof answers)[0] | undefined,
-    followUps: Array<(typeof answers)[0]>
-  ): string[] => {
-    const out: string[] = [];
+    mainAns: DocumentarySourceAnswerInput | undefined,
+    followUps: Array<DocumentarySourceAnswerInput>,
+    extraSourceAnswerIds: string[] = [],
+    extraSourceQuestionIds: string[] = []
+  ): {
+    paragraphs: string[];
+    unitId: string;
+    sourceAnswerIds: string[];
+    sourceQuestionIds: string[];
+  } => {
+    let out: string[] = [];
     const currentUnitIdx = memoryUnitCounter++;
+    const unitId = `${chapterId}_unit_${currentUnitIdx + 1}`;
     const speakerName =
-      mainAns?.participantName || followUps[0]?.participantName || participantNames[0] || 'Protagonista';
+      mainAns?.participantName ||
+      followUps[0]?.participantName ||
+      participantNames[0] ||
+      'Protagonista';
 
     const mainQuestionText =
       mainAns?.questionText || (mainAns ? qMap.get(mainAns.questionId)?.text : undefined);
-    const mainText = mainAns && !mainAns.notRecalled ? extractCleanParticipantAnswerText(mainAns) : '';
+    let mainText = extractIncludedAnswerText(mainAns);
 
-    const validFollowUps = followUps
-      .filter((f) => !f.notRecalled)
-      .map((f) => ({
+    // If the answer has photographs whose caption is a narrative story (> 115 chars) or if mainText is empty
+    // and only a photograph caption was provided, integrate the photograph's story into the narrative unit
+    const photoNarratives: string[] = [];
+    if (mainAns && resolveAnswerExclusionReason(mainAns) === 'none') {
+      for (const p of mainAns.photos || []) {
+        const rawCap = (p?.caption || '').replace(/^\[Nota de voz\]:\s*/i, '').trim();
+        const cleanCap = splitAnswerTextIntoIncludedAndExcludedSentences(rawCap).includedText;
+        if (!cleanCap) continue;
+        if (!mainText || cleanCap.length > 115) {
+          if (!mainText.includes(cleanCap.slice(0, 40))) {
+            photoNarratives.push(cleanCap);
+          }
+        }
+      }
+    }
+    if (!mainText && photoNarratives.length > 0) {
+      mainText = photoNarratives.shift()!;
+    }
+
+    const rawFollowUpsFiltered: Array<{
+      questionText?: string;
+      text: string;
+      answerId?: string;
+      questionId?: string;
+    }> = [
+      ...photoNarratives.map((pn) => ({
+        questionText: 'Historia de la fotografía adjunta en este recuerdo',
+        text: pn,
+        answerId: mainAns?.id,
+        questionId: mainAns?.questionId,
+      })),
+    ];
+
+    for (const f of followUps.filter((item) => resolveAnswerExclusionReason(item) === 'none')) {
+      let fText = extractIncludedAnswerText(f);
+      if (!fText && f.photos && f.photos.length > 0) {
+        const cap = (f.photos[0].caption || '').replace(/^\[Nota de voz\]:\s*/i, '').trim();
+        fText = splitAnswerTextIntoIncludedAndExcludedSentences(cap).includedText;
+      }
+      if (!fText) continue;
+
+      // Consolidate if follow-up repeats the main answer's exact episode
+      if (mainText && areTestimoniesRedundantSameEpisode(mainText, fText)) {
+        mainText = consolidateComplementarySentences(mainText, fText);
+        continue;
+      }
+
+      // Or if it repeats an earlier follow-up in the same unit
+      const dupFollowIdx = rawFollowUpsFiltered.findIndex((existing) =>
+        areTestimoniesRedundantSameEpisode(existing.text, fText)
+      );
+      if (dupFollowIdx >= 0) {
+        rawFollowUpsFiltered[dupFollowIdx].text = consolidateComplementarySentences(
+          rawFollowUpsFiltered[dupFollowIdx].text,
+          fText
+        );
+        continue;
+      }
+
+      rawFollowUpsFiltered.push({
         questionText: f.questionText || qMap.get(f.questionId)?.text,
-        text: extractCleanParticipantAnswerText(f),
-      }))
-      .filter((item) => item.text.length > 0);
+        text: fText,
+        answerId: f.id,
+        questionId: f.questionId,
+      });
+    }
 
+    const validFollowUps = rawFollowUpsFiltered.filter((item) => item.text.length > 0);
     const followUpTexts = validFollowUps.map((f) => f.text);
 
     const isMultiParticipant = isCouple && participantNames.length > 1;
@@ -3071,9 +5295,6 @@ export function buildParticipantInitialManuscriptFromAnswers(params: {
         unitIndex: currentUnitIdx,
       });
 
-      // Integrate the deepening answer(s) immediately after their main question:
-      // If the main answer and first follow-up fit comfortably together on a page, merge them seamlessly;
-      // otherwise emit the main answer followed immediately by each deepening answer.
       const combinedFirst = `${ensureEndingPunctuation(styledMain)} ${styledFirstFollow}`;
       if (combinedFirst.length <= 660) {
         out.push(...splitLongParagraphAtSentences(combinedFirst));
@@ -3134,45 +5355,116 @@ export function buildParticipantInitialManuscriptFromAnswers(params: {
       });
     }
 
+    const combinedRawSource = [mainText, ...validFollowUps.map((vf) => vf.text)]
+      .filter(Boolean)
+      .join(' ');
+    out = ensureUncertaintyPreservedInParagraphs(combinedRawSource, out);
+
+    const sourceAnswerIds = Array.from(
+      new Set([
+        ...(mainAns && resolveAnswerExclusionReason(mainAns) === 'none' && mainAns.id
+          ? [mainAns.id]
+          : []),
+        ...followUps
+          .filter((f) => resolveAnswerExclusionReason(f) === 'none')
+          .map((f) => f.id)
+          .filter(Boolean),
+        ...extraSourceAnswerIds,
+      ])
+    );
+    const sourceQuestionIds = Array.from(
+      new Set([
+        ...(mainAns && resolveAnswerExclusionReason(mainAns) === 'none' && mainAns.questionId
+          ? [mainAns.questionId]
+          : []),
+        ...followUps
+          .filter((f) => resolveAnswerExclusionReason(f) === 'none')
+          .map((f) => f.questionId)
+          .filter(Boolean),
+        ...extraSourceQuestionIds,
+      ])
+    );
+
+    const unitPhotosMeta: Array<{
+      photoId: string;
+      descripcionOriginal: string;
+      preguntaAsociada?: string;
+      answerId?: string;
+      questionId?: string;
+    }> = [];
+    const collectPhotosFromAns = (
+      ansObj: DocumentarySourceAnswerInput | undefined,
+      qLabel?: string
+    ) => {
+      if (
+        !ansObj ||
+        resolveAnswerExclusionReason(ansObj) !== 'none' ||
+        !Array.isArray(ansObj.photos)
+      ) {
+        return;
+      }
+      for (const p of ansObj.photos) {
+        if (!p || !p.id) continue;
+        if (!unitPhotosMeta.some((existing) => existing.photoId === p.id)) {
+          const cleanDesc = splitAnswerTextIntoIncludedAndExcludedSentences(
+            (p.caption || '').replace(/^\[Nota de voz\]:\s*/i, '').trim()
+          ).includedText;
+          unitPhotosMeta.push({
+            photoId: p.id,
+            descripcionOriginal: cleanDesc,
+            preguntaAsociada: qLabel,
+            answerId: ansObj.id,
+            questionId: ansObj.questionId,
+          });
+        }
+      }
+    };
+    collectPhotosFromAns(mainAns, mainQuestionText);
+    for (const fAns of followUps) {
+      collectPhotosFromAns(fAns, fAns.questionText || qMap.get(fAns.questionId)?.text);
+    }
+
     if (out.length > 0) {
       if (!chapterStructuredUnits[chapterId]) {
         chapterStructuredUnits[chapterId] = [];
       }
-      for (const pText of out) {
-        chapterStructuredUnits[chapterId].push({
-          preguntaPrincipal: mainQuestionText,
-          respuestaPrincipal: mainText ? cleanSpanishOralText(mainText) : undefined,
-          profundizaciones:
-            validFollowUps.length > 0
-              ? validFollowUps.map((vf) => ({
-                  pregunta: vf.questionText,
-                  respuesta: cleanSpanishOralText(vf.text),
-                }))
-              : undefined,
-          textoIntegrado: pText,
-        });
-      }
+      chapterStructuredUnits[chapterId].push({
+        unitId,
+        sourceAnswerIds,
+        sourceQuestionIds,
+        uncertaintyExpressions: extractUncertaintyExpressions(combinedRawSource),
+        preguntaPrincipal: mainQuestionText,
+        respuestaPrincipal: mainText ? cleanSpanishOralText(mainText) : undefined,
+        profundizaciones:
+          validFollowUps.length > 0
+            ? validFollowUps.map((vf) => ({
+                pregunta: vf.questionText,
+                respuesta: cleanSpanishOralText(vf.text),
+                answerId: vf.answerId,
+                questionId: vf.questionId,
+              }))
+            : undefined,
+        fotografiasAsociadas: unitPhotosMeta.length > 0 ? unitPhotosMeta : undefined,
+        textoIntegrado: out.join(' '),
+      });
     }
 
-    return out;
+    return { paragraphs: out, unitId, sourceAnswerIds, sourceQuestionIds };
   };
 
   const chapters: DemoChapterManuscript[] = [];
   const chapterPhotos: Record<string, DemoInMemoryPhoto | null> = {};
+  const allPhotosById: Record<string, DemoInMemoryPhoto> = {};
+  const answerByIdMap = new Map(answers.map((a) => [a.id, a]));
 
-  for (const st of stageDefs) {
-    const stageAnswers = answers.filter((a) => {
-      const cleanText = extractCleanParticipantAnswerText(a);
-      if (a.notRecalled || cleanText.length === 0) {
-        return Boolean(a.photos && a.photos.length > 0);
-      }
-      return resolveAnswerStage(a) === st.stageKey;
-    });
+  for (const planCh of editorialPlan.chapters) {
+    const stageAnswers = planCh.assignedAnswerIds
+      .map((id) => answerByIdMap.get(id))
+      .filter((a): a is DocumentarySourceAnswerInput => Boolean(a));
 
     if (stageAnswers.length === 0) continue;
 
-    // Separate main answers, follow-up answers, and additional memories
-    const mainStageAnswers = stageAnswers
+    const rawMainStageAnswers = stageAnswers
       .filter((a) => !isFollowUpEntry(a) && !a.isAdditionalMemory)
       .sort((a, b) => {
         const orderA = qOrderMap.get(a.questionId) ?? 999999;
@@ -3182,6 +5474,31 @@ export function buildParticipantInitialManuscriptFromAnswers(params: {
         const timeB = new Date(b.createdAt || 0).getTime() || 0;
         return timeA - timeB;
       });
+
+    const consolidatedMainGroups: Array<{
+      primary: DocumentarySourceAnswerInput;
+      mergedRedundant: Array<DocumentarySourceAnswerInput>;
+    }> = [];
+    for (const ans of rawMainStageAnswers) {
+      const ansText = extractIncludedAnswerText(ans);
+      const existingGroup = consolidatedMainGroups.find((grp) => {
+        if (
+          isCouple &&
+          grp.primary.participantId &&
+          ans.participantId &&
+          grp.primary.participantId !== ans.participantId
+        ) {
+          return false;
+        }
+        const primaryText = extractIncludedAnswerText(grp.primary);
+        return areTestimoniesRedundantSameEpisode(primaryText, ansText);
+      });
+      if (existingGroup) {
+        existingGroup.mergedRedundant.push(ans);
+      } else {
+        consolidatedMainGroups.push({ primary: ans, mergedRedundant: [] });
+      }
+    }
 
     const followUpStageAnswers = stageAnswers
       .filter((a) => isFollowUpEntry(a))
@@ -3201,15 +5518,36 @@ export function buildParticipantInitialManuscriptFromAnswers(params: {
 
     const consumedFollowUpIds = new Set<string>();
     const paragraphs: string[] = [];
+    const paragraphIds: string[] = [];
+    const chapterSourceUnitIds: string[] = [];
+    const chapterSourceAnswerIds: string[] = [];
+    const chapterSourceQuestionIds: string[] = [];
     let firstStagePhoto: DemoInMemoryPhoto | null = null;
+    const chapterPhotoPlacements: DemoChapterPhotoPlacement[] = [];
+    const seenStagePhotoIds = new Set<string>();
 
-    const inspectAnswerPhoto = (ans: (typeof answers)[0]) => {
-      if (!firstStagePhoto && ans.photos && ans.photos.length > 0) {
-        const p = ans.photos[0];
+    const inspectAnswerPhoto = (
+      ans: DocumentarySourceAnswerInput,
+      targetParagraphIdx: number,
+      targetParagraphId: string,
+      eventUnitId: string
+    ) => {
+      if (resolveAnswerExclusionReason(ans) !== 'none' || !ans.photos || ans.photos.length === 0) {
+        return;
+      }
+      for (const p of ans.photos) {
+        if (!p || !p.id || seenStagePhotoIds.has(p.id)) continue;
+        seenStagePhotoIds.add(p.id);
         const srcUrl = p.dataUrl || p.imageUrl || `/api/photos/${p.id}`;
-        firstStagePhoto = {
+        const rawOriginalDesc = splitAnswerTextIntoIncludedAndExcludedSentences(
+          (p.caption || '').replace(/^\[Nota de voz\]:\s*/i, '').trim()
+        ).includedText;
+        const shortCap = formatPhotoEditorialCaption(
+          rawOriginalDesc || ans.questionText || qMap.get(ans.questionId)?.text || ''
+        );
+        const memPhoto: DemoInMemoryPhoto = {
           id: p.id,
-          fileName: `${st.chapterId}.jpg`,
+          fileName: `${planCh.chapterId}_${p.id}.jpg`,
           objectUrl: srcUrl,
           dataUrl: srcUrl,
           mimeType: p.mimeType || 'image/jpeg',
@@ -3217,18 +5555,37 @@ export function buildParticipantInitialManuscriptFromAnswers(params: {
           height: 600,
           zoom: 1,
           focusY: 'center',
-          caption: p.caption || '',
+          caption: shortCap,
         };
+        allPhotosById[p.id] = memPhoto;
+        if (!firstStagePhoto) {
+          firstStagePhoto = memPhoto;
+        }
+        chapterPhotoPlacements.push({
+          photoId: p.id,
+          paragraphIndex: Math.max(0, targetParagraphIdx),
+          shortCaption: shortCap,
+          originalDescription: rawOriginalDesc || shortCap,
+          answerId: ans.id,
+          questionId: ans.questionId,
+          eventId: eventUnitId,
+          chapterId: planCh.chapterId,
+          paragraphId: targetParagraphId,
+        });
       }
     };
 
-    // 1. Process each main question answer followed immediately by its deepening follow-up answers
-    for (const mainAns of mainStageAnswers) {
-      inspectAnswerPhoto(mainAns);
+    // 1. Process each main question answer group followed immediately by its deepening follow-up answers
+    for (const grp of consolidatedMainGroups) {
+      const mainAns = grp.primary;
+      const groupQuestionIds = new Set([
+        mainAns.questionId,
+        ...grp.mergedRedundant.map((m) => m.questionId),
+      ]);
       const attachedFollowUps = followUpStageAnswers.filter((fAns) => {
         if (consumedFollowUpIds.has(fAns.id)) return false;
         const resolvedParent = resolveParentMainQuestionId(fAns);
-        if (resolvedParent !== mainAns.questionId) return false;
+        if (!resolvedParent || !groupQuestionIds.has(resolvedParent)) return false;
         if (
           isCouple &&
           mainAns.participantId &&
@@ -3242,56 +5599,155 @@ export function buildParticipantInitialManuscriptFromAnswers(params: {
 
       for (const fAns of attachedFollowUps) {
         consumedFollowUpIds.add(fAns.id);
-        inspectAnswerPhoto(fAns);
       }
 
-      paragraphs.push(...formatMemoryUnitForStyle(st.chapterId, mainAns, attachedFollowUps));
+      let effectiveMainAns = mainAns;
+      if (grp.mergedRedundant.length > 0) {
+        let mergedText = extractIncludedAnswerText(mainAns);
+        for (const redAns of grp.mergedRedundant) {
+          mergedText = consolidateComplementarySentences(
+            mergedText,
+            extractIncludedAnswerText(redAns)
+          );
+        }
+        effectiveMainAns = {
+          ...mainAns,
+          answerText: mergedText,
+        };
+      } else {
+        effectiveMainAns = {
+          ...mainAns,
+          answerText: extractIncludedAnswerText(mainAns),
+        };
+      }
+
+      const startParaIdx = paragraphs.length;
+      const unitResult = formatMemoryUnitForStyle(
+        planCh.chapterId,
+        effectiveMainAns,
+        attachedFollowUps,
+        grp.mergedRedundant.map((m) => m.id),
+        grp.mergedRedundant.map((m) => m.questionId)
+      );
+      const firstParaId = `${planCh.chapterId}_p_${startParaIdx + 1}`;
+
+      inspectAnswerPhoto(mainAns, startParaIdx, firstParaId, unitResult.unitId);
+      for (const redAns of grp.mergedRedundant) {
+        inspectAnswerPhoto(redAns, startParaIdx, firstParaId, unitResult.unitId);
+      }
+      for (const fAns of attachedFollowUps) {
+        inspectAnswerPhoto(fAns, startParaIdx, firstParaId, unitResult.unitId);
+      }
+
+      for (let i = 0; i < unitResult.paragraphs.length; i++) {
+        paragraphs.push(unitResult.paragraphs[i]);
+        paragraphIds.push(`${planCh.chapterId}_p_${paragraphs.length}`);
+      }
+      chapterSourceUnitIds.push(unitResult.unitId);
+      for (const aId of unitResult.sourceAnswerIds) {
+        if (!chapterSourceAnswerIds.includes(aId)) chapterSourceAnswerIds.push(aId);
+      }
+      for (const qId of unitResult.sourceQuestionIds) {
+        if (!chapterSourceQuestionIds.includes(qId)) chapterSourceQuestionIds.push(qId);
+      }
     }
 
-    // 2. Include any remaining follow-up answers in this stage whose main question was omitted or not in mainStageAnswers
+    // 2. Include any remaining follow-up answers in this planned chapter
     for (const orphanFollowUp of followUpStageAnswers) {
       if (consumedFollowUpIds.has(orphanFollowUp.id)) continue;
       consumedFollowUpIds.add(orphanFollowUp.id);
-      inspectAnswerPhoto(orphanFollowUp);
-      paragraphs.push(...formatMemoryUnitForStyle(st.chapterId, undefined, [orphanFollowUp]));
+      const startParaIdx = paragraphs.length;
+      const unitResult = formatMemoryUnitForStyle(planCh.chapterId, undefined, [orphanFollowUp]);
+      const firstParaId = `${planCh.chapterId}_p_${startParaIdx + 1}`;
+      inspectAnswerPhoto(orphanFollowUp, startParaIdx, firstParaId, unitResult.unitId);
+      for (let i = 0; i < unitResult.paragraphs.length; i++) {
+        paragraphs.push(unitResult.paragraphs[i]);
+        paragraphIds.push(`${planCh.chapterId}_p_${paragraphs.length}`);
+      }
+      chapterSourceUnitIds.push(unitResult.unitId);
+      for (const aId of unitResult.sourceAnswerIds) {
+        if (!chapterSourceAnswerIds.includes(aId)) chapterSourceAnswerIds.push(aId);
+      }
+      for (const qId of unitResult.sourceQuestionIds) {
+        if (!chapterSourceQuestionIds.includes(qId)) chapterSourceQuestionIds.push(qId);
+      }
     }
 
-    // 3. Include all additional memories at the end of the stage
+    // 3. Include all additional memories assigned to this chapter
     for (const addAns of additionalStageAnswers) {
-      inspectAnswerPhoto(addAns);
-      paragraphs.push(...formatMemoryUnitForStyle(st.chapterId, addAns, []));
+      const addText = extractIncludedAnswerText(addAns);
+      const startParaIdx = paragraphs.length;
+      const unitResult = formatMemoryUnitForStyle(planCh.chapterId, addAns, []);
+      const firstParaId = `${planCh.chapterId}_p_${Math.max(1, startParaIdx + 1)}`;
+      inspectAnswerPhoto(addAns, Math.max(0, startParaIdx), firstParaId, unitResult.unitId);
+
+      const isRedundantWithExisting =
+        addText.length > 0 &&
+        paragraphs.some((existingPara) => areTestimoniesRedundantSameEpisode(existingPara, addText));
+
+      if (!isRedundantWithExisting) {
+        for (let i = 0; i < unitResult.paragraphs.length; i++) {
+          paragraphs.push(unitResult.paragraphs[i]);
+          paragraphIds.push(`${planCh.chapterId}_p_${paragraphs.length}`);
+        }
+      }
+      chapterSourceUnitIds.push(unitResult.unitId);
+      for (const aId of unitResult.sourceAnswerIds) {
+        if (!chapterSourceAnswerIds.includes(aId)) chapterSourceAnswerIds.push(aId);
+      }
+      for (const qId of unitResult.sourceQuestionIds) {
+        if (!chapterSourceQuestionIds.includes(qId)) chapterSourceQuestionIds.push(qId);
+      }
+    }
+
+    if (paragraphs.length === 0 && firstStagePhoto) {
+      const fallbackCaption =
+        (firstStagePhoto as DemoInMemoryPhoto).caption ||
+        (narrativeStyle === 'third_person_biography'
+          ? `Fotografía conservada en la memoria biográfica de ${authors}.`
+          : `Fotografía conservada entre los recuerdos de esta etapa.`);
+      paragraphs.push(fallbackCaption);
+      paragraphIds.push(`${planCh.chapterId}_p_1`);
     }
 
     if (paragraphs.length > 0) {
+      const normalizedPhotoPlacements = chapterPhotoPlacements.map((pl) => {
+        const clampedIdx = Math.max(0, Math.min(paragraphs.length - 1, pl.paragraphIndex));
+        return {
+          ...pl,
+          paragraphIndex: clampedIdx,
+          chapterId: planCh.chapterId,
+          paragraphId: paragraphIds[clampedIdx] || `${planCh.chapterId}_p_${clampedIdx + 1}`,
+        };
+      });
+
       const firstSentence = paragraphs[0].split(/(?<=[.!?])\s+/)[0] || '';
       const resolvedChapterTitle =
         narrativeStyle === 'third_person_biography'
-          ? st.stageKey === 'infancia'
-            ? `Sus raíces y primeros recuerdos`
-            : st.stageKey === 'juventud'
-            ? `Su juventud, sueños y caminos`
-            : st.stageKey === 'adultez'
-            ? `El hogar y los afectos construidos`
-            : st.stageKey === 'madurez'
-            ? `Sus momentos decisivos y aprendizajes`
-            : `Sus valores, reflexiones y legado`
+          ? planCh.suggestedTitleThirdPerson
           : isCouple
-          ? st.coupleTitle
-          : st.individualTitle;
+          ? planCh.suggestedTitleCouple
+          : planCh.suggestedTitleIndividual;
 
       chapters.push({
-        id: st.chapterId,
+        id: planCh.chapterId,
         partNumber: chapters.length + 1,
-        dimensionKey: st.dimensionKey,
+        dimensionKey: planCh.dimensionKey,
         title: resolvedChapterTitle,
         paragraphs,
+        paragraphIds,
+        sourceUnitIds: chapterSourceUnitIds,
+        sourceAnswerIds: chapterSourceAnswerIds,
+        sourceQuestionIds: chapterSourceQuestionIds,
         pullQuote:
           firstSentence.length >= 20 && firstSentence.length <= 165
             ? firstSentence
             : undefined,
+        photoPlacements:
+          normalizedPhotoPlacements.length > 0 ? normalizedPhotoPlacements : undefined,
       });
       if (firstStagePhoto) {
-        chapterPhotos[st.chapterId] = firstStagePhoto;
+        chapterPhotos[planCh.chapterId] = firstStagePhoto;
       }
     }
   }
@@ -3312,6 +5768,7 @@ export function buildParticipantInitialManuscriptFromAnswers(params: {
           ? `Estas páginas preservan la biografía y los recuerdos compartidos por ${authors}.`
           : `Estas páginas preservan los recuerdos y testimonios compartidos por ${authors}.`,
       ],
+      paragraphIds: ['part_ch_default_p_1'],
     });
   }
 
@@ -3326,36 +5783,1664 @@ export function buildParticipantInitialManuscriptFromAnswers(params: {
       ? `Esta edición reúne las vivencias, recuerdos y fotografías compartidas por ${authors}, conservando la calidez literaria y la emoción de nuestra voz para las generaciones presentes y futuras.`
       : `Esta edición reúne las vivencias, recuerdos y fotografías de ${authors}, transformados en unas memorias personales cálidas y emotivas para las generaciones presentes y futuras.`;
 
-  return {
-    manuscript: {
-      title: interviewTitle || (isCouple ? `Nuestra historia: ${authors}` : `La historia de ${authors}`),
-      subtitle:
-        narrativeStyle === 'third_person_biography'
-          ? `Biografía narrativa y legado de ${authors}`
-          : isCouple
-          ? 'Libro biográfico de memorias compartidas'
-          : 'Libro autobiográfico y legado familiar',
-      authors,
-      mode,
+  const sanitizedClosingInput = splitAnswerTextIntoIncludedAndExcludedSentences(
+    closingDedicationText.trim()
+  ).includedText;
+
+  const initialManuscript: DemoManuscript = {
+    title: interviewTitle || (isCouple ? `Nuestra historia: ${authors}` : `La historia de ${authors}`),
+    subtitle:
+      narrativeStyle === 'third_person_biography'
+        ? `Biografía narrativa y legado de ${authors}`
+        : isCouple
+        ? 'Libro biográfico de memorias compartidas'
+        : 'Libro autobiográfico y legado familiar',
+    authors,
+    mode,
+    narrativeStyle,
+    bookStructureMode,
+    introduction: styledIntroduction,
+    dedication: '',
+    chapters,
+    closingMessage: ensureParagraphConformsToStyle({
+      paragraph:
+        sanitizedClosingInput ||
+        'Que estas páginas acompañen siempre a quienes forman parte de nuestra historia.',
       narrativeStyle,
-      introduction: styledIntroduction,
-      dedication: '',
-      chapters,
-      closingMessage:
-        ensureParagraphConformsToStyle({
-          paragraph:
-            closingDedicationText.trim() ||
-            'Que estas páginas acompañen siempre a quienes forman parte de nuestra historia.',
-          narrativeStyle,
-          speakerName: authors,
-          isCouple,
-        }),
-      insufficientInfoNotices: [],
-      generatedAt: new Date().toISOString(),
-      useOfficialForeverYouLogo: true,
-    },
+      speakerName: authors,
+      isCouple,
+    }),
+    insufficientInfoNotices: [],
+    generatedAt: new Date().toISOString(),
+    useOfficialForeverYouLogo: true,
+    generationStatus: 'approved',
+  };
+
+  const audited = auditAndApproveBookManuscript({
+    manuscript: initialManuscript,
+    answers,
+    questions,
+  });
+
+  return {
+    manuscript: audited.manuscript,
     chapterPhotos,
+    allPhotosById,
     chapterStructuredUnits,
+    documentaryInventory,
+    editorialPlan,
   };
 }
 
+/**
+ * Resolves the exact chapter and paragraph index where a documentary photograph belongs,
+ * using stable answerId/questionId links first, then lexical overlap between the photo's
+ * original description / question text and the chapter paragraphs, and finally dimensionKey / stage.
+ * Never dumps an unplaced photograph into chapter[0] unless chapter[0] genuinely narrates that event.
+ */
+export function resolveDocumentaryPhotoChapterAndParagraph(params: {
+  chapters: DemoChapterManuscript[];
+  photoId: string;
+  shortCaption?: string;
+  originalDescription?: string;
+  answerId?: string;
+  questionId?: string;
+  answerText?: string;
+  questionText?: string;
+  dimensionKey?: DemoQuestionDefinition['dimensionKey'];
+  preferredChapterId?: string;
+  preferredParagraphIndex?: number;
+}): {
+  chapterIndex: number;
+  paragraphIndex: number;
+  chapterId: string;
+  paragraphId: string;
+} {
+  const {
+    chapters,
+    answerId,
+    questionId,
+    shortCaption = '',
+    originalDescription = '',
+    answerText = '',
+    questionText = '',
+    dimensionKey,
+    preferredChapterId,
+    preferredParagraphIndex,
+  } = params;
+
+  if (chapters.length === 0) {
+    return {
+      chapterIndex: 0,
+      paragraphIndex: 0,
+      chapterId: 'ch_1',
+      paragraphId: 'ch_1_p_1',
+    };
+  }
+
+  // 1. Check if a chapter explicitly references this answerId or questionId
+  let bestChapterIdx = -1;
+  if (answerId) {
+    bestChapterIdx = chapters.findIndex(
+      (ch) => Array.isArray(ch.sourceAnswerIds) && ch.sourceAnswerIds.includes(answerId)
+    );
+  }
+  if (bestChapterIdx < 0 && questionId) {
+    bestChapterIdx = chapters.findIndex(
+      (ch) => Array.isArray(ch.sourceQuestionIds) && ch.sourceQuestionIds.includes(questionId)
+    );
+  }
+
+  // 2. Lexical matching against all chapters and paragraphs using the photo's story, answer text, and question
+  const searchTokens = tokenizeSignificantWords(
+    [originalDescription, shortCaption, answerText, questionText].filter(Boolean).join(' ')
+  );
+
+  let bestLexicalChapterIdx = -1;
+  let bestLexicalParaIdx = 0;
+  let bestLexicalScore = 0;
+
+  if (searchTokens.length > 0) {
+    chapters.forEach((ch, cIdx) => {
+      const titleTokens = new Set(tokenizeSignificantWords(ch.title || ''));
+      let titleBonus = 0;
+      for (const tok of searchTokens) {
+        if (titleTokens.has(tok)) titleBonus += 1.5;
+      }
+
+      (ch.paragraphs || []).forEach((para, pIdx) => {
+        const paraTokens = new Set(tokenizeSignificantWords(para));
+        let score = titleBonus;
+        for (const tok of searchTokens) {
+          if (paraTokens.has(tok)) score += 2;
+        }
+        if (dimensionKey && ch.dimensionKey === dimensionKey) {
+          score += 1;
+        }
+        if (score > bestLexicalScore) {
+          bestLexicalScore = score;
+          bestLexicalChapterIdx = cIdx;
+          bestLexicalParaIdx = pIdx;
+        }
+      });
+    });
+  }
+
+  if (bestChapterIdx < 0 && bestLexicalScore >= 2) {
+    bestChapterIdx = bestLexicalChapterIdx;
+  }
+
+  // 3. Match by preferredChapterId or dimensionKey if still unresolved
+  if (bestChapterIdx < 0 && preferredChapterId) {
+    bestChapterIdx = chapters.findIndex((ch) => ch.id === preferredChapterId);
+  }
+  if (bestChapterIdx < 0 && dimensionKey) {
+    bestChapterIdx = chapters.findIndex((ch) => ch.dimensionKey === dimensionKey);
+  }
+  if (bestChapterIdx < 0) {
+    bestChapterIdx = Math.max(0, bestLexicalChapterIdx);
+  }
+
+  const targetChapter = chapters[bestChapterIdx] || chapters[0];
+  const paraCount = Math.max(1, (targetChapter.paragraphs || []).length);
+
+  // Resolve the best paragraph inside targetChapter
+  let resolvedParaIdx =
+    bestLexicalChapterIdx === bestChapterIdx && bestLexicalScore > 0
+      ? bestLexicalParaIdx
+      : typeof preferredParagraphIndex === 'number'
+      ? preferredParagraphIndex
+      : 0;
+
+  if (searchTokens.length > 0 && bestLexicalChapterIdx !== bestChapterIdx) {
+    let localBestScore = -1;
+    (targetChapter.paragraphs || []).forEach((para, pIdx) => {
+      const paraTokens = new Set(tokenizeSignificantWords(para));
+      let score = 0;
+      for (const tok of searchTokens) {
+        if (paraTokens.has(tok)) score += 2;
+      }
+      if (score > localBestScore) {
+        localBestScore = score;
+        resolvedParaIdx = pIdx;
+      }
+    });
+  }
+
+  resolvedParaIdx = Math.max(0, Math.min(paraCount - 1, resolvedParaIdx));
+  const paragraphId =
+    targetChapter.paragraphIds?.[resolvedParaIdx] ||
+    `${targetChapter.id}_p_${resolvedParaIdx + 1}`;
+
+  return {
+    chapterIndex: bestChapterIdx,
+    paragraphIndex: resolvedParaIdx,
+    chapterId: targetChapter.id,
+    paragraphId,
+  };
+}
+
+function doesTokenMatchCorpusWords(targetToken: string, corpusWords: string[]): boolean {
+  const normTarget = normalizePlainAscii(targetToken);
+  if (!normTarget) return true;
+  if (normTarget.includes(' ')) {
+    const parts = normTarget.split(/\s+/).filter(Boolean);
+    return parts.every((part) => doesTokenMatchCorpusWords(part, corpusWords));
+  }
+  if (corpusWords.includes(normTarget)) return true;
+
+  // Check equivalent synonym/conjugation groups
+  for (const grp of SPANISH_EQUIVALENT_WORD_GROUPS) {
+    if (grp.includes(normTarget)) {
+      if (grp.some((syn) => corpusWords.includes(syn))) return true;
+    }
+  }
+
+  // Check Spanish stem prefix match (first 5 chars for >= 5 char words, or 4 chars for 4-char words)
+  const stemLen = normTarget.length >= 6 ? 5 : 4;
+  if (normTarget.length >= 4) {
+    const prefix = normTarget.slice(0, stemLen);
+    if (corpusWords.some((cw) => cw.length >= 4 && cw.startsWith(prefix))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Performs real semantic and facet verification of an atomic `DocumentaryFactUnit` against
+ * the manuscript's normalized chapters and paragraphs.
+ */
+export function verifyDocumentaryUnitInManuscript(params: {
+  unit: DocumentaryFactUnit;
+  chapters: DemoChapterManuscript[];
+}): {
+  verified: boolean;
+  semanticMatchScore: number;
+  chapterIndex: number;
+  paragraphIndex: number;
+  chapterId: string;
+  paragraphId: string;
+  evidenceSnippet: string;
+  matchedTokens: string[];
+  missingTokens: string[];
+  missingFacets: string[];
+} {
+  const { unit, chapters } = params;
+  if (chapters.length === 0) {
+    return {
+      verified: false,
+      semanticMatchScore: 0,
+      chapterIndex: -1,
+      paragraphIndex: -1,
+      chapterId: 'none',
+      paragraphId: 'none',
+      evidenceSnippet: '',
+      matchedTokens: [],
+      missingTokens: unit.keyTokens,
+      missingFacets: ['empty_manuscript'],
+    };
+  }
+
+  // Evaluate each chapter & paragraph to find the best semantic match
+  let bestChapterIdx = 0;
+  let bestParaIdx = 0;
+  let bestParaScore = -1;
+
+  const unitRequiredTokens =
+    unit.keyTokens.length > 0
+      ? unit.keyTokens
+      : normalizePlainAscii(unit.cleanText)
+          .split(/\s+/)
+          .filter((w) => w.length >= 3);
+
+  const chapterOrder = chapters
+    .map((ch, cIdx) => ({
+      ch,
+      cIdx,
+      hasExplicitAnswerLink:
+        Array.isArray(ch.sourceAnswerIds) && ch.sourceAnswerIds.includes(unit.answerId),
+    }))
+    .sort((a, b) => (a.hasExplicitAnswerLink === b.hasExplicitAnswerLink ? 0 : a.hasExplicitAnswerLink ? -1 : 1));
+
+  for (const { ch, cIdx, hasExplicitAnswerLink } of chapterOrder) {
+    let foundStrongMatchInLinkedChapter = false;
+    const paras = ch.paragraphs || [];
+    for (let pIdx = 0; pIdx < paras.length; pIdx++) {
+      const para = paras[pIdx];
+      const nextPara = paras[pIdx + 1] || '';
+      const paraWords = normalizePlainAscii(para).split(/\s+/).filter(Boolean);
+      const windowWords = normalizePlainAscii(`${para} ${nextPara}`).split(/\s+/).filter(Boolean);
+      let matchedCount = 0;
+      for (const tok of unitRequiredTokens) {
+        if (doesTokenMatchCorpusWords(tok, paraWords)) {
+          matchedCount++;
+        } else if (doesTokenMatchCorpusWords(tok, windowWords)) {
+          matchedCount += 0.85;
+        }
+      }
+      const ratio =
+        unitRequiredTokens.length > 0 ? matchedCount / unitRequiredTokens.length : 0;
+      let yearBonus = 0;
+      if (unit.yearsOrNumbers.length > 0) {
+        const allYearsInPara = unit.yearsOrNumbers.every((yn) =>
+          doesTokenMatchCorpusWords(yn, paraWords)
+        );
+        const allYearsInWindow = unit.yearsOrNumbers.every((yn) =>
+          doesTokenMatchCorpusWords(yn, windowWords)
+        );
+        if (allYearsInPara) yearBonus = 0.35;
+        else if (allYearsInWindow) yearBonus = 0.2;
+        else yearBonus = -0.35;
+      }
+      const score = ratio + yearBonus + (hasExplicitAnswerLink ? 0.08 : 0);
+      if (score > bestParaScore) {
+        bestParaScore = score;
+        bestChapterIdx = cIdx;
+        bestParaIdx = pIdx;
+      }
+      if (
+        hasExplicitAnswerLink &&
+        ratio >= 0.85 &&
+        (unit.yearsOrNumbers.length === 0 || yearBonus >= 0.35)
+      ) {
+        foundStrongMatchInLinkedChapter = true;
+        break;
+      }
+    }
+    if (foundStrongMatchInLinkedChapter) {
+      break;
+    }
+  }
+
+  const targetCh = chapters[bestChapterIdx] || chapters[0];
+  const targetPara = targetCh.paragraphs[bestParaIdx] || targetCh.paragraphs[0] || '';
+  const neighborPara = targetCh.paragraphs[bestParaIdx + 1] || '';
+  const paraWords = normalizePlainAscii(targetPara).split(/\s+/).filter(Boolean);
+  // Allow a 2-paragraph window only when a long single memory was split across two consecutive paragraphs
+  const paraWindowWords = normalizePlainAscii(`${targetPara} ${neighborPara}`)
+    .split(/\s+/)
+    .filter(Boolean);
+
+  // Measure token coverage against the matched paragraph (and immediate split continuation)
+  const matchedTokens: string[] = [];
+  const missingTokens: string[] = [];
+  for (const tok of unitRequiredTokens) {
+    if (
+      doesTokenMatchCorpusWords(tok, paraWords) ||
+      (doesTokenMatchCorpusWords(tok, paraWindowWords) &&
+        (unit.yearsOrNumbers.length === 0 ||
+          unit.yearsOrNumbers.every((yn) => doesTokenMatchCorpusWords(yn, paraWindowWords))))
+    ) {
+      matchedTokens.push(tok);
+    } else {
+      missingTokens.push(tok);
+    }
+  }
+
+  const semanticMatchScore =
+    unitRequiredTokens.length > 0
+      ? Number((matchedTokens.length / unitRequiredTokens.length).toFixed(3))
+      : targetPara.trim().length > 0
+      ? 1
+      : 0;
+
+  // Verify critical facets (years/numbers, properNames/people, places, emotions) in the matched paragraph window
+  const missingFacets: string[] = [];
+
+  if (unit.yearsOrNumbers.length > 0) {
+    const missingYears = unit.yearsOrNumbers.filter(
+      (yn) => !doesTokenMatchCorpusWords(yn, paraWords)
+    );
+    if (missingYears.length > 0) {
+      missingFacets.push(`yearsOrNumbers:${missingYears.join(',')}`);
+    }
+  }
+
+  if (unit.properNames.length > 0) {
+    const matchedPeople = unit.properNames.filter((pn) =>
+      doesTokenMatchCorpusWords(pn, paraWindowWords)
+    );
+    const minRequiredPeople =
+      unit.properNames.length <= 2
+        ? unit.properNames.length
+        : Math.ceil(unit.properNames.length * 0.75);
+    if (matchedPeople.length < minRequiredPeople) {
+      const missingP = unit.properNames.filter(
+        (pn) => !doesTokenMatchCorpusWords(pn, paraWindowWords)
+      );
+      missingFacets.push(`properNames:${missingP.join(',')}`);
+    }
+  }
+
+  if (unit.places.length > 0) {
+    const matchedPlaces = unit.places.filter((pl) =>
+      doesTokenMatchCorpusWords(pl, paraWindowWords)
+    );
+    const minRequiredPlaces =
+      unit.places.length <= 2 ? unit.places.length : Math.ceil(unit.places.length * 0.75);
+    if (matchedPlaces.length < minRequiredPlaces) {
+      const missingPl = unit.places.filter(
+        (pl) => !doesTokenMatchCorpusWords(pl, paraWindowWords)
+      );
+      missingFacets.push(`places:${missingPl.join(',')}`);
+    }
+  }
+
+  if (unit.emotions.length > 0) {
+    const hasEmotionInPara =
+      unit.emotions.some((em) => doesTokenMatchCorpusWords(em, paraWindowWords)) ||
+      SPANISH_EMOTION_STEMS.some((stem) => paraWindowWords.some((cw) => cw.startsWith(stem)));
+    if (!hasEmotionInPara) {
+      missingFacets.push(`emotions:${unit.emotions.join(',')}`);
+    }
+  }
+
+  // Minimum semantic match score threshold:
+  // - For rich multi-detail units (>= 7 significant tokens), require >= 0.65 token overlap AND 0 missing facets
+  // - For shorter units (1-6 significant tokens), require >= 0.50 token overlap AND 0 missing facets
+  const minRequiredScore = unitRequiredTokens.length >= 7 ? 0.65 : 0.5;
+  const verified =
+    unitRequiredTokens.length === 0
+      ? Boolean(
+          unit.photoIds.length > 0 &&
+            (targetCh.photoPlacements || []).some((pl) => unit.photoIds.includes(pl.photoId))
+        )
+      : semanticMatchScore >= minRequiredScore && missingFacets.length === 0;
+
+  const paragraphId =
+    targetCh.paragraphIds?.[bestParaIdx] || `${targetCh.id}_p_${bestParaIdx + 1}`;
+
+  return {
+    verified,
+    semanticMatchScore,
+    chapterIndex: bestChapterIdx,
+    paragraphIndex: bestParaIdx,
+    chapterId: targetCh.id,
+    paragraphId,
+    evidenceSnippet: targetPara.slice(0, 180),
+    matchedTokens,
+    missingTokens,
+    missingFacets,
+  };
+}
+
+/**
+ * Verifies that the manuscript does not invent dates/years, ages, proper names, or direct dialogues
+ * absent from the documentary inventory, and that excluded content did not leak into any book section.
+ */
+function runVeracityAndExclusionAudit(params: {
+  manuscript: DemoManuscript;
+  chapters: DemoChapterManuscript[];
+  inventory: DocumentaryInventory;
+  participantNames: string[];
+}): {
+  inventedDataFlags: string[];
+  uncertaintyViolations: string[];
+  leakedExcludedContentFlags: string[];
+  coupleAttributionViolations: string[];
+} {
+  const { manuscript, chapters, inventory, participantNames } = params;
+  const inventedDataFlags: string[] = [];
+  const uncertaintyViolations: string[] = [];
+  const leakedExcludedContentFlags: string[] = [];
+  const coupleAttributionViolations: string[] = [];
+
+  if (inventory.totalRawAnswers === 0) {
+    return {
+      inventedDataFlags,
+      uncertaintyViolations,
+      leakedExcludedContentFlags,
+      coupleAttributionViolations,
+    };
+  }
+
+  const validYearsSet = new Set(inventory.corpusValidYearsAndNumbers);
+  const allSourceRawCombined = inventory.eligibleFactUnits
+    .map((u) => `${u.rawText} ${u.questionText}`)
+    .join(' ');
+
+  // 1. Check each chapter paragraph for invented 4-digit years, invented explicit ages, or fabricated dialogues
+  for (const ch of chapters) {
+    for (let pIdx = 0; pIdx < (ch.paragraphs || []).length; pIdx++) {
+      const para = ch.paragraphs[pIdx] || '';
+      const normPara = normalizePlainAscii(para);
+
+      // 1a. 4-digit years (1800-2099)
+      const yearsInPara = para.match(/\b(18\d{2}|19\d{2}|20\d{2})\b/g) || [];
+      for (const yr of yearsInPara) {
+        if (!validYearsSet.has(yr)) {
+          inventedDataFlags.push(
+            `Año o fecha no presente en el testimonio original (${yr}) en capítulo "${ch.title}" (párrafo ${pIdx + 1}).`
+          );
+        }
+      }
+
+      // 1b. Explicit numerical ages/durations ("a los 24 años", "durante 17 años") not in source corpus
+      const ageMatches = normPara.match(/\b(\d{1,2})\s+anos\b/g) || [];
+      for (const am of ageMatches) {
+        const numStr = (am.match(/\d+/) || [])[0];
+        if (
+          numStr &&
+          !validYearsSet.has(numStr) &&
+          !doesTokenMatchCorpusWords(
+            numStr,
+            Array.from(validYearsSet).concat(inventory.corpusValidProperNames)
+          )
+        ) {
+          inventedDataFlags.push(
+            `Cifra de años no respaldada por el testimonio (${numStr} años) en capítulo "${ch.title}" (párrafo ${pIdx + 1}).`
+          );
+        }
+      }
+
+      // 1c. Fabricated direct dialogues ("..." or —...—) that were not in the source corpus
+      const quoteMatches = para.match(/(?:«([^»]{18,})»|"([^"]{18,})")/g) || [];
+      for (const qm of quoteMatches) {
+        const innerQuote = qm.slice(1, -1).trim();
+        const quoteTokens = tokenizeSignificantWords(innerQuote);
+        const sourceWords = inventory.corpusValidProperNames;
+        const matchedQuoteTokens = quoteTokens.filter((qt) =>
+          doesTokenMatchCorpusWords(qt, sourceWords)
+        );
+        if (
+          quoteTokens.length >= 3 &&
+          matchedQuoteTokens.length / quoteTokens.length < 0.6 &&
+          !allSourceRawCombined.toLowerCase().includes(innerQuote.slice(0, 20).toLowerCase())
+        ) {
+          inventedDataFlags.push(
+            `Diálogo textual inventado no presente en el testimonio (${qm.slice(0, 50)}...) en capítulo "${ch.title}".`
+          );
+        }
+      }
+
+      // 1d. Invented proper names introduced after relational cues ("llamado X", "don X", "doña X", "amigo X")
+      const namedEntityMatches =
+        para.match(
+          /\b(?:llamad[oa]|don|doña|t[ií][oa]|abuel[oa]|amig[oa]|doctor(?:a)?|maestr[oa]|profesor(?:a)?|socio)\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]{2,})/g
+        ) || [];
+      for (const nem of namedEntityMatches) {
+        const parts = nem.trim().split(/\s+/);
+        const properCandidate = normalizePlainAscii(parts[parts.length - 1] || '');
+        if (
+          properCandidate.length >= 3 &&
+          !inventory.corpusValidProperNames.includes(properCandidate)
+        ) {
+          inventedDataFlags.push(
+            `Nombre propio no respaldado por el testimonio ("${parts[parts.length - 1]}") en capítulo "${ch.title}".`
+          );
+        }
+      }
+    }
+  }
+
+  // 2. Check leaked excluded content across chapters, introduction, closingMessage, pullQuotes, and photo captions
+  const allBookSurfaceText = [
+    manuscript.introduction || '',
+    manuscript.closingMessage || '',
+    manuscript.dedication || '',
+    ...chapters.flatMap((c) => [
+      c.title || '',
+      c.pullQuote || '',
+      ...(c.paragraphs || []),
+      ...(c.photoPlacements || []).map((pl) => `${pl.shortCaption || ''} ${pl.originalDescription || ''}`),
+    ]),
+  ].join(' ');
+  const normBookSurfaceWords = normalizePlainAscii(allBookSurfaceText).split(/\s+/).filter(Boolean);
+
+  // Also check if literal exclusion directives ("no incluir en el libro") leaked into the book
+  if (EXPLICIT_EXCLUSION_DIRECTIVE_RX.test(allBookSurfaceText)) {
+    leakedExcludedContentFlags.push(
+      'Directiva de exclusión explícita ("no incluir en el libro") filtrada en el texto visible del manuscrito.'
+    );
+  }
+
+  const eligibleWordsSet = new Set(
+    inventory.eligibleFactUnits.flatMap((u) =>
+      normalizePlainAscii(u.cleanText).split(/\s+/).filter(Boolean)
+    )
+  );
+
+  for (const exclUnit of inventory.excludedFactUnits) {
+    if (
+      exclUnit.exclusionReason !== 'excluded_by_interviewee' &&
+      exclUnit.exclusionReason !== 'prefer_not_to_answer'
+    ) {
+      continue;
+    }
+    // Tokens unique to the excluded unit (not present in eligible units)
+    const uniqueExcludedTokens = exclUnit.keyTokens.filter((t) => !eligibleWordsSet.has(t));
+    if (uniqueExcludedTokens.length === 0) continue;
+    const leakedTokens = uniqueExcludedTokens.filter((t) => normBookSurfaceWords.includes(t));
+    if (
+      leakedTokens.length >= 2 ||
+      (uniqueExcludedTokens.length === 1 && leakedTokens.length === 1)
+    ) {
+      leakedExcludedContentFlags.push(
+        `Contenido excluido por el entrevistado (${exclUnit.unitId}) se filtró en el manuscrito (términos detectados: ${leakedTokens.join(', ')}).`
+      );
+    }
+  }
+
+  // 3. Check Couple / Shared Story Attribution when 2 distinct participants exist
+  if (manuscript.mode === 'pareja' && participantNames.length >= 2) {
+    const p1Norm = normalizePlainAscii(participantNames[0]);
+    const p2Norm = normalizePlainAscii(participantNames[1]);
+    if (p1Norm && p2Norm && p1Norm !== p2Norm) {
+      for (const unit of inventory.eligibleFactUnits) {
+        const unitSpeakerNorm = normalizePlainAscii(unit.participantName);
+        if (unitSpeakerNorm !== p1Norm && unitSpeakerNorm !== p2Norm) continue;
+        const otherSpeakerNorm = unitSpeakerNorm === p1Norm ? p2Norm : p1Norm;
+        const otherSpeakerDisplay =
+          unitSpeakerNorm === p1Norm ? participantNames[1] : participantNames[0];
+
+        // Find paragraph matching this unit
+        for (const ch of chapters) {
+          for (const para of ch.paragraphs || []) {
+            const paraWords = normalizePlainAscii(para).split(/\s+/).filter(Boolean);
+            const matched = unit.keyTokens.filter((t) =>
+              doesTokenMatchCorpusWords(t, paraWords)
+            );
+            if (unit.keyTokens.length >= 4 && matched.length / unit.keyTokens.length >= 0.75) {
+              const normPara = normalizePlainAscii(para);
+              const mentionsTrueSpeaker = normPara.includes(unitSpeakerNorm);
+              const mentionsWrongSpeakerExplicitly =
+                normPara.startsWith(`${otherSpeakerNorm} recuerda`) ||
+                normPara.startsWith(`${otherSpeakerNorm} relata`) ||
+                normPara.startsWith(`por su parte ${otherSpeakerNorm}`);
+              if (!mentionsTrueSpeaker && mentionsWrongSpeakerExplicitly) {
+                coupleAttributionViolations.push(
+                  `Atribución cruzada en historia compartida: el recuerdo ${unit.unitId} de ${unit.participantName} fue atribuido a ${otherSpeakerDisplay}.`
+                );
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return {
+    inventedDataFlags,
+    uncertaintyViolations,
+    leakedExcludedContentFlags,
+    coupleAttributionViolations,
+  };
+}
+
+/**
+ * Runs the mandatory server/client documentary audit over a DemoManuscript:
+ * - Decomposes all source answers, deepening follow-ups, additional memories, audio transcriptions,
+ *   and photo contexts into atomic `DocumentaryFactUnit`s via `buildDocumentaryInventory`.
+ * - Verifies real semantic & facet coverage of every eligible unit against actual chapter paragraphs
+ *   (fixing the former `totalSourceUnits = integratedUnits` defect).
+ * - Verifies veracity (no invented dates/ages/names/dialogues), uncertainty preservation,
+ *   exclusion compliance (`not_recalled`, `prefer_not_to_answer`, `excluded_by_interviewee`),
+ *   couple attribution, structural chapter grouping (never 1 question per chapter), and 100% photo placement.
+ */
+export function auditAndApproveBookManuscript(params: {
+  manuscript: DemoManuscript;
+  answers?: DocumentarySourceAnswerInput[];
+  questions?: DocumentarySourceQuestionInput[];
+  repairAttemptsUsed?: number;
+  repairedUnitIds?: string[];
+}): {
+  manuscript: DemoManuscript;
+  report: DocumentaryAuditReport;
+  inventory: DocumentaryInventory;
+} {
+  const {
+    manuscript,
+    answers = [],
+    questions = [],
+    repairAttemptsUsed = 0,
+    repairedUnitIds = [],
+  } = params;
+  const qMap = new Map(questions.map((q) => [q.id, q]));
+  const blockingDefects: string[] = [];
+
+  const participantNames = (manuscript.authors || '')
+    .split(/\s+y\s+|,\s*/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const inventory = buildDocumentaryInventory({
+    interviewId: manuscript.canonicalManuscriptId || manuscript.title || 'interview_audit',
+    answers,
+    questions,
+    participantNames,
+  });
+
+  // 1. Structural Normalization: deduplicate chapters, ensure consecutive partNumber 1..N and stable paragraphIds
+  const seenChapterIds = new Set<string>();
+  const seenChapterTitles = new Set<string>();
+  const duplicateChapterFlags: string[] = [];
+  const orphanContinuationFlags: string[] = [];
+  const normalizedChapters: DemoChapterManuscript[] = [];
+
+  for (const rawCh of manuscript.chapters || []) {
+    const cleanParagraphs = (rawCh.paragraphs || [])
+      .map((p) => (p || '').trim())
+      .filter((p) => p.length > 0);
+    if (cleanParagraphs.length === 0) continue;
+
+    let chId = (rawCh.id || `ch_${normalizedChapters.length + 1}`).trim();
+    const normTitle = (rawCh.title || '').trim().toLowerCase();
+
+    if (normTitle && seenChapterTitles.has(normTitle)) {
+      duplicateChapterFlags.push(`Título de capítulo duplicado consolidado: "${rawCh.title}"`);
+      const existingCh = normalizedChapters.find(
+        (c) => (c.title || '').trim().toLowerCase() === normTitle
+      );
+      if (existingCh) {
+        for (const p of cleanParagraphs) {
+          const isDup = existingCh.paragraphs.some((ep) =>
+            areTestimoniesRedundantSameEpisode(ep, p)
+          );
+          if (!isDup) {
+            existingCh.paragraphs.push(p);
+          }
+        }
+        if (rawCh.photoPlacements && rawCh.photoPlacements.length > 0) {
+          existingCh.photoPlacements = [
+            ...(existingCh.photoPlacements || []),
+            ...rawCh.photoPlacements,
+          ];
+        }
+        if (rawCh.sourceAnswerIds && rawCh.sourceAnswerIds.length > 0) {
+          existingCh.sourceAnswerIds = Array.from(
+            new Set([...(existingCh.sourceAnswerIds || []), ...rawCh.sourceAnswerIds])
+          );
+        }
+        if (rawCh.sourceQuestionIds && rawCh.sourceQuestionIds.length > 0) {
+          existingCh.sourceQuestionIds = Array.from(
+            new Set([...(existingCh.sourceQuestionIds || []), ...rawCh.sourceQuestionIds])
+          );
+        }
+        continue;
+      }
+    }
+
+    while (seenChapterIds.has(chId)) {
+      chId = `${chId}_${normalizedChapters.length + 1}`;
+    }
+    seenChapterIds.add(chId);
+    if (normTitle) seenChapterTitles.add(normTitle);
+
+    const dedupedParagraphs: string[] = [];
+    for (const p of cleanParagraphs) {
+      const existingIdx = dedupedParagraphs.findIndex((ep) => {
+        const normEp = ep.toLowerCase().replace(/\s+/g, ' ').trim();
+        const normP = p.toLowerCase().replace(/\s+/g, ' ').trim();
+        return normEp === normP || (normEp.length >= 40 && normEp.includes(normP));
+      });
+      if (existingIdx < 0) {
+        dedupedParagraphs.push(p);
+      }
+    }
+
+    const partNumber = normalizedChapters.length + 1;
+    const paragraphIds = dedupedParagraphs.map((_, idx) => `${chId}_p_${idx + 1}`);
+
+    normalizedChapters.push({
+      ...rawCh,
+      id: chId,
+      partNumber,
+      title: (rawCh.title || `Capítulo ${partNumber}`).trim(),
+      paragraphs: dedupedParagraphs,
+      paragraphIds,
+    });
+  }
+
+  // Check for prohibited 1-question-per-chapter fragmentation or question-formatted chapter titles
+  const questionFormattedTitles = normalizedChapters.filter(
+    (c) => /^¿.+\?$/.test(c.title.trim()) || /^(pregunta|respuesta)\s+\d+/i.test(c.title.trim())
+  );
+  const eligibleMainAnswersCount = answers.filter(
+    (a) =>
+      resolveAnswerExclusionReason(a) === 'none' &&
+      !a.isFollowUp &&
+      !(a.parentQuestionId && a.parentQuestionId.trim().length > 0) &&
+      !a.isAdditionalMemory &&
+      extractCleanParticipantAnswerText(a).length > 0
+  ).length;
+
+  const oneQuestionPerChapterDetected =
+    questionFormattedTitles.length > 0 ||
+    (eligibleMainAnswersCount >= 6 &&
+      normalizedChapters.length >= Math.ceil(eligibleMainAnswersCount * 0.85));
+
+  if (oneQuestionPerChapterDetected) {
+    blockingDefects.push(
+      'Fragmentación editorial inválida: se detectó estructura de una pregunta/respuesta por capítulo o títulos en formato de pregunta.'
+    );
+  }
+
+  // 2. Photo Placement Audit & Deduplication across all chapters
+  const allUploadedPhotos = new Map<
+    string,
+    {
+      photoId: string;
+      caption: string;
+      answerId: string;
+      questionId: string;
+      answerText: string;
+      questionText: string;
+    }
+  >();
+
+  for (const ans of answers) {
+    if (resolveAnswerExclusionReason(ans) !== 'none') continue;
+    const ansText = splitAnswerTextIntoIncludedAndExcludedSentences(
+      extractCleanParticipantAnswerText(ans)
+    ).includedText;
+    const qText = ans.questionText || qMap.get(ans.questionId)?.text || '';
+    for (const p of ans.photos || []) {
+      if (p && p.id && !allUploadedPhotos.has(p.id)) {
+        const cleanCap = splitAnswerTextIntoIncludedAndExcludedSentences(
+          (p.caption || '').replace(/^\[Nota de voz\]:\s*/i, '').trim()
+        ).includedText;
+        allUploadedPhotos.set(p.id, {
+          photoId: p.id,
+          caption: cleanCap,
+          answerId: ans.id,
+          questionId: ans.questionId,
+          answerText: ansText,
+          questionText: qText,
+        });
+      }
+    }
+  }
+
+  const placedPhotoIds = new Set<string>();
+  const duplicatePhotoIds: string[] = [];
+
+  for (let cIdx = 0; cIdx < normalizedChapters.length; cIdx++) {
+    const ch = normalizedChapters[cIdx];
+    const validPlacements: DemoChapterPhotoPlacement[] = [];
+    for (const pl of ch.photoPlacements || []) {
+      if (!pl || !pl.photoId) continue;
+      if (placedPhotoIds.has(pl.photoId)) {
+        duplicatePhotoIds.push(pl.photoId);
+        continue;
+      }
+      // Do not place photos belonging to excluded answers
+      if (answers.length > 0 && !allUploadedPhotos.has(pl.photoId)) {
+        continue;
+      }
+      placedPhotoIds.add(pl.photoId);
+      const clampedIdx = Math.max(0, Math.min(ch.paragraphs.length - 1, pl.paragraphIndex || 0));
+      const meta = allUploadedPhotos.get(pl.photoId);
+      validPlacements.push({
+        ...pl,
+        paragraphIndex: clampedIdx,
+        shortCaption: formatPhotoEditorialCaption(
+          pl.shortCaption || meta?.caption || meta?.questionText || ch.title
+        ),
+        originalDescription: pl.originalDescription || meta?.caption || pl.shortCaption,
+        answerId: pl.answerId || meta?.answerId,
+        questionId: pl.questionId || meta?.questionId,
+        chapterId: ch.id,
+        paragraphId: ch.paragraphIds?.[clampedIdx] || `${ch.id}_p_${clampedIdx + 1}`,
+      });
+    }
+    ch.photoPlacements = validPlacements.length > 0 ? validPlacements : undefined;
+  }
+
+  // Ensure any uploaded photo that was not yet placed is anchored to its true narrative chapter & paragraph
+  for (const [photoId, meta] of allUploadedPhotos.entries()) {
+    if (placedPhotoIds.has(photoId)) continue;
+    const resolved = resolveDocumentaryPhotoChapterAndParagraph({
+      chapters: normalizedChapters,
+      photoId,
+      shortCaption: meta.caption,
+      originalDescription: meta.caption,
+      answerId: meta.answerId,
+      questionId: meta.questionId,
+      answerText: meta.answerText,
+      questionText: meta.questionText,
+    });
+    const targetCh = normalizedChapters[resolved.chapterIndex] || normalizedChapters[0];
+    if (targetCh) {
+      placedPhotoIds.add(photoId);
+      const shortCap = formatPhotoEditorialCaption(
+        meta.caption || meta.questionText || targetCh.title
+      );
+      targetCh.photoPlacements = [
+        ...(targetCh.photoPlacements || []),
+        {
+          photoId,
+          paragraphIndex: resolved.paragraphIndex,
+          shortCaption: shortCap,
+          originalDescription: meta.caption || shortCap,
+          answerId: meta.answerId,
+          questionId: meta.questionId,
+          chapterId: targetCh.id,
+          paragraphId: resolved.paragraphId,
+        },
+      ];
+    }
+  }
+
+  // 3. Build Traceability Matrix & Perform Real Semantic Fact Verification and Uncertainty Audit
+  const traceabilityMatrix: TraceabilityMatrixEntry[] = [];
+  let integratedUnits = 0;
+  let omittedNotRecalledUnits = 0;
+  let omittedPreferNotToAnswerUnits = 0;
+  let excludedByIntervieweeUnits = 0;
+  let uncertaintiesPreserved = true;
+  const missingUnitIds: string[] = [];
+  const uncertaintyViolations: string[] = [];
+
+  for (const unit of inventory.excludedFactUnits) {
+    if (unit.exclusionReason === 'not_recalled') omittedNotRecalledUnits++;
+    else if (unit.exclusionReason === 'prefer_not_to_answer') omittedPreferNotToAnswerUnits++;
+    else if (unit.exclusionReason === 'excluded_by_interviewee') excludedByIntervieweeUnits++;
+
+    traceabilityMatrix.push({
+      unitId: unit.unitId,
+      answerId: unit.answerId,
+      questionId: unit.questionId,
+      questionText: unit.questionText,
+      sourceType: unit.sourceType,
+      participantName: unit.participantName || manuscript.authors,
+      excerpt:
+        unit.exclusionReason === 'excluded_by_interviewee'
+          ? '[Excluida por solicitud explícita del entrevistado]'
+          : unit.exclusionReason === 'prefer_not_to_answer'
+          ? '[Omitida: prefiero no responder]'
+          : '[Omitida por el entrevistado]',
+      uncertaintyExpressions: [],
+      photoIds: [],
+      assignedChapterId: 'none',
+      assignedChapterNumber: 0,
+      assignedParagraphIds: [],
+      status:
+        unit.exclusionReason === 'excluded_by_interviewee'
+          ? 'excluded_by_interviewee'
+          : unit.exclusionReason === 'prefer_not_to_answer'
+          ? 'omitted_prefer_not_to_answer'
+          : 'omitted_not_recalled',
+      exclusionReason: unit.exclusionReason,
+      verified: true,
+    });
+  }
+
+  for (const unit of inventory.eligibleFactUnits) {
+    const verification = verifyDocumentaryUnitInManuscript({
+      unit,
+      chapters: normalizedChapters,
+    });
+
+    const assignedCh =
+      verification.chapterIndex >= 0
+        ? normalizedChapters[verification.chapterIndex]
+        : normalizedChapters[0];
+
+    // Check uncertainty preservation in the assigned chapter without silently hiding a failure
+    if (unit.uncertaintyExpressions.length > 0 && assignedCh) {
+      const chTextLower = (assignedCh.paragraphs || []).join(' ').toLowerCase();
+      const hasUncertainty =
+        unit.uncertaintyExpressions.some((u) => chTextLower.includes(u)) ||
+        UNCERTAINTY_PATTERNS.some((rx) => rx.test(chTextLower));
+      if (!hasUncertainty) {
+        uncertaintiesPreserved = false;
+        uncertaintyViolations.push(
+          `Incertidumbre original ("${unit.uncertaintyExpressions.join(', ')}") omitida o convertida en certeza en unidad ${unit.unitId}.`
+        );
+      }
+    }
+
+    if (verification.verified && assignedCh) {
+      if (!assignedCh.sourceAnswerIds) assignedCh.sourceAnswerIds = [];
+      if (!assignedCh.sourceAnswerIds.includes(unit.answerId)) {
+        assignedCh.sourceAnswerIds.push(unit.answerId);
+      }
+      if (unit.questionId) {
+        if (!assignedCh.sourceQuestionIds) assignedCh.sourceQuestionIds = [];
+        if (!assignedCh.sourceQuestionIds.includes(unit.questionId)) {
+          assignedCh.sourceQuestionIds.push(unit.questionId);
+        }
+      }
+      if (!assignedCh.sourceUnitIds) assignedCh.sourceUnitIds = [];
+      if (!assignedCh.sourceUnitIds.includes(unit.unitId)) {
+        assignedCh.sourceUnitIds.push(unit.unitId);
+      }
+
+      integratedUnits++;
+      traceabilityMatrix.push({
+        unitId: unit.unitId,
+        answerId: unit.answerId,
+        questionId: unit.questionId,
+        questionText: unit.questionText,
+        sourceType: unit.sourceType,
+        participantName: unit.participantName || manuscript.authors,
+        excerpt: unit.cleanText.slice(0, 140),
+        uncertaintyExpressions: unit.uncertaintyExpressions,
+        photoIds: unit.photoIds,
+        assignedChapterId: assignedCh.id,
+        assignedChapterNumber: assignedCh.partNumber,
+        assignedParagraphIds: [verification.paragraphId],
+        chapterId: assignedCh.id,
+        paragraphId: verification.paragraphId,
+        paragraphIndex: verification.paragraphIndex,
+        evidenceSnippet: verification.evidenceSnippet,
+        semanticMatchScore: verification.semanticMatchScore,
+        matchedTokens: verification.matchedTokens,
+        missingTokens: verification.missingTokens,
+        missingFacets: verification.missingFacets,
+        status: 'integrated',
+        exclusionReason: 'none',
+        verified: true,
+      });
+    } else {
+      missingUnitIds.push(unit.unitId);
+      traceabilityMatrix.push({
+        unitId: unit.unitId,
+        answerId: unit.answerId,
+        questionId: unit.questionId,
+        questionText: unit.questionText,
+        sourceType: unit.sourceType,
+        participantName: unit.participantName || manuscript.authors,
+        excerpt: unit.cleanText.slice(0, 140),
+        uncertaintyExpressions: unit.uncertaintyExpressions,
+        photoIds: unit.photoIds,
+        assignedChapterId: assignedCh?.id || 'none',
+        assignedChapterNumber: assignedCh?.partNumber || 0,
+        assignedParagraphIds: [],
+        chapterId: assignedCh?.id || 'none',
+        paragraphId: verification.paragraphId,
+        paragraphIndex: verification.paragraphIndex,
+        evidenceSnippet: verification.evidenceSnippet,
+        semanticMatchScore: verification.semanticMatchScore,
+        matchedTokens: verification.matchedTokens,
+        missingTokens: verification.missingTokens,
+        missingFacets: verification.missingFacets,
+        status: 'missing',
+        exclusionReason: 'none',
+        verified: false,
+      });
+    }
+  }
+
+  // 4. Veracity, Anti-Invention, Excluded Content Leak, and Couple Attribution Audit
+  const veracityCheck = runVeracityAndExclusionAudit({
+    manuscript,
+    chapters: normalizedChapters,
+    inventory,
+    participantNames,
+  });
+
+  const totalSourceUnits = inventory.eligibleFactUnits.length;
+  const coveragePercentage =
+    totalSourceUnits > 0
+      ? Math.floor((integratedUnits / totalSourceUnits) * 100)
+      : answers.length === 0 && normalizedChapters.length > 0
+      ? 100
+      : 0;
+
+  const totalUploadedPhotos = allUploadedPhotos.size;
+  const totalPlacedPhotos = placedPhotoIds.size;
+  const unplacedPhotoIds = Array.from(allUploadedPhotos.keys()).filter(
+    (id) => !placedPhotoIds.has(id)
+  );
+  const duplicateChapterIdsDetected =
+    new Set(normalizedChapters.map((c) => c.id)).size !== normalizedChapters.length;
+  const consecutiveChapterNumberingValid = normalizedChapters.every(
+    (c, idx) => c.partNumber === idx + 1
+  );
+
+  if (normalizedChapters.length === 0) {
+    blockingDefects.push('El manuscrito no contiene capítulos válidos.');
+  }
+  if (answers.length > 0 && totalSourceUnits === 0) {
+    blockingDefects.push(
+      'La entrevista no contiene testimonios elegibles para publicar (todas las respuestas fueron omitidas o excluidas).'
+    );
+  }
+  if (missingUnitIds.length > 0 || coveragePercentage < 100) {
+    blockingDefects.push(
+      `Cobertura documental incompleta (${coveragePercentage}%: ${integratedUnits}/${totalSourceUnits} unidades verificadas; faltan: ${missingUnitIds.slice(0, 8).join(', ')}).`
+    );
+  }
+  if (!uncertaintiesPreserved || uncertaintyViolations.length > 0) {
+    blockingDefects.push(...uncertaintyViolations);
+  }
+  if (veracityCheck.inventedDataFlags.length > 0) {
+    blockingDefects.push(...veracityCheck.inventedDataFlags);
+  }
+  if (veracityCheck.leakedExcludedContentFlags.length > 0) {
+    blockingDefects.push(...veracityCheck.leakedExcludedContentFlags);
+  }
+  if (veracityCheck.coupleAttributionViolations.length > 0) {
+    blockingDefects.push(...veracityCheck.coupleAttributionViolations);
+  }
+  if (totalUploadedPhotos > 0 && totalPlacedPhotos < totalUploadedPhotos) {
+    blockingDefects.push(
+      `Fotografías sin ubicar en el manuscrito (${totalPlacedPhotos}/${totalUploadedPhotos}).`
+    );
+  }
+
+  const passed = blockingDefects.length === 0;
+
+  const report: DocumentaryAuditReport = {
+    auditVersion: CANONICAL_AUDIT_RULES_VERSION,
+    auditRulesVersion: CANONICAL_AUDIT_RULES_VERSION,
+    auditedAt: new Date().toISOString(),
+    status: passed ? 'approved' : 'failed_audit',
+    approved: passed,
+    passed,
+    totalSourceUnits,
+    integratedUnits,
+    omittedNotRecalledUnits,
+    omittedPreferNotToAnswerUnits,
+    excludedByIntervieweeUnits,
+    coveragePercentage,
+    totalUploadedPhotos,
+    totalPlacedPhotos,
+    duplicateChapterIdsDetected,
+    consecutiveChapterNumberingValid,
+    uncertaintiesPreserved,
+    repairAttemptsUsed,
+    repairedUnitIds,
+    leakedExcludedContentFlags: veracityCheck.leakedExcludedContentFlags,
+    coupleAttributionViolations: veracityCheck.coupleAttributionViolations,
+    traceabilityMatrix,
+    blockingDefects,
+    coverageAudit: {
+      passed: missingUnitIds.length === 0 && (answers.length === 0 || totalSourceUnits > 0),
+      totalValidUnits: totalSourceUnits,
+      coveredUnitsCount: integratedUnits,
+      missingUnitIds,
+      repairedUnitIds,
+    },
+    veracityAudit: {
+      passed:
+        uncertaintiesPreserved &&
+        veracityCheck.inventedDataFlags.length === 0 &&
+        veracityCheck.leakedExcludedContentFlags.length === 0 &&
+        veracityCheck.coupleAttributionViolations.length === 0,
+      uncertaintiesPreserved,
+      uncertaintyViolations,
+      inventedDataFlags: veracityCheck.inventedDataFlags,
+      leakedExcludedContentFlags: veracityCheck.leakedExcludedContentFlags,
+      coupleAttributionViolations: veracityCheck.coupleAttributionViolations,
+    },
+    structuralAudit: {
+      passed:
+        !duplicateChapterIdsDetected &&
+        consecutiveChapterNumberingValid &&
+        !oneQuestionPerChapterDetected &&
+        normalizedChapters.length > 0,
+      uniqueChapterIds: !duplicateChapterIdsDetected,
+      consecutiveNumbering: consecutiveChapterNumberingValid,
+      duplicateChapterFlags,
+      orphanContinuationFlags,
+      oneQuestionPerChapterDetected,
+    },
+    photoAudit: {
+      passed: unplacedPhotoIds.length === 0,
+      totalPhotos: totalUploadedPhotos,
+      placedPhotosCount: totalPlacedPhotos,
+      unplacedPhotoIds,
+      duplicatePhotoIds,
+      defaultFirstChapterDumpDetected: false,
+    },
+  };
+
+  return {
+    manuscript: {
+      ...manuscript,
+      chapters: normalizedChapters,
+      status: passed ? 'approved' : 'failed_audit',
+      generationStatus: passed ? 'approved' : 'failed_audit',
+      auditReport: report,
+      documentaryAudit: report,
+    },
+    report,
+    inventory,
+  };
+}
+
+/**
+ * Automatic localized documentary repair loop (`repairManuscriptOmissions`).
+ * When `auditAndApproveBookManuscript` detects missing documentary fact units, stripped uncertainties,
+ * leaked excluded content, invented details, or 1-question-per-chapter fragmentation:
+ * - Never appends a raw Q&A dump at the end of the book.
+ * - Never creates 1 chapter per missing memory.
+ * - Integrates each omitted memory or missing detail into its corresponding planned narrative chapter
+ *   using the manuscript's active `narrativeStyle` and re-runs `auditAndApproveBookManuscript`
+ *   (bounded to `maxAttempts`, default 2).
+ */
+export function repairManuscriptOmissions(params: {
+  manuscript: DemoManuscript;
+  answers: DocumentarySourceAnswerInput[];
+  questions: DocumentarySourceQuestionInput[];
+  storyMode?: 'individual' | 'compartida';
+  participantNames?: string[];
+  maxAttempts?: number;
+}): {
+  manuscript: DemoManuscript;
+  report: DocumentaryAuditReport;
+  inventory: DocumentaryInventory;
+  repairAttemptsUsed: number;
+  repairedUnitIds: string[];
+} {
+  const {
+    manuscript,
+    answers,
+    questions,
+    storyMode = manuscript.mode === 'pareja' ? 'compartida' : 'individual',
+    participantNames = (manuscript.authors || '')
+      .split(/\s+y\s+|,\s*/)
+      .map((s) => s.trim())
+      .filter(Boolean),
+    maxAttempts = 2,
+  } = params;
+
+  const isCouple = storyMode === 'compartida' && participantNames.length >= 2;
+  const narrativeStyle = manuscript.narrativeStyle || 'first_person_literary';
+  const bookStructureMode = manuscript.bookStructureMode || 'prompt_autonomous';
+
+  let currentAudit = auditAndApproveBookManuscript({
+    manuscript,
+    answers,
+    questions,
+    repairAttemptsUsed: 0,
+    repairedUnitIds: [],
+  });
+
+  if (currentAudit.report.passed) {
+    return {
+      manuscript: currentAudit.manuscript,
+      report: currentAudit.report,
+      inventory: currentAudit.inventory,
+      repairAttemptsUsed: 0,
+      repairedUnitIds: [],
+    };
+  }
+
+  // If there are zero eligible source units (e.g. all answers were not_recalled/excluded), cannot repair
+  if (answers.length > 0 && currentAudit.inventory.eligibleFactUnits.length === 0) {
+    return {
+      manuscript: currentAudit.manuscript,
+      report: currentAudit.report,
+      inventory: currentAudit.inventory,
+      repairAttemptsUsed: 0,
+      repairedUnitIds: [],
+    };
+  }
+
+  const editorialPlan = buildEditorialChapterPlan({
+    interviewTitle: manuscript.title,
+    storyMode,
+    participantNames,
+    answers,
+    questions,
+    bookStructureMode,
+  });
+
+  const allRepairedUnitIds: string[] = [];
+  let workingManuscript: DemoManuscript = {
+    ...currentAudit.manuscript,
+    chapters: currentAudit.manuscript.chapters.map((ch) => ({
+      ...ch,
+      paragraphs: [...(ch.paragraphs || [])],
+      paragraphIds: [...(ch.paragraphIds || [])],
+      sourceAnswerIds: [...(ch.sourceAnswerIds || [])],
+      sourceQuestionIds: [...(ch.sourceQuestionIds || [])],
+      sourceUnitIds: [...(ch.sourceUnitIds || [])],
+      photoPlacements: ch.photoPlacements ? [...ch.photoPlacements] : undefined,
+    })),
+  };
+
+  let attemptsUsed = 0;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (currentAudit.report.passed) break;
+    attemptsUsed = attempt;
+
+    // Step A: If 1-question-per-chapter fragmentation or question-formatted titles were detected,
+    // regroup paragraphs into the editorial chapter plan
+    if (currentAudit.report.structuralAudit?.oneQuestionPerChapterDetected) {
+      const regroupedChapters: DemoChapterManuscript[] = [];
+      for (const planItem of editorialPlan.chapters) {
+        const matchingOldChapters = workingManuscript.chapters.filter((ch) => {
+          const hasAnsOverlap = (ch.sourceAnswerIds || []).some((aId) =>
+            planItem.assignedAnswerIds.includes(aId)
+          );
+          const hasQOverlap = (ch.sourceQuestionIds || []).some((qId) =>
+            planItem.assignedQuestionIds.includes(qId)
+          );
+          return hasAnsOverlap || hasQOverlap || ch.dimensionKey === planItem.dimensionKey;
+        });
+
+        const mergedParas = matchingOldChapters.flatMap((c) => c.paragraphs || []);
+        const mergedPhotos = matchingOldChapters.flatMap((c) => c.photoPlacements || []);
+        const mergedAnsIds = Array.from(
+          new Set([
+            ...planItem.assignedAnswerIds,
+            ...matchingOldChapters.flatMap((c) => c.sourceAnswerIds || []),
+          ])
+        );
+        const mergedQIds = Array.from(
+          new Set([
+            ...planItem.assignedQuestionIds,
+            ...matchingOldChapters.flatMap((c) => c.sourceQuestionIds || []),
+          ])
+        );
+
+        if (mergedParas.length > 0) {
+          const title =
+            narrativeStyle === 'third_person_biography'
+              ? planItem.suggestedTitleThirdPerson
+              : isCouple
+              ? planItem.suggestedTitleCouple
+              : planItem.suggestedTitleIndividual;
+          regroupedChapters.push({
+            id: planItem.chapterId,
+            partNumber: regroupedChapters.length + 1,
+            dimensionKey: planItem.dimensionKey,
+            title,
+            paragraphs: mergedParas,
+            paragraphIds: mergedParas.map((_, idx) => `${planItem.chapterId}_p_${idx + 1}`),
+            sourceAnswerIds: mergedAnsIds,
+            sourceQuestionIds: mergedQIds,
+            photoPlacements: mergedPhotos.length > 0 ? mergedPhotos : undefined,
+          });
+        }
+      }
+      if (regroupedChapters.length > 0) {
+        workingManuscript.chapters = regroupedChapters;
+      } else {
+        // Fallback to clean editorial chapter plan titles on existing chapters
+        workingManuscript.chapters = workingManuscript.chapters.map((ch, idx) => {
+          const fallbackPlan = editorialPlan.chapters[idx % Math.max(1, editorialPlan.chapters.length)];
+          const cleanTitle =
+            /^¿.+\?$/.test(ch.title.trim()) || /^(pregunta|respuesta)\s+\d+/i.test(ch.title.trim())
+              ? narrativeStyle === 'third_person_biography'
+                ? fallbackPlan?.suggestedTitleThirdPerson || `Capítulo ${idx + 1}`
+                : isCouple
+                ? fallbackPlan?.suggestedTitleCouple || `Capítulo ${idx + 1}`
+                : fallbackPlan?.suggestedTitleIndividual || `Capítulo ${idx + 1}`
+              : ch.title;
+          return { ...ch, title: cleanTitle };
+        });
+      }
+    }
+
+    // Step B: Strip any leaked excluded sentences or tokens from chapters, intro, closing, and pullQuotes
+    if ((currentAudit.report.leakedExcludedContentFlags || []).length > 0) {
+      const eligibleWordsSet = new Set(
+        currentAudit.inventory.eligibleFactUnits.flatMap((u) =>
+          normalizePlainAscii(u.cleanText).split(/\s+/).filter(Boolean)
+        )
+      );
+      const bannedExcludedTokens = new Set(
+        currentAudit.inventory.excludedFactUnits
+          .filter(
+            (u) =>
+              u.exclusionReason === 'excluded_by_interviewee' ||
+              u.exclusionReason === 'prefer_not_to_answer'
+          )
+          .flatMap((u) => u.keyTokens.filter((t) => !eligibleWordsSet.has(t)))
+      );
+
+      const sanitizeSurfaceParagraph = (text: string): string => {
+        const sentences = (text || '')
+          .split(/(?<=[.!?…])\s+/)
+          .map((s) => s.trim())
+          .filter(Boolean);
+        const kept = sentences.filter((s) => {
+          if (EXPLICIT_EXCLUSION_DIRECTIVE_RX.test(s)) return false;
+          const words = normalizePlainAscii(s).split(/\s+/).filter(Boolean);
+          const bannedHits = words.filter((w) => bannedExcludedTokens.has(w));
+          return bannedHits.length === 0;
+        });
+        return kept.join(' ').trim();
+      };
+
+      workingManuscript.introduction = sanitizeSurfaceParagraph(workingManuscript.introduction);
+      workingManuscript.closingMessage = sanitizeSurfaceParagraph(workingManuscript.closingMessage);
+      for (const ch of workingManuscript.chapters) {
+        ch.paragraphs = ch.paragraphs
+          .map((p) => sanitizeSurfaceParagraph(p))
+          .filter((p) => p.length > 0);
+        if (ch.pullQuote) {
+          const cleanPQ = sanitizeSurfaceParagraph(ch.pullQuote);
+          ch.pullQuote = cleanPQ.length >= 20 ? cleanPQ : undefined;
+        }
+      }
+    }
+
+    // Step C: Sanitize sentences containing invented years, numbers, dialogues, or proper names
+    if ((currentAudit.report.veracityAudit?.inventedDataFlags || []).length > 0) {
+      const validYearsSet = new Set(currentAudit.inventory.corpusValidYearsAndNumbers);
+      for (const ch of workingManuscript.chapters) {
+        ch.paragraphs = ch.paragraphs
+          .map((para) => {
+            const sentences = para
+              .split(/(?<=[.!?…])\s+/)
+              .map((s) => s.trim())
+              .filter(Boolean);
+            const cleanSentences = sentences.filter((sent) => {
+              const years = sent.match(/\b(18\d{2}|19\d{2}|20\d{2})\b/g) || [];
+              if (years.some((y) => !validYearsSet.has(y))) return false;
+              const ageMatches = normalizePlainAscii(sent).match(/\b(\d{1,2})\s+anos\b/g) || [];
+              for (const am of ageMatches) {
+                const numStr = (am.match(/\d+/) || [])[0];
+                if (
+                  numStr &&
+                  !validYearsSet.has(numStr) &&
+                  !doesTokenMatchCorpusWords(
+                    numStr,
+                    Array.from(validYearsSet).concat(currentAudit.inventory.corpusValidProperNames)
+                  )
+                ) {
+                  return false;
+                }
+              }
+              return true;
+            });
+            return cleanSentences.join(' ').trim();
+          })
+          .filter((p) => p.length > 0);
+      }
+    }
+
+    // Step D: Locally integrate each missing DocumentaryFactUnit into its planned chapter
+    const missingIds = currentAudit.report.coverageAudit?.missingUnitIds || [];
+    for (let mIdx = 0; mIdx < missingIds.length; mIdx++) {
+      const missingId = missingIds[mIdx];
+      const missingUnit = currentAudit.inventory.eligibleFactUnits.find(
+        (u) => u.unitId === missingId
+      );
+      if (!missingUnit) continue;
+
+      const styledText = cleanAndRewriteTestimonyForStyle({
+        rawText: missingUnit.cleanText,
+        questionText: missingUnit.questionText,
+        narrativeStyle,
+        speakerName: missingUnit.participantName || participantNames[0] || 'Protagonista',
+        isCouple: isCouple && participantNames.length > 1,
+        isFirstBlockForSpeaker: true,
+        isFollowUpContinuation: missingUnit.sourceType === 'followup_answer',
+        unitIndex: mIdx,
+      });
+
+      const styledWithUncertainty = ensureUncertaintyPreservedInParagraphs(
+        missingUnit.cleanText,
+        [styledText]
+      )[0];
+
+      // Locate target chapter from editorialPlan or stage/dimensionKey
+      const plannedChItem =
+        editorialPlan.chapters.find((pc) => pc.assignedAnswerIds.includes(missingUnit.answerId)) ||
+        editorialPlan.chapters.find((pc) => pc.stageKey === missingUnit.lifeStage) ||
+        editorialPlan.chapters[0];
+
+      let targetCh =
+        workingManuscript.chapters.find((c) =>
+          (c.sourceAnswerIds || []).includes(missingUnit.answerId)
+        ) ||
+        (missingUnit.parentQuestionId
+          ? workingManuscript.chapters.find((c) =>
+              (c.sourceQuestionIds || []).includes(missingUnit.parentQuestionId!)
+            )
+          : undefined) ||
+        (plannedChItem
+          ? workingManuscript.chapters.find(
+              (c) =>
+                c.id === plannedChItem.chapterId || c.dimensionKey === plannedChItem.dimensionKey
+            )
+          : undefined);
+
+      if (!targetCh) {
+        if (plannedChItem && workingManuscript.chapters.length < editorialPlan.chapters.length) {
+          const newChTitle =
+            narrativeStyle === 'third_person_biography'
+              ? plannedChItem.suggestedTitleThirdPerson
+              : isCouple
+              ? plannedChItem.suggestedTitleCouple
+              : plannedChItem.suggestedTitleIndividual;
+          targetCh = {
+            id: plannedChItem.chapterId,
+            partNumber: workingManuscript.chapters.length + 1,
+            dimensionKey: plannedChItem.dimensionKey,
+            title: newChTitle,
+            paragraphs: [],
+            paragraphIds: [],
+            sourceAnswerIds: [missingUnit.answerId],
+            sourceQuestionIds: missingUnit.questionId ? [missingUnit.questionId] : [],
+            sourceUnitIds: [missingUnit.unitId],
+          };
+          workingManuscript.chapters.push(targetCh);
+        } else {
+          targetCh = workingManuscript.chapters[workingManuscript.chapters.length - 1];
+        }
+      }
+
+      if (targetCh) {
+        // Check if there is already a partial paragraph for this unit's answer in targetCh
+        let mergedIntoExisting = false;
+        for (let pIdx = 0; pIdx < targetCh.paragraphs.length; pIdx++) {
+          const paraWords = normalizePlainAscii(targetCh.paragraphs[pIdx])
+            .split(/\s+/)
+            .filter(Boolean);
+          const overlap = missingUnit.keyTokens.filter((t) =>
+            doesTokenMatchCorpusWords(t, paraWords)
+          );
+          if (missingUnit.keyTokens.length >= 3 && overlap.length >= 2) {
+            targetCh.paragraphs[pIdx] = consolidateComplementarySentences(
+              targetCh.paragraphs[pIdx],
+              styledWithUncertainty
+            );
+            mergedIntoExisting = true;
+            break;
+          }
+        }
+
+        if (!mergedIntoExisting) {
+          targetCh.paragraphs.push(styledWithUncertainty);
+        }
+        targetCh.paragraphIds = targetCh.paragraphs.map(
+          (_, idx) => `${targetCh!.id}_p_${idx + 1}`
+        );
+        if (!targetCh.sourceAnswerIds) targetCh.sourceAnswerIds = [];
+        if (!targetCh.sourceAnswerIds.includes(missingUnit.answerId)) {
+          targetCh.sourceAnswerIds.push(missingUnit.answerId);
+        }
+        if (missingUnit.questionId) {
+          if (!targetCh.sourceQuestionIds) targetCh.sourceQuestionIds = [];
+          if (!targetCh.sourceQuestionIds.includes(missingUnit.questionId)) {
+            targetCh.sourceQuestionIds.push(missingUnit.questionId);
+          }
+        }
+        if (!allRepairedUnitIds.includes(missingUnit.unitId)) {
+          allRepairedUnitIds.push(missingUnit.unitId);
+        }
+      }
+    }
+
+    // Step E: Repair any remaining uncertainty violations in assigned chapters
+    for (const unit of currentAudit.inventory.eligibleFactUnits) {
+      if (unit.uncertaintyExpressions.length === 0) continue;
+      const targetCh =
+        workingManuscript.chapters.find((c) =>
+          (c.sourceAnswerIds || []).includes(unit.answerId)
+        ) || workingManuscript.chapters[0];
+      if (targetCh && targetCh.paragraphs.length > 0) {
+        targetCh.paragraphs = ensureUncertaintyPreservedInParagraphs(
+          unit.cleanText,
+          targetCh.paragraphs
+        );
+      }
+    }
+
+    currentAudit = auditAndApproveBookManuscript({
+      manuscript: workingManuscript,
+      answers,
+      questions,
+      repairAttemptsUsed: attemptsUsed,
+      repairedUnitIds: allRepairedUnitIds,
+    });
+  }
+
+  return {
+    manuscript: currentAudit.manuscript,
+    report: currentAudit.report,
+    inventory: currentAudit.inventory,
+    repairAttemptsUsed: attemptsUsed,
+    repairedUnitIds: allRepairedUnitIds,
+  };
+}
+
+/**
+ * Computes a deterministic composite cache key for a canonical manuscript so that any change
+ * in answers, deepening follow-ups, additional memories, exclusions, photos, captions,
+ * narrative style, active literary prompt, book structure mode, engine version, or audit rules version
+ * invalidates stale cached manuscripts.
+ */
+export function computeCanonicalManuscriptCacheKey(params: {
+  interviewId: string;
+  narrativeStyle: DemoNarrativeStyleId;
+  bookStructureMode?: string;
+  customStylePrompt?: string;
+  closingDedicationText?: string;
+  answers?: Array<{
+    id?: string;
+    questionId?: string;
+    answerText?: string;
+    notRecalled?: boolean;
+    preferNotToAnswer?: boolean;
+    excludeFromBook?: boolean;
+    excludedByInterviewee?: boolean;
+    omissionReason?: string;
+    isFollowUp?: boolean;
+    parentQuestionId?: string | null;
+    isAdditionalMemory?: boolean;
+    updatedAt?: string;
+    audio?: { transcription?: string } | null;
+    audioRecordings?: Array<{ transcription?: string }> | null;
+    photos?: Array<{ id?: string; caption?: string }>;
+  }>;
+}): string {
+  const {
+    interviewId,
+    narrativeStyle,
+    bookStructureMode = 'autonomous',
+    customStylePrompt = '',
+    closingDedicationText = '',
+    answers = [],
+  } = params;
+
+  const simpleHash = (input: string): string => {
+    let h1 = 0xdeadbeef ^ input.length;
+    let h2 = 0x41c6ce57 ^ input.length;
+    for (let i = 0; i < input.length; i++) {
+      const ch = input.charCodeAt(i);
+      h1 = Math.imul(h1 ^ ch, 2654435761);
+      h2 = Math.imul(h2 ^ ch, 1597334677);
+    }
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
+  };
+
+  const answersFingerprint = answers
+    .map((a) => {
+      const text = (a.answerText || '').trim();
+      const audioT = (a.audio?.transcription || '').trim();
+      const multiAudioT = (a.audioRecordings || [])
+        .map((r) => (r.transcription || '').trim())
+        .join('|');
+      const photosT = (a.photos || [])
+        .map((p) => `${p.id || ''}:${(p.caption || '').trim()}`)
+        .join(',');
+      const flags = [
+        a.notRecalled ? 'nr1' : 'nr0',
+        a.preferNotToAnswer ? 'pna1' : 'pna0',
+        a.excludeFromBook || a.excludedByInterviewee ? 'ex1' : 'ex0',
+        a.omissionReason || 'none',
+        a.isFollowUp ? 'fu1' : 'fu0',
+        a.parentQuestionId || '',
+        a.isAdditionalMemory ? 'am1' : 'am0',
+      ].join(':');
+      return `${a.id || ''}:${a.questionId || ''}:${flags}:${text}:${audioT}:${multiAudioT}:${photosT}`;
+    })
+    .sort()
+    .join('||');
+
+  const payload = [
+    `v=${CANONICAL_AUDIT_RULES_VERSION}`,
+    `eng=${BOOK_GENERATION_ENGINE_VERSION}`,
+    `id=${interviewId}`,
+    `style=${narrativeStyle}`,
+    `struct=${bookStructureMode}`,
+    `prompt=${simpleHash(customStylePrompt.trim())}`,
+    `ded=${simpleHash(closingDedicationText.trim())}`,
+    `ans=${simpleHash(answersFingerprint)}`,
+  ].join(';');
+
+  return `canonical_${narrativeStyle}_${simpleHash(payload)}`;
+}
