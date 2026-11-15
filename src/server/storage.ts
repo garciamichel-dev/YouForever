@@ -65,6 +65,7 @@ import {
   validateCompilationPdfRecord,
 } from '../logic/miEsenciaRules.ts';
 import {
+  BookFailureCategory,
   BookGenerationReasonCode,
   ComposedChapterSectionBlock,
   DemoEditorialConfig,
@@ -73,6 +74,7 @@ import {
   DemoNarrativeStyleId,
   ParticipantBookVersionRecord,
   auditAndApproveBookManuscript,
+  buildIncompleteDraftUserNotice,
   buildSafeDemoPdfFilename,
   buildParticipantInitialManuscriptFromAnswers,
   composeBookPages,
@@ -115,8 +117,14 @@ import {
   AudioQualityStatus,
   BookBatchCheckpointPayload,
   BookGenerationProgressEvent,
+  auditWithHybridSemantics,
   classifyBookFailureReasonCode,
 } from './geminiService.ts';
+import {
+  computeBookSourceFingerprint,
+  issueBookApprovalEvidence,
+  verifyBookApprovalEvidence,
+} from './bookApproval.ts';
 import {
   bookJobManager,
   BookGenerationJobRecord,
@@ -5028,6 +5036,104 @@ class StorageManager {
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   }
 
+  /**
+   * V5.1 — Single resolver of the testimony a book is generated from, audited against and
+   * fingerprinted with. Photo captions fall back to the stored photo record exactly as generation
+   * always did; `includePhotoData` only controls whether image bytes are attached (needed to
+   * write the book, irrelevant to auditing or fingerprinting it).
+   */
+  private resolveBookSourceAnswers(
+    interviewId: string,
+    options: { includePhotoData: boolean }
+  ): AnswerRecord[] {
+    return this.getAnswersForInterview(interviewId).map((a) => {
+      const mergedPhotoIds = new Set<string>();
+      const mergedPhotos: any[] = [];
+      for (const p of a.photos || []) {
+        if (!p || !p.id || mergedPhotoIds.has(p.id)) continue;
+        mergedPhotoIds.add(p.id);
+        const fullPhoto = this.photos.get(p.id);
+        const merged: any = {
+          ...p,
+          caption: p.caption || fullPhoto?.caption || '',
+        };
+        if (options.includePhotoData) {
+          const bufObj =
+            !fullPhoto?.dataUrl || fullPhoto.dataUrl.startsWith('data:image/svg')
+              ? this.getPhotoBuffer(p.id)
+              : null;
+          merged.dataUrl = bufObj
+            ? `data:${bufObj.mimeType};base64,${bufObj.buffer.toString('base64')}`
+            : fullPhoto?.dataUrl || (p as any).dataUrl || p.imageUrl || `/api/photos/${p.id}`;
+        }
+        mergedPhotos.push(merged);
+      }
+      return {
+        ...a,
+        photos: mergedPhotos,
+      };
+    });
+  }
+
+  /**
+   * V5.1 — Everything that defines "the correct book" for an interview and style right now:
+   * testimony, questions, active literary prompt, structure mode, closing text, AI settings and
+   * the cryptographic fingerprint of all of it.
+   */
+  private resolveParticipantBookAuditContext(
+    interview: InterviewRecord,
+    narrativeStyle: DemoNarrativeStyleId
+  ): {
+    answers: AnswerRecord[];
+    questions: QuestionRecord[];
+    closingPageText: string;
+    literaryPromptText: string;
+    bookStructureMode: BookStructureMode;
+    configuredProvider: BookAiProvider;
+    primaryModel: string;
+    alternateProvider: BookAiProvider;
+    alternateModel: string;
+    sourceFingerprint: string;
+  } {
+    const answers = this.resolveBookSourceAnswers(interview.id, { includePhotoData: false });
+    const questions = this.getQuestionsForVersion(interview.questionnaireVersionId);
+    const closingPageText = (interview.participantClosingText || '').trim();
+    const stylePromptConfig = this.config.literaryPrompts?.[narrativeStyle];
+    const literaryPromptText =
+      stylePromptConfig?.promptText && stylePromptConfig.promptText.trim().length > 0
+        ? stylePromptConfig.promptText.trim()
+        : DEFAULT_LITERARY_PROMPTS_TEXT[narrativeStyle];
+    const bookStructureMode: BookStructureMode =
+      this.config.bookStructureMode === 'fixed_five_stages'
+        ? 'fixed_five_stages'
+        : 'prompt_autonomous';
+    const configuredProvider: BookAiProvider =
+      this.config.bookAiProvider === 'openai' ? 'openai' : 'gemini';
+    const geminiModel = this.config.bookAiGeminiModel || 'gemini-3-flash-preview';
+    const openaiModel = this.config.bookAiOpenAiModel || 'gpt-4o';
+    const alternateProvider: BookAiProvider = configuredProvider === 'openai' ? 'gemini' : 'openai';
+    return {
+      answers,
+      questions,
+      closingPageText,
+      literaryPromptText,
+      bookStructureMode,
+      configuredProvider,
+      primaryModel: configuredProvider === 'openai' ? openaiModel : geminiModel,
+      alternateProvider,
+      alternateModel: alternateProvider === 'openai' ? openaiModel : geminiModel,
+      sourceFingerprint: computeBookSourceFingerprint({
+        interviewId: interview.id,
+        narrativeStyle,
+        bookStructureMode,
+        literaryPromptText,
+        closingDedicationText: closingPageText,
+        answers,
+        questions,
+      }),
+    };
+  }
+
   public async generateParticipantBookManuscript(params: {
     plainToken: string;
     narrativeStyle: DemoNarrativeStyleId;
@@ -5055,6 +5161,9 @@ class StorageManager {
     activePromptVersionId?: string;
     internalReasonCode?: BookGenerationReasonCode;
     diagnosticSummary?: string;
+    failureCategory?: BookFailureCategory;
+    sourceFingerprint?: string;
+    invalidatedBatchIndexes?: number[];
     batchesCompleted?: number;
     totalBatches?: number;
   }> {
@@ -5071,30 +5180,9 @@ class StorageManager {
     );
     const interviewPhotos = this.getPhotosForInterview(interview.id);
 
-    const answers = this.getAnswersForInterview(interview.id).map((a) => {
-      const mergedPhotoIds = new Set<string>();
-      const mergedPhotos: any[] = [];
-      for (const p of a.photos || []) {
-        if (!p || !p.id || mergedPhotoIds.has(p.id)) continue;
-        mergedPhotoIds.add(p.id);
-        const fullPhoto = this.photos.get(p.id);
-        const bufObj = (!fullPhoto?.dataUrl || fullPhoto.dataUrl.startsWith('data:image/svg'))
-          ? this.getPhotoBuffer(p.id)
-          : null;
-        const resolvedDataUrl = bufObj
-          ? `data:${bufObj.mimeType};base64,${bufObj.buffer.toString('base64')}`
-          : fullPhoto?.dataUrl || (p as any).dataUrl || p.imageUrl || `/api/photos/${p.id}`;
-        mergedPhotos.push({
-          ...p,
-          caption: p.caption || fullPhoto?.caption || '',
-          dataUrl: resolvedDataUrl,
-        });
-      }
-      return {
-        ...a,
-        photos: mergedPhotos,
-      };
-    });
+    // V5.1: generation, job fingerprinting and saving all read the interview through the same
+    // resolver, so the three of them audit and fingerprint exactly the same testimony.
+    const answers = this.resolveBookSourceAnswers(interview.id, { includePhotoData: true });
 
     const questions = this.getQuestionsForVersion(interview.questionnaireVersionId);
     const closingPageText = (interview.participantClosingText || '').trim();
@@ -5192,6 +5280,12 @@ class StorageManager {
         totalBatches: result.totalBatches ?? null,
         internalReasonCode: reasonCode,
         diagnosticSummary,
+        failureCategory: result.failureCategory || null,
+        auditPolicy: result.manuscript?.documentaryAudit?.auditPolicy || null,
+        judgeResolvedUnits:
+          result.manuscript?.documentaryAudit?.semanticAudit?.judgeResolvedUnitIds?.length ?? null,
+        approvalEvidenceIssued: Boolean(result.manuscript?.approvalEvidence),
+        invalidatedBatches: result.invalidatedBatchIndexes?.length ?? 0,
       }
     );
 
@@ -5222,6 +5316,9 @@ class StorageManager {
       activePromptVersionId: activeStylePromptConfig?.activeVersionId || 'default',
       internalReasonCode: reasonCode || undefined,
       diagnosticSummary: diagnosticSummary || undefined,
+      failureCategory: result.failureCategory || result.manuscript?.failureCategory,
+      sourceFingerprint: result.sourceFingerprint,
+      invalidatedBatchIndexes: result.invalidatedBatchIndexes,
       batchesCompleted: result.batchesCompleted,
       totalBatches: result.totalBatches,
     };
@@ -5245,12 +5342,17 @@ class StorageManager {
     const selectedStyle: DemoNarrativeStyleId = params.narrativeStyle || 'first_person_literary';
     const scope: 'preview' | 'full' = params.scope === 'preview' ? 'preview' : 'full';
 
+    // V5.1: the job is bound to the exact testimony and configuration it will work on. A running
+    // job or saved batches from different answers, style, prompt or settings are never reused.
+    const { sourceFingerprint } = this.resolveParticipantBookAuditContext(interview, selectedStyle);
+
     return bookJobManager.startOrResumeJob({
       interviewId: interview.id,
       participantId: participant.id,
       narrativeStyle: selectedStyle,
       scope,
       forceRefresh: Boolean(params.forceRefresh),
+      sourceFingerprint,
       executor: async (hooks) => {
         return this.generateParticipantBookManuscript({
           plainToken: params.plainToken,
@@ -5301,10 +5403,22 @@ class StorageManager {
       }
       return job;
     }
+    // V5.1: a finished or interrupted job is only offered while it still corresponds to the
+    // interview as it is now; jobs built from answers that were edited afterwards are ignored.
+    const fingerprintByStyle = new Map<DemoNarrativeStyleId, string>();
     return bookJobManager.findLatestJobForInterview({
       interviewId: interview.id,
       narrativeStyle: params.narrativeStyle,
       scope: params.scope,
+      resolveCurrentSourceFingerprint: (job) => {
+        if (!fingerprintByStyle.has(job.narrativeStyle)) {
+          fingerprintByStyle.set(
+            job.narrativeStyle,
+            this.resolveParticipantBookAuditContext(interview, job.narrativeStyle).sourceFingerprint
+          );
+        }
+        return fingerprintByStyle.get(job.narrativeStyle);
+      },
     });
   }
 
@@ -5381,46 +5495,117 @@ class StorageManager {
         );
       }
 
-      const questionsList = Array.from(this.questions.values());
       const participants = Array.from(this.participants.values()).filter(
         (p) => p.interviewId === interview.id
       );
       const isCouple = interview.storyMode === 'compartida' && participants.length >= 2;
 
-      // Strip any client-side forged approval status and perform mandatory server-side Dual Audit (Documentary + Editorial)
-      const candidateForServerAudit: DemoManuscript = {
+      // V5.1 — UNIFIED APPROVAL POLICY.
+      // Generation and saving used to approve with two different rule sets (hybrid vs.
+      // deterministic-only), so a book approved a minute earlier could be rejected here. Saving
+      // now accepts a manuscript through exactly one of two equivalent doors, both server-side:
+      //   (a) the approval evidence signed by this server when the hybrid audit approved this very
+      //       text for the testimony as it is right now; or
+      //   (b) when there is no valid evidence (older manuscript, server key rotated, edited text),
+      //       the SAME hybrid audit used during generation, run again here.
+      // Nothing the browser declares (status flags, audit reports) is trusted in either door.
+      const saveStyle: DemoNarrativeStyleId = params.narrativeStyle || 'first_person_literary';
+      const auditContext = this.resolveParticipantBookAuditContext(interview, saveStyle);
+      const candidateForSave: DemoManuscript = {
         ...params.manuscript,
-        generationStatus: 'generated',
+        narrativeStyle: params.manuscript.narrativeStyle || saveStyle,
       };
 
-      const auditedForSave = auditAndApproveBookManuscript({
-        manuscript: candidateForServerAudit,
-        answers,
-        questions: questionsList,
+      const evidenceCheck = verifyBookApprovalEvidence({
+        manuscript: candidateForSave,
+        interviewId: interview.id,
+        narrativeStyle: saveStyle,
+        currentSourceFingerprint: auditContext.sourceFingerprint,
       });
 
-      if (!auditedForSave.report.passed || !auditedForSave.editorialAudit.passed) {
-        const blockDiag = classifyBookFailureReasonCode({
-          report: auditedForSave.report,
-          editorialAudit: auditedForSave.editorialAudit,
-          repairPassesAttempted: auditedForSave.report.repairAttemptsUsed || 0,
+      let approvedManuscriptForSave: DemoManuscript;
+      let approvalPath: 'signed_evidence' | 'hybrid_reaudit';
+
+      if (evidenceCheck.valid) {
+        approvalPath = 'signed_evidence';
+        approvedManuscriptForSave = {
+          ...candidateForSave,
+          generationStatus: 'approved',
+          status: 'approved',
+        };
+      } else {
+        approvalPath = 'hybrid_reaudit';
+        const hybridSaveAudit = await auditWithHybridSemantics({
+          manuscript: {
+            ...candidateForSave,
+            generationStatus: 'generated',
+            status: 'generated',
+            approvalEvidence: undefined,
+          },
+          answers: auditContext.answers,
+          questions: auditContext.questions,
+          provider: auditContext.configuredProvider,
+          model: auditContext.primaryModel,
+          alternateProvider: auditContext.alternateProvider,
+          alternateModel: auditContext.alternateModel,
         });
-        await this.addAuditLog(
-          'SAVE_BOOK_VERSION_BLOCKED',
-          'interview',
-          interview.id,
-          participant.name || interview.title,
-          {
-            narrativeStyle: params.narrativeStyle,
-            internalReasonCode: blockDiag.code,
-            diagnosticSummary: blockDiag.summary,
-            coveragePercentage: auditedForSave.report.coveragePercentage,
-          }
-        );
-        throw new Error(
-          'Tu manuscrito todavía tiene detalles pendientes de revisión para quedar completo. Por favor presiona nuevamente el botón para volver a intentarlo antes de guardarlo como versión final.'
-        );
+
+        if (!hybridSaveAudit.report.passed || !hybridSaveAudit.editorialAudit.passed) {
+          const classified = classifyBookFailureReasonCode({
+            report: hybridSaveAudit.report,
+            editorialAudit: hybridSaveAudit.editorialAudit,
+            repairPassesAttempted: hybridSaveAudit.report.repairAttemptsUsed || 0,
+          });
+          // The testimony changed after this manuscript was approved: say so precisely instead of
+          // reporting the resulting coverage gap as if the book had been written incorrectly.
+          const blockDiag =
+            evidenceCheck.reason === 'source_changed' && classified.category !== 'technical'
+              ? {
+                  code: 'SOURCE_CHANGED_SINCE_APPROVAL' as BookGenerationReasonCode,
+                  category: 'source_changed' as const,
+                  summary: `Las respuestas o la configuración cambiaron después de aprobar el manuscrito. ${classified.summary}`,
+                }
+              : classified;
+          await this.addAuditLog(
+            'SAVE_BOOK_VERSION_BLOCKED',
+            'interview',
+            interview.id,
+            participant.name || interview.title,
+            {
+              narrativeStyle: saveStyle,
+              approvalPath,
+              evidenceStatus: evidenceCheck.reason || 'valid',
+              failureCategory: blockDiag.category,
+              internalReasonCode: blockDiag.code,
+              diagnosticSummary: blockDiag.summary,
+              coveragePercentage: hybridSaveAudit.report.coveragePercentage,
+            }
+          );
+          throw new Error(
+            blockDiag.category === 'technical'
+              ? 'No pudimos completar la verificación final de tu libro por un inconveniente técnico temporal. Tu libro no se perdió: vuelve a presionar el botón en unos momentos para guardarlo.'
+              : buildIncompleteDraftUserNotice(blockDiag.category)
+          );
+        }
+
+        const reauditedApproved: DemoManuscript = {
+          ...hybridSaveAudit.manuscript,
+          generationStatus: 'approved',
+          status: 'approved',
+        };
+        approvedManuscriptForSave = {
+          ...reauditedApproved,
+          approvalEvidence: issueBookApprovalEvidence({
+            interviewId: interview.id,
+            manuscript: reauditedApproved,
+            sourceFingerprint: auditContext.sourceFingerprint,
+            report: hybridSaveAudit.report,
+            editorialAuditPassed: hybridSaveAudit.editorialAudit.passed,
+          }),
+        };
       }
+
+      const auditedForSave = { manuscript: approvedManuscriptForSave };
 
       const maxExistingVersion = existingVersions.reduce(
         (max, v) => (v.versionNumber > max ? v.versionNumber : max),
@@ -5498,6 +5683,10 @@ class StorageManager {
         interviewId: interview.id,
         versionNumber,
         narrativeStyle: params.narrativeStyle,
+        approvalPath,
+        approvalEvidenceIssuedAt: approvedManuscriptForSave.approvalEvidence?.issuedAt || null,
+        manuscriptContentHash:
+          approvedManuscriptForSave.approvalEvidence?.manuscriptContentHash || null,
         coverDesignId: params.editorialConfig.coverDesignId,
         interiorStyleId: params.editorialConfig.interiorStyleId,
         bookFormatId: params.editorialConfig.bookFormatId,

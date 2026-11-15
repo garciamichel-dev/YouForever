@@ -19,7 +19,15 @@ import {
   MiEsenciaArchivedCompilationPdf,
 } from '../logic/miEsenciaRules.ts';
 import {
+  computeBookSourceFingerprint,
+  issueBookApprovalEvidence,
+  verifyBookApprovalEvidence,
+} from './bookApproval.ts';
+import {
+  BookFailureCategory,
   BookGenerationReasonCode,
+  buildIncompleteDraftUserNotice,
+  resolveBookFailureCategory,
   BOOK_GENERATION_ENGINE_VERSION,
   CANONICAL_AUDIT_RULES_VERSION,
   ComposedChapterSectionBlock,
@@ -91,6 +99,11 @@ export interface BookBatchCheckpointPayload {
   parsed: any;
   respondedModel: string;
   cachedTokens?: number;
+  /**
+   * V5.1: fingerprint of the sources/configuration this batch was drafted from. A checkpoint is
+   * only reused when it matches the fingerprint of the generation that wants to resume from it.
+   */
+  sourceFingerprint?: string;
 }
 
 export interface ManuscriptDraftResult {
@@ -113,9 +126,6 @@ export interface ManuscriptDraftResult {
   documentaryAudit?: DocumentaryAuditReport;
   editorialAudit?: EditorialQualityAuditReport;
 }
-
-const PLAIN_INCOMPLETE_DRAFT_USER_NOTICE =
-  'Este borrador preliminar todavía necesita una revisión para reunir todos tus recuerdos con total fidelidad y fluidez. Puedes leerlo ahora y volver a intentarlo cuando lo desees; no se guardará como versión definitiva hasta quedar completo.';
 
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY,
@@ -1000,6 +1010,7 @@ DIRECTRICES PARA LA CREACIÓN DEL LIBRO COMPLETO DE HISTORIA Y LEGADO:
     }
 
     if (!audited.report.passed || !audited.editorialAudit.passed) {
+      // V5.1: hygiene only (no mechanical pasting of testimony) and judged by the hybrid policy.
       const hygieneRepaired = repairManuscriptOmissions({
         manuscript: audited.manuscript,
         answers,
@@ -1007,25 +1018,27 @@ DIRECTRICES PARA LA CREACIÓN DEL LIBRO COMPLETO DE HISTORIA Y LEGADO:
         storyMode: interview.storyMode,
         participantNames,
         maxAttempts: 2,
+        integrateMissingUnits: false,
+      });
+      const hygieneAudited = await auditWithHybridSemantics({
+        manuscript: hygieneRepaired.manuscript,
+        answers,
+        questions,
+        provider: configuredProvider,
+        model: primaryAdminModel,
+        alternateProvider,
+        alternateModel,
       });
       const preScore = computeManuscriptDefectScore(audited.report, audited.editorialAudit);
       const hygieneScore = computeManuscriptDefectScore(
-        hygieneRepaired.report,
-        hygieneRepaired.editorialAudit
+        hygieneAudited.report,
+        hygieneAudited.editorialAudit
       );
       if (
         hygieneScore < preScore ||
-        (hygieneRepaired.report.passed && hygieneRepaired.editorialAudit.passed)
+        (hygieneAudited.report.passed && hygieneAudited.editorialAudit.passed)
       ) {
-        audited = await auditWithHybridSemantics({
-          manuscript: hygieneRepaired.manuscript,
-          answers,
-          questions,
-          provider: configuredProvider,
-          model: primaryAdminModel,
-          alternateProvider,
-          alternateModel,
-        });
+        audited = hygieneAudited;
       }
     }
 
@@ -1042,7 +1055,10 @@ DIRECTRICES PARA LA CREACIÓN DEL LIBRO COMPLETO DE HISTORIA Y LEGADO:
       ...audited.manuscript,
       generationStatus: finalGenerationStatus,
       status: finalGenerationStatus,
-      incompleteDraftNotice: bothPassed ? undefined : PLAIN_INCOMPLETE_DRAFT_USER_NOTICE,
+      incompleteDraftNotice: failureDiag
+        ? buildIncompleteDraftUserNotice(failureDiag.category)
+        : undefined,
+      failureCategory: failureDiag?.category,
       internalReasonCode: failureDiag?.code,
       diagnosticSummary: failureDiag?.summary,
     };
@@ -1114,7 +1130,7 @@ DIRECTRICES PARA LA CREACIÓN DEL LIBRO COMPLETO DE HISTORIA Y LEGADO:
       isFallbackDraft: true,
       generationStatus: 'incomplete_draft',
       isPartialMemoir: narrativeFallback.editorialPlan.isPartialMemoir,
-      incompleteDraftNotice: PLAIN_INCOMPLETE_DRAFT_USER_NOTICE,
+      incompleteDraftNotice: buildIncompleteDraftUserNotice(failureDiag.category),
       internalReasonCode: failureDiag.code,
       diagnosticSummary: failureDiag.summary,
       documentaryAudit: auditedFallback.report,
@@ -1750,6 +1766,50 @@ const manuscriptBatchCheckpoints = new Map<
   >
 >();
 
+/** V5.1: the chapter each answer is linked to (first chapter that lists it among its sources). */
+function buildAnswerHomeChapterMap(manuscript: DemoManuscript): Map<string, string> {
+  const home = new Map<string, string>();
+  for (const ch of manuscript.chapters || []) {
+    for (const answerId of ch.sourceAnswerIds || []) {
+      if (!home.has(answerId)) home.set(answerId, ch.id);
+    }
+  }
+  return home;
+}
+
+/**
+ * V5.1: unresolved defects attributed to each chapter id — unverified testimony units whose best
+ * location is that chapter plus editorial defects that name the chapter's title.
+ */
+function countUnresolvedDefectsByChapter(
+  audit: {
+    manuscript: DemoManuscript;
+    report: DocumentaryAuditReport;
+    editorialAudit: EditorialQualityAuditReport;
+  },
+  answerHomeChapter: Map<string, string> = buildAnswerHomeChapterMap(audit.manuscript)
+): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const entry of audit.report.traceabilityMatrix || []) {
+    if (entry.verified !== false || entry.exclusionReason !== 'none') continue;
+    // A missing memory belongs to the chapter its answer was planned for. The audit's
+    // "best matching paragraph" of an absent memory can sit in any chapter and would blame
+    // the wrong one.
+    const chId =
+      answerHomeChapter.get(entry.answerId) || entry.chapterId || entry.assignedChapterId || '';
+    if (!chId || chId === 'none') continue;
+    counts.set(chId, (counts.get(chId) || 0) + 1);
+  }
+  for (const ch of audit.manuscript.chapters || []) {
+    const titleNeedle = `"${ch.title}"`;
+    const editorialHits = (audit.editorialAudit.blockingDefects || []).filter((d) =>
+      d.includes(titleNeedle)
+    ).length;
+    if (editorialHits > 0) counts.set(ch.id, (counts.get(ch.id) || 0) + editorialHits);
+  }
+  return counts;
+}
+
 function computeManuscriptDefectScore(
   docReport: DocumentaryAuditReport,
   edReport: EditorialQualityAuditReport
@@ -1767,12 +1827,66 @@ export interface SemanticJudgmentCaseInput {
   originalTestimony: string;
   candidateExcerpt: string;
   ambiguityReason: string;
+  /** V5.1: names, places, dates or figures of the testimony that the rules could not locate literally. */
+  detailsToConfirm?: string[];
 }
 
 export interface SemanticJudgmentVerdict {
   unitId: string;
-  verdict: 'supported' | 'contradicted' | 'inconclusive';
+  /**
+   * - supported: same fact, agent, polarity, modality and details, however it is worded.
+   * - contradicted: the excerpt states something incompatible with the testimony.
+   * - omitted (V5.1): the excerpt does not contradict the testimony but leaves out the memory or
+   *   one of its concrete details. It is a real omission and goes to narrative repair.
+   * - inconclusive: the judge could not decide.
+   */
+  verdict: 'supported' | 'contradicted' | 'omitted' | 'inconclusive';
   rationale: string;
+  /** V5.1: set when no provider could be reached. A technical condition, not a judgement. */
+  unavailable?: boolean;
+}
+
+/**
+ * V5.1 — Semantic verdict cache. The hybrid audit runs many times over mostly identical text
+ * (before and after every repair pass, and again when saving). A verdict depends only on the
+ * testimony, the excerpt it was compared with and the rule version, so it is memoized by that
+ * triple: unchanged chapters are never re-judged, and the audit performed when saving returns
+ * exactly what the audit performed during generation returned.
+ */
+const SEMANTIC_VERDICT_CACHE_MAX_ENTRIES = 6000;
+const semanticVerdictCache = new Map<string, Omit<SemanticJudgmentVerdict, 'unitId'>>();
+
+function buildSemanticVerdictCacheKey(
+  narrativeStyle: DemoNarrativeStyleId,
+  c: SemanticJudgmentCaseInput
+): string {
+  return crypto
+    .createHash('sha256')
+    .update(
+      JSON.stringify([
+        CANONICAL_AUDIT_RULES_VERSION,
+        narrativeStyle,
+        c.originalTestimony,
+        c.candidateExcerpt,
+        (c.detailsToConfirm || []).slice().sort(),
+      ])
+    )
+    .digest('hex');
+}
+
+function rememberSemanticVerdict(key: string, verdict: SemanticJudgmentVerdict): void {
+  // Only decisive verdicts are cached: an inconclusive or unavailable result must be retried.
+  if (verdict.unavailable || verdict.verdict === 'inconclusive') return;
+  if (semanticVerdictCache.size >= SEMANTIC_VERDICT_CACHE_MAX_ENTRIES) {
+    const oldest = semanticVerdictCache.keys().next().value;
+    if (oldest !== undefined) semanticVerdictCache.delete(oldest);
+  }
+  semanticVerdictCache.set(key, { verdict: verdict.verdict, rationale: verdict.rationale });
+}
+
+/** Test hook: clears memoized semantic verdicts. */
+export function clearSemanticVerdictCache(): void {
+  semanticVerdictCache.clear();
 }
 
 export type SemanticJudgeFunction = (params: {
@@ -1801,15 +1915,24 @@ export async function judgeAmbiguousSemanticUnitsWithAI(params: {
 
   const allVerdicts: SemanticJudgmentVerdict[] = [];
   const BATCH_SIZE = 12;
+  const MAX_PARALLEL_JUDGE_BATCHES = 3;
 
-  for (let i = 0; i < cases.length; i += BATCH_SIZE) {
-    const slice = cases.slice(i, i + BATCH_SIZE);
-    const judgePrompt = `Evalúa cuidadosamente cada par (testimonio original vs. fragmento redactado en el manuscrito).
-Estilo narrativo del libro: ${narrativeStyle}.
-Criterios estrictos de veredicto por unidad:
-- "supported": el fragmento redactado conserva el mismo hecho real, sujeto que actúa, polaridad (afirmación/negación) y dudas/incertidumbres aunque utilice paráfrasis literaria o vocabulario distinto.
-- "contradicted": el fragmento invierte quién hizo la acción, contradice una negación o afirmación real, convierte un intento en hecho consumado o inventa datos ajenos.
-- "inconclusive": el fragmento es demasiado vago o incompleto para confirmar fidelidad testimonial.
+  const personNote =
+    narrativeStyle === 'third_person_biography'
+      ? 'El libro está escrito en TERCERA PERSONA: que "yo/me/mi" del testimonio aparezca como "él/ella/le/su" es la conversión correcta y NO es una contradicción ni una inversión de quién actúa.'
+      : 'El libro está escrito en primera persona.';
+
+  const judgeBatch = async (slice: SemanticJudgmentCaseInput[]): Promise<SemanticJudgmentVerdict[]> => {
+    const judgePrompt = `Evalúa cada par (testimonio original vs. fragmento del manuscrito). Decide por el SIGNIFICADO, no por las palabras.
+Estilo narrativo del libro: ${narrativeStyle}. ${personNote}
+
+Veredicto por unidad (elige exactamente uno):
+- "supported": el fragmento conserva el mismo hecho, quién realiza la acción, la polaridad (afirmación/negación), la modalidad (hecho consumado vs. intento) y las dudas del testimonio, aunque use paráfrasis, sinónimos, otro orden o vocabulario más literario. Ejemplo: "Mi padre me salvó de caer al río" y "Gracias a mi padre, conseguí evitar caer al agua" son equivalentes.
+- "contradicted": el fragmento afirma algo INCOMPATIBLE con el testimonio: invierte quién hizo la acción, niega lo afirmado o afirma lo negado, convierte un intento en hecho consumado (o al revés) o cambia un dato concreto por otro distinto. Ejemplo: "Mi padre me empujó al río" contradice "Mi padre me salvó de caer al río".
+- "omitted": el fragmento no contradice el testimonio, pero NO contiene ese recuerdo o le falta algún dato concreto suyo (un nombre, lugar, fecha, cifra o hecho). Cuando el caso incluye "detailsToConfirm", cada detalle debe estar presente con el mismo valor, aunque esté escrito de otra forma ("1975" = "mil novecientos setenta y cinco"; "mamá" = "madre"). Indica en "rationale" qué falta exactamente.
+- "inconclusive": úsalo solo si de verdad no es posible decidir.
+
+No penalices la limpieza de muletillas orales, repeticiones o titubeos del testimonio. No exijas las mismas palabras.
 
 Casos a evaluar:
 ${JSON.stringify(slice, null, 2)}
@@ -1817,7 +1940,7 @@ ${JSON.stringify(slice, null, 2)}
 Responde EXCLUSIVAMENTE con un JSON válido:
 {
   "verdicts": [
-    { "unitId": "id_de_unidad", "verdict": "supported" | "contradicted" | "inconclusive", "rationale": "explicación breve en español" }
+    { "unitId": "id_de_unidad", "verdict": "supported" | "contradicted" | "omitted" | "inconclusive", "rationale": "explicación breve en español" }
   ]
 }`;
 
@@ -1909,30 +2032,61 @@ Responde EXCLUSIVAMENTE con un JSON válido:
       }
     }
 
+    const batchVerdicts: SemanticJudgmentVerdict[] = [];
     if (sliceVerdicts) {
+      const answered = new Set<string>();
       for (const v of sliceVerdicts) {
         if (!v || !v.unitId) continue;
-        const cleanVerdict: 'supported' | 'contradicted' | 'inconclusive' =
+        const cleanVerdict: SemanticJudgmentVerdict['verdict'] =
           v.verdict === 'supported'
             ? 'supported'
             : v.verdict === 'contradicted'
             ? 'contradicted'
+            : v.verdict === 'omitted'
+            ? 'omitted'
             : 'inconclusive';
-        allVerdicts.push({
+        answered.add(v.unitId);
+        batchVerdicts.push({
           unitId: v.unitId,
           verdict: cleanVerdict,
           rationale: String(v.rationale || '').trim(),
         });
       }
+      // A unit the model skipped in its answer was not judged: report it as such, not as approved.
+      for (const c of slice) {
+        if (!answered.has(c.unitId)) {
+          batchVerdicts.push({
+            unitId: c.unitId,
+            verdict: 'inconclusive',
+            rationale: 'El juez semántico no devolvió veredicto para esta unidad.',
+            unavailable: true,
+          });
+        }
+      }
     } else {
       for (const c of slice) {
-        allVerdicts.push({
+        batchVerdicts.push({
           unitId: c.unitId,
           verdict: 'inconclusive',
           rationale: 'Juez semántico temporalmente no disponible; se conserva revisión pendiente.',
+          unavailable: true,
         });
       }
     }
+    return batchVerdicts;
+  };
+
+  // V5.1: judge batches run with bounded parallelism so long interviews do not accumulate
+  // sequential provider latency (the main source of audit-stage timeouts).
+  const slices: SemanticJudgmentCaseInput[][] = [];
+  for (let i = 0; i < cases.length; i += BATCH_SIZE) {
+    slices.push(cases.slice(i, i + BATCH_SIZE));
+  }
+  for (let i = 0; i < slices.length; i += MAX_PARALLEL_JUDGE_BATCHES) {
+    const settled = await Promise.all(
+      slices.slice(i, i + MAX_PARALLEL_JUDGE_BATCHES).map((slice) => judgeBatch(slice))
+    );
+    for (const group of settled) allVerdicts.push(...group);
   }
 
   return allVerdicts;
@@ -1955,6 +2109,12 @@ export async function auditWithHybridSemantics(params: {
   repairAttemptsUsed?: number;
   repairedUnitIds?: string[];
   aiJudgeOverride?: SemanticJudgeFunction;
+  /**
+   * V5.1: reuse memoized verdicts for identical (testimony, excerpt) pairs. Defaults to true with
+   * the real judge and to false when a judge override is injected (so injected judges are always
+   * consulted unless the caller opts in).
+   */
+  useVerdictCache?: boolean;
 }): Promise<{
   manuscript: DemoManuscript;
   report: DocumentaryAuditReport;
@@ -1973,6 +2133,7 @@ export async function auditWithHybridSemantics(params: {
     repairedUnitIds = [],
     aiJudgeOverride,
   } = params;
+  const useVerdictCache = params.useVerdictCache ?? !aiJudgeOverride;
 
   const detResult = auditAndApproveBookManuscript({
     manuscript,
@@ -1982,11 +2143,42 @@ export async function auditWithHybridSemantics(params: {
     repairedUnitIds,
   });
 
-  const ambiguousIds = detResult.report.semanticAudit?.ambiguousUnitIds || [];
+  // V5.1 — Arbitration set. Every unit the deterministic rules could not settle on their own
+  // (paraphrase below the lexical threshold, a facet not found literally, or a SUSPECTED
+  // contradiction) is reviewed in context. The rules only decide the two cases they can prove:
+  // literally present (supported) and nothing resembling it anywhere (missing).
+  const ambiguousIds = Array.from(
+    new Set([
+      ...(detResult.report.semanticAudit?.reviewCandidateUnitIds || []),
+      ...(detResult.report.semanticAudit?.ambiguousUnitIds || []),
+    ])
+  );
   if (ambiguousIds.length === 0) {
+    detResult.report.auditPolicy = 'hybrid_arbitrated';
     return detResult;
   }
 
+  const describeFacetGaps = (facets: string[] | undefined): string[] => {
+    const labels: Record<string, string> = {
+      yearsOrNumbers: 'fecha o cifra',
+      properNames: 'persona o parentesco',
+      places: 'lugar',
+      emotions: 'emoción expresada (raíz de la palabra)',
+    };
+    const out: string[] = [];
+    for (const facet of facets || []) {
+      const sepIdx = facet.indexOf(':');
+      if (sepIdx < 0) continue;
+      const label = labels[facet.slice(0, sepIdx)];
+      if (!label) continue;
+      for (const value of facet.slice(sepIdx + 1).split(',')) {
+        if (value.trim()) out.push(`${label}: ${value.trim()}`);
+      }
+    }
+    return out;
+  };
+
+  const MAX_EXCERPT_CHARS = 2400;
   const cases: SemanticJudgmentCaseInput[] = [];
   for (const unitId of ambiguousIds) {
     const unit = detResult.inventory.eligibleFactUnits.find((u) => u.unitId === unitId);
@@ -1996,55 +2188,103 @@ export async function auditWithHybridSemantics(params: {
     const pIdx = typeof trace.paragraphIndex === 'number' ? trace.paragraphIndex : 0;
     const paraText = ch?.paragraphs?.[pIdx] || trace.evidenceSnippet || '';
     const nextPara = ch?.paragraphs?.[pIdx + 1] || '';
+    const detailsToConfirm = describeFacetGaps(trace.missingFacets);
     cases.push({
       unitId,
       originalTestimony: unit.cleanText,
-      candidateExcerpt: [paraText, nextPara].filter(Boolean).join(' ').trim(),
-      ambiguityReason: trace.ambiguityReason || 'Paráfrasis literaria o giro conversacional ambiguo.',
+      candidateExcerpt: [paraText, nextPara]
+        .filter(Boolean)
+        .join(' ')
+        .trim()
+        .slice(0, MAX_EXCERPT_CHARS),
+      ambiguityReason:
+        trace.semanticReviewReason ||
+        trace.ambiguityReason ||
+        'Paráfrasis literaria o giro conversacional ambiguo.',
+      ...(detailsToConfirm.length > 0 ? { detailsToConfirm } : {}),
     });
   }
 
   if (cases.length === 0) {
+    detResult.report.auditPolicy = 'hybrid_arbitrated';
     return detResult;
   }
 
-  const judgeFn = aiJudgeOverride || judgeAmbiguousSemanticUnitsWithAI;
-  const verdicts = await judgeFn({
-    cases,
-    narrativeStyle: manuscript.narrativeStyle || 'first_person_literary',
-    provider,
-    model,
-    alternateProvider,
-    alternateModel,
-  });
+  const activeStyle = manuscript.narrativeStyle || 'first_person_literary';
+  const verdictMap = new Map<string, SemanticJudgmentVerdict>();
+  const cacheKeyByUnitId = new Map<string, string>();
+  const pendingCases: SemanticJudgmentCaseInput[] = [];
+  for (const c of cases) {
+    const key = buildSemanticVerdictCacheKey(activeStyle, c);
+    cacheKeyByUnitId.set(c.unitId, key);
+    const cached = useVerdictCache ? semanticVerdictCache.get(key) : undefined;
+    if (cached) {
+      verdictMap.set(c.unitId, { unitId: c.unitId, ...cached });
+    } else {
+      pendingCases.push(c);
+    }
+  }
 
-  const verdictMap = new Map(verdicts.map((v) => [v.unitId, v]));
+  if (pendingCases.length > 0) {
+    const judgeFn = aiJudgeOverride || judgeAmbiguousSemanticUnitsWithAI;
+    let freshVerdicts: SemanticJudgmentVerdict[] = [];
+    try {
+      freshVerdicts = await judgeFn({
+        cases: pendingCases,
+        narrativeStyle: activeStyle,
+        provider,
+        model,
+        alternateProvider,
+        alternateModel,
+      });
+    } catch (_judgeErr) {
+      // A failing judge is a technical condition: leave the units unresolved, never approved.
+      freshVerdicts = [];
+    }
+    for (const v of freshVerdicts) {
+      if (!v || !v.unitId || verdictMap.has(v.unitId)) continue;
+      verdictMap.set(v.unitId, v);
+      const key = cacheKeyByUnitId.get(v.unitId);
+      if (key && useVerdictCache) rememberSemanticVerdict(key, v);
+    }
+  }
 
   // Reconcile verdicts strictly into a deep clone of the report
   const updatedReport: DocumentaryAuditReport = structuredClone(detResult.report);
   const missingSet = new Set(updatedReport.coverageAudit?.missingUnitIds || []);
   const remainingAmbiguous: string[] = [];
+  const judgeResolvedUnitIds: string[] = [];
+  const judgeUnavailableUnitIds: string[] = [];
+  const reviewedUnitIdSet = new Set(cases.map((c) => c.unitId));
+  // A rule-based contradiction flag on a reviewed unit was only a suspicion: it is dropped here
+  // and re-added below exclusively when the judge confirms a real contradiction.
   let semanticContradictions = (updatedReport.veracityAudit?.semanticContradictionFlags || []).filter(
     (flag) => {
-      const m = flag.match(/^\[(trace_[^\]]+)\]/);
+      const m = flag.match(/^\[([^\]]+)\]/);
       if (!m) return true;
-      const v = verdictMap.get(m[1]);
-      return v?.verdict !== 'supported';
+      return !reviewedUnitIdSet.has(m[1]);
     }
   );
 
   let integratedUnits = updatedReport.integratedUnits;
 
   for (const entry of updatedReport.traceabilityMatrix) {
-    if (!ambiguousIds.includes(entry.unitId)) continue;
+    if (!reviewedUnitIdSet.has(entry.unitId)) continue;
     const judgeRes = verdictMap.get(entry.unitId);
     if (!judgeRes) {
+      entry.aiJudgeUnavailable = true;
+      entry.verificationStatus = 'ambiguous';
+      entry.semanticIssues = [];
+      missingSet.add(entry.unitId);
       remainingAmbiguous.push(entry.unitId);
+      judgeUnavailableUnitIds.push(entry.unitId);
       continue;
     }
 
     entry.aiJudgeVerdict = judgeRes.verdict;
+    entry.aiJudgeRationale = judgeRes.rationale;
     if (judgeRes.verdict === 'supported') {
+      judgeResolvedUnitIds.push(entry.unitId);
       if (!entry.verified) {
         integratedUnits++;
       }
@@ -2055,8 +2295,20 @@ export async function auditWithHybridSemantics(params: {
       missingSet.delete(entry.unitId);
       if (entry.chapterId && entry.chapterId !== 'none') {
         entry.assignedParagraphIds = entry.paragraphId ? [entry.paragraphId] : [];
+        const supportingCh = detResult.manuscript.chapters.find((c) => c.id === entry.chapterId);
+        if (supportingCh) {
+          if (!supportingCh.sourceUnitIds) supportingCh.sourceUnitIds = [];
+          if (!supportingCh.sourceUnitIds.includes(entry.unitId)) {
+            supportingCh.sourceUnitIds.push(entry.unitId);
+          }
+          if (!supportingCh.sourceAnswerIds) supportingCh.sourceAnswerIds = [];
+          if (entry.answerId && !supportingCh.sourceAnswerIds.includes(entry.answerId)) {
+            supportingCh.sourceAnswerIds.push(entry.answerId);
+          }
+        }
       }
     } else if (judgeRes.verdict === 'contradicted') {
+      judgeResolvedUnitIds.push(entry.unitId);
       if (entry.verified) {
         integratedUnits = Math.max(0, integratedUnits - 1);
       }
@@ -2069,6 +2321,17 @@ export async function auditWithHybridSemantics(params: {
         semanticContradictions.push(issueMsg);
       }
       missingSet.add(entry.unitId);
+    } else if (judgeRes.verdict === 'omitted') {
+      // Confirmed omission (not a contradiction): a real coverage defect for narrative repair.
+      judgeResolvedUnitIds.push(entry.unitId);
+      if (entry.verified) {
+        integratedUnits = Math.max(0, integratedUnits - 1);
+      }
+      entry.verified = false;
+      entry.status = 'missing';
+      entry.verificationStatus = 'partially_supported';
+      entry.semanticIssues = [];
+      missingSet.add(entry.unitId);
     } else {
       if (entry.verified) {
         integratedUnits = Math.max(0, integratedUnits - 1);
@@ -2076,8 +2339,11 @@ export async function auditWithHybridSemantics(params: {
       entry.verified = false;
       entry.status = 'missing';
       entry.verificationStatus = 'ambiguous';
+      entry.semanticIssues = [];
+      entry.aiJudgeUnavailable = Boolean(judgeRes.unavailable);
       missingSet.add(entry.unitId);
       remainingAmbiguous.push(entry.unitId);
+      if (judgeRes.unavailable) judgeUnavailableUnitIds.push(entry.unitId);
     }
   }
 
@@ -2110,9 +2376,17 @@ export async function auditWithHybridSemantics(params: {
     );
   }
   if (remainingAmbiguous.length > 0) {
-    nextBlocking.push(
-      `Auditoría semántica inconclusa para ${remainingAmbiguous.length} unidad(es) ambigua(s): ${remainingAmbiguous.slice(0, 6).join(', ')}.`
-    );
+    const undecided = remainingAmbiguous.filter((id) => !judgeUnavailableUnitIds.includes(id));
+    if (judgeUnavailableUnitIds.length > 0) {
+      nextBlocking.push(
+        `Verificación semántica no disponible para ${judgeUnavailableUnitIds.length} unidad(es) (proveedor de IA inaccesible): ${judgeUnavailableUnitIds.slice(0, 6).join(', ')}.`
+      );
+    }
+    if (undecided.length > 0) {
+      nextBlocking.push(
+        `Auditoría semántica inconclusa para ${undecided.length} unidad(es) ambigua(s): ${undecided.slice(0, 6).join(', ')}.`
+      );
+    }
   }
   if (!updatedReport.uncertaintiesPreserved && (updatedReport.veracityAudit?.uncertaintyViolations || []).length > 0) {
     nextBlocking.push(...(updatedReport.veracityAudit?.uncertaintyViolations || []));
@@ -2139,6 +2413,7 @@ export async function auditWithHybridSemantics(params: {
   }
 
   const nextPassed = nextBlocking.length === 0;
+  updatedReport.auditPolicy = 'hybrid_arbitrated';
   updatedReport.integratedUnits = integratedUnits;
   updatedReport.coveragePercentage = updatedCoverage;
   updatedReport.passed = nextPassed;
@@ -2165,6 +2440,8 @@ export async function auditWithHybridSemantics(params: {
     updatedReport.semanticAudit.contradictionsDetected = semanticContradictions;
     updatedReport.semanticAudit.ambiguousUnitsCount = remainingAmbiguous.length;
     updatedReport.semanticAudit.ambiguousUnitIds = remainingAmbiguous;
+    updatedReport.semanticAudit.judgeResolvedUnitIds = judgeResolvedUnitIds;
+    updatedReport.semanticAudit.judgeUnavailableUnitIds = judgeUnavailableUnitIds;
     updatedReport.semanticAudit.passed =
       semanticContradictions.length === 0 &&
       (updatedReport.veracityAudit?.inventedDataFlags || []).length === 0 &&
@@ -2193,6 +2470,18 @@ export async function auditWithHybridSemantics(params: {
  * and human-readable diagnostic summary exclusively for administrators (Bitácora + ManuscriptsView).
  */
 export function classifyBookFailureReasonCode(params: {
+  error?: any;
+  report?: DocumentaryAuditReport | null;
+  editorialAudit?: EditorialQualityAuditReport | null;
+  completedBatches?: number;
+  totalBatches?: number;
+  repairPassesAttempted?: number;
+}): { code: BookGenerationReasonCode; summary: string; category: BookFailureCategory } {
+  const core = classifyBookFailureReasonCodeCore(params);
+  return { ...core, category: resolveBookFailureCategory(core.code) };
+}
+
+function classifyBookFailureReasonCodeCore(params: {
   error?: any;
   report?: DocumentaryAuditReport | null;
   editorialAudit?: EditorialQualityAuditReport | null;
@@ -2269,6 +2558,18 @@ export function classifyBookFailureReasonCode(params: {
     }
     const ambiguousCount = report.semanticAudit?.ambiguousUnitsCount || 0;
     const missingIds = report.coverageAudit?.missingUnitIds || [];
+    // V5.1: the semantic judge could not be reached. That is a provider problem, not a defect of
+    // the manuscript, so it is reported as technical and a retry only needs to re-run the judge.
+    const judgeUnavailableIds = report.semanticAudit?.judgeUnavailableUnitIds || [];
+    if (
+      judgeUnavailableIds.length > 0 &&
+      missingIds.every((id) => judgeUnavailableIds.includes(id))
+    ) {
+      return {
+        code: 'SEMANTIC_JUDGE_UNAVAILABLE',
+        summary: `El juez semántico no estuvo disponible para ${judgeUnavailableIds.length} unidad(es) pendientes de confirmación (${judgeUnavailableIds.slice(0, 4).join(', ')}); el manuscrito no presenta otros defectos documentales.`,
+      };
+    }
     if (ambiguousCount > 0 && missingIds.length <= ambiguousCount) {
       return {
         code: 'AUDIT_INCONCLUSIVE',
@@ -2318,6 +2619,16 @@ export async function repairChaptersContextuallyWithAI(params: {
   batchCallerOverride?: (batchPrompt: string, systemPrompt: string, batchTaskIds: string[]) => Promise<ParsedAiManuscriptBatchResponse | null>;
   aiJudgeOverride?: SemanticJudgeFunction;
   onRepairProgress?: (done: number, total: number) => void;
+  /**
+   * V5.1: the hybrid audit of `manuscript` the caller already holds. Passing it avoids auditing
+   * the same text twice per repair pass.
+   */
+  precomputedBeforeAudit?: {
+    manuscript: DemoManuscript;
+    report: DocumentaryAuditReport;
+    editorialAudit: EditorialQualityAuditReport;
+    inventory: DocumentaryInventory;
+  };
 }): Promise<{
   improved: boolean;
   repairedChaptersCount: number;
@@ -2344,22 +2655,25 @@ export async function repairChaptersContextuallyWithAI(params: {
     batchCallerOverride,
     aiJudgeOverride,
     onRepairProgress,
+    precomputedBeforeAudit,
   } = params;
 
   const autoTasks = (tasks || []).filter((t) => t.autoRepairable !== false);
   if (autoTasks.length === 0) return null;
 
-  const beforeAudit = await auditWithHybridSemantics({
-    manuscript,
-    answers,
-    questions,
-    provider,
-    model,
-    alternateProvider,
-    alternateModel,
-    repairAttemptsUsed: manuscript.documentaryAudit?.repairAttemptsUsed || 0,
-    aiJudgeOverride,
-  });
+  const beforeAudit =
+    precomputedBeforeAudit ||
+    (await auditWithHybridSemantics({
+      manuscript,
+      answers,
+      questions,
+      provider,
+      model,
+      alternateProvider,
+      alternateModel,
+      repairAttemptsUsed: manuscript.documentaryAudit?.repairAttemptsUsed || 0,
+      aiJudgeOverride,
+    }));
   const beforeScore = computeManuscriptDefectScore(beforeAudit.report, beforeAudit.editorialAudit);
 
   const styleReminder =
@@ -2369,7 +2683,14 @@ export async function repairChaptersContextuallyWithAI(params: {
       ? `ESTILO A OBLIGATORIO: Reescribe en primera persona ("yo"/"nosotros") sencilla, natural y bien estructurada.`
       : `ESTILO B OBLIGATORIO: Reescribe en primera persona literaria, emotiva y fluida, conservando todos los hechos.`;
 
-  const repairSystemPrompt = `${activeLiteraryPrompt}\n\n${styleReminder}\n\nEres el editor literario corrector de YouForever. Corrige ÚNICAMENTE los capítulos indicados integrando fluidamente cualquier recuerdo faltante, corrigiendo contradicciones de sentido (quién realizó la acción, negaciones, dudas), eliminando muletillas/exclusiones/repeticiones, corrigiendo títulos y conservando intactos todos los datos verdaderos.`;
+  const repairSystemPrompt = `${activeLiteraryPrompt}\n\n${styleReminder}\n\nEres el editor literario corrector de YouForever. Corrige ÚNICAMENTE los capítulos indicados integrando fluidamente cualquier recuerdo faltante, corrigiendo contradicciones de sentido (quién realizó la acción, negaciones, dudas), eliminando muletillas/exclusiones/repeticiones, corrigiendo títulos y conservando intactos todos los datos verdaderos.
+
+REGLAS DE REPARACIÓN NARRATIVA (obligatorias):
+1. Cada recuerdo de "missingTestimonialUnits" se TEJE dentro del párrafo donde corresponde por tema y cronología, con transiciones naturales. Está prohibido pegarlo como oración suelta al final, copiarlo literalmente o añadir un párrafo que solo repita el testimonio.
+2. No repitas un episodio que ya esté narrado en "currentParagraphs": si el recuerdo ya aparece, complétalo con el detalle que falte ("auditorNote" indica cuál) en lugar de volver a contarlo.
+3. Devuelve el capítulo COMPLETO: todos los hechos, nombres, lugares, fechas y emociones que ya estaban en "currentParagraphs" deben seguir presentes. Reparar un recuerdo nunca puede eliminar otro.
+4. No inventes hechos, fechas, nombres ni diálogos, y conserva las expresiones de duda del testimonio.
+5. Párrafos de extensión natural (aproximadamente 3 a 8 oraciones); divide los excesivamente largos.`;
 
   // Process ALL affected chapters in batches of 4 without slicing off chapters >= 7!
   const REPAIR_BATCH_SIZE = 4;
@@ -2387,13 +2708,18 @@ export async function repairChaptersContextuallyWithAI(params: {
         currentParagraphs: ch?.paragraphs || [],
         categories: t.categories,
         repairStrategy: t.repairStrategy,
-        missingTestimonialUnits: t.missingUnits.map((u) => ({
-          unitId: u.unitId,
-          speaker: u.participantName,
-          question: u.questionText,
-          testimony: u.cleanText,
-          uncertainties: u.uncertaintyExpressions,
-        })),
+        missingTestimonialUnits: t.missingUnits.map((u) => {
+          const trace = beforeAudit.report.traceabilityMatrix.find((tr) => tr.unitId === u.unitId);
+          const auditorNote = trace?.aiJudgeRationale || trace?.semanticReviewReason;
+          return {
+            unitId: u.unitId,
+            speaker: u.participantName,
+            question: u.questionText,
+            testimony: u.cleanText,
+            uncertainties: u.uncertaintyExpressions,
+            ...(auditorNote ? { auditorNote } : {}),
+          };
+        }),
         semanticContradictionsToCorrect: t.contradictionDetails,
         styleLeaksToRewrite: t.styleLeakDetails,
         excludedInformationToRemoveWithoutTouchingAuthorizedFacts: t.excludedLeakDetails,
@@ -2550,6 +2876,72 @@ Devuelve EXCLUSIVAMENTE un objeto JSON con:
 
   // Reject regressions: do not overwrite valid narrative prose if repairs broke coverage or added defects
   const improved = afterScore < beforeScore || (afterAudit.report.passed && afterAudit.editorialAudit.passed);
+  const fullyApprovedAfter = afterAudit.report.passed && afterAudit.editorialAudit.passed;
+
+  // V5.1 — Selective acceptance, judged chapter by chapter.
+  // (1) Rejecting the whole pass because ONE rewritten chapter regressed threw away the chapters
+  //     that were genuinely fixed and left the manuscript stuck.
+  // (2) Accepting the whole pass because the TOTAL improved let a chapter that lost memories
+  //     ride along with the ones that were fixed.
+  // So whenever some patched chapter got worse, keep only the patches that did not regress
+  // (that strictly improved, when the pass as a whole did not) and re-audit that mixed text once.
+  const patchedIds = Array.from(repairedChaptersById.keys()).filter((id) =>
+    manuscript.chapters.some((c) => c.id === id)
+  );
+  if (!fullyApprovedAfter && patchedIds.length > 1) {
+    const answerHomeChapter = buildAnswerHomeChapterMap(manuscript);
+    const beforeByChapter = countUnresolvedDefectsByChapter(beforeAudit, answerHomeChapter);
+    const afterByChapter = countUnresolvedDefectsByChapter(afterAudit, answerHomeChapter);
+    const regressedIds = patchedIds.filter(
+      (id) => (afterByChapter.get(id) || 0) > (beforeByChapter.get(id) || 0)
+    );
+    if (!improved || regressedIds.length > 0) {
+      const keepIds = new Set(
+        patchedIds.filter((id) => {
+          const beforeCount = beforeByChapter.get(id) || 0;
+          const afterCount = afterByChapter.get(id) || 0;
+          return improved ? afterCount <= beforeCount : afterCount < beforeCount;
+        })
+      );
+      if (keepIds.size > 0 && keepIds.size < patchedIds.length) {
+        const mixedManu: DemoManuscript = {
+          ...manuscript,
+          chapters: manuscript.chapters.map((origCh, idx) =>
+            keepIds.has(origCh.id) ? nextChapters[idx] : origCh
+          ),
+        };
+        const mixedAudit = await auditWithHybridSemantics({
+          manuscript: mixedManu,
+          answers,
+          questions,
+          provider,
+          model,
+          alternateProvider,
+          alternateModel,
+          repairAttemptsUsed: (manuscript.documentaryAudit?.repairAttemptsUsed || 0) + 1,
+          aiJudgeOverride,
+        });
+        const mixedScore = computeManuscriptDefectScore(mixedAudit.report, mixedAudit.editorialAudit);
+        const mixedApproved = mixedAudit.report.passed && mixedAudit.editorialAudit.passed;
+        if (
+          mixedApproved ||
+          (mixedScore < beforeScore && (!improved || mixedScore <= afterScore))
+        ) {
+          return {
+            improved: true,
+            repairedChaptersCount: keepIds.size,
+            audited: {
+              manuscript: mixedAudit.manuscript,
+              report: mixedAudit.report,
+              editorialAudit: mixedAudit.editorialAudit,
+              inventory: mixedAudit.inventory,
+            },
+          };
+        }
+      }
+    }
+  }
+
   if (!improved) {
     return {
       improved: false,
@@ -2612,6 +3004,26 @@ export async function generateParticipantBookManuscriptWithAI(params: {
   onBatchCheckpoint?: (batchIdx: number, checkpoint: BookBatchCheckpointPayload) => void;
   isCancelled?: () => boolean;
   maxRepairPasses?: number;
+  /**
+   * V5.1 — Injection points used ONLY by automated tests to run the complete pipeline
+   * (draft -> hybrid audit -> repair -> approval evidence) without calling a real AI provider
+   * and without touching the on-disk manuscript cache. Production callers never set this.
+   */
+  pipelineOverrides?: {
+    draftBatch?: (ctx: {
+      batchIdx: number;
+      totalBatches: number;
+      batchChapters: any[];
+      narrativeStyle: DemoNarrativeStyleId;
+    }) => Promise<BookBatchCheckpointPayload>;
+    aiJudge?: SemanticJudgeFunction;
+    repairBatchCaller?: (
+      batchPrompt: string,
+      systemPrompt: string,
+      batchTaskIds: string[]
+    ) => Promise<ParsedAiManuscriptBatchResponse | null>;
+    skipDiskCache?: boolean;
+  };
 }): Promise<{
   manuscript: DemoManuscript;
   chapterPhotos: Record<string, DemoInMemoryPhoto | null>;
@@ -2625,10 +3037,21 @@ export async function generateParticipantBookManuscriptWithAI(params: {
   cachedContextUsed?: boolean;
   internalReasonCode?: BookGenerationReasonCode;
   diagnosticSummary?: string;
+  failureCategory?: BookFailureCategory;
+  /** V5.1: fingerprint of the sources and configuration this result was generated from. */
+  sourceFingerprint?: string;
+  /**
+   * V5.1: batch indexes whose drafted chapters still carry confirmed defects. They must be
+   * regenerated on the next attempt instead of being replayed from a checkpoint.
+   */
+  invalidatedBatchIndexes?: number[];
   batchesCompleted?: number;
   totalBatches?: number;
 }> {
-  hydrateManuscriptCacheFromDisk();
+  const pipelineOverrides = params.pipelineOverrides || {};
+  if (!pipelineOverrides.skipDiskCache) {
+    hydrateManuscriptCacheFromDisk();
+  }
 
   const {
     interview,
@@ -2739,6 +3162,33 @@ export async function generateParticipantBookManuscriptWithAI(params: {
   const fullCacheKey = `${interview.id}::${contentHash}::${promptHash}::${CANONICAL_AUDIT_RULES_VERSION}::${BOOK_GENERATION_ENGINE_VERSION}::canonical`;
   const scopeCacheKey = `${canonicalKey}::${fullCacheKey}`;
 
+  // V5.1: one cryptographic fingerprint ties drafted batches, the approved manuscript and its
+  // approval evidence to the exact testimony and configuration they were produced from.
+  const sourceFingerprint = computeBookSourceFingerprint({
+    interviewId: interview.id,
+    narrativeStyle,
+    bookStructureMode,
+    literaryPromptText: activeLiteraryPrompt,
+    closingDedicationText,
+    answers,
+    questions,
+  });
+  const attachApprovalEvidence = (
+    approved: DemoManuscript,
+    report: DocumentaryAuditReport,
+    editorialPassed: boolean
+  ): DemoManuscript => ({
+    ...approved,
+    failureCategory: undefined,
+    approvalEvidence: issueBookApprovalEvidence({
+      interviewId: interview.id,
+      manuscript: approved,
+      sourceFingerprint,
+      report,
+      editorialAuditPassed: editorialPassed,
+    }),
+  });
+
   if (!forceRefresh) {
     // If an approved canonical manuscript was passed in lockedPreviewManuscript for this same style, verify BOTH documentary and editorial audits
     if (
@@ -2746,23 +3196,63 @@ export async function generateParticipantBookManuscriptWithAI(params: {
       lockedPreviewManuscript.narrativeStyle === narrativeStyle &&
       Array.isArray(lockedPreviewManuscript.chapters) &&
       lockedPreviewManuscript.chapters.length > 0 &&
-      lockedPreviewManuscript.documentaryAudit?.auditVersion === CANONICAL_AUDIT_RULES_VERSION &&
+      lockedPreviewManuscript.aiGenerated !== false &&
       lockedPreviewManuscript.generationStatus === 'approved'
     ) {
-      const auditedLocked = auditAndApproveBookManuscript({
+      // V5.1: a manuscript the browser already holds is accepted through the SAME policy used
+      // everywhere else. Valid server-signed evidence for these exact sources is enough; without
+      // it the hybrid audit decides (never the deterministic rules alone, which used to reject
+      // judge-confirmed paraphrases and trigger a full, costly regeneration).
+      const lockedEvidence = verifyBookApprovalEvidence({
         manuscript: lockedPreviewManuscript,
-        answers,
-        questions,
+        interviewId: interview.id,
+        narrativeStyle,
+        currentSourceFingerprint: sourceFingerprint,
       });
-      if (auditedLocked.report.passed && auditedLocked.editorialAudit.passed) {
+      if (lockedEvidence.valid) {
         return {
           manuscript: {
-            ...auditedLocked.manuscript,
+            ...lockedPreviewManuscript,
             generationStatus: 'approved',
             status: 'approved',
             narrativeStyle,
             canonicalCacheKey: canonicalKey,
           },
+          chapterPhotos: fallbackResult.chapterPhotos,
+          allPhotosById: fallbackResult.allPhotosById,
+          scope,
+          providerUsed: primaryProvider,
+          modelUsed: primaryModel,
+          compilationPdfId: compilationPdfRecord?.pdfId,
+          compilationPdfSha256: compilationPdfRecord?.sha256Hash,
+          cachedContextUsed: true,
+          sourceFingerprint,
+        };
+      }
+      const auditedLocked = await auditWithHybridSemantics({
+        manuscript: { ...lockedPreviewManuscript, approvalEvidence: undefined },
+        answers,
+        questions,
+        provider: primaryProvider,
+        model: primaryModel,
+        alternateProvider,
+        alternateModel,
+        aiJudgeOverride: pipelineOverrides.aiJudge,
+      });
+      if (auditedLocked.report.passed && auditedLocked.editorialAudit.passed) {
+        return {
+          sourceFingerprint,
+          manuscript: attachApprovalEvidence(
+            {
+              ...auditedLocked.manuscript,
+              generationStatus: 'approved',
+              status: 'approved',
+              narrativeStyle,
+              canonicalCacheKey: canonicalKey,
+            },
+            auditedLocked.report,
+            auditedLocked.editorialAudit.passed
+          ),
           chapterPhotos: fallbackResult.chapterPhotos,
           allPhotosById: fallbackResult.allPhotosById,
           scope,
@@ -2787,9 +3277,18 @@ export async function generateParticipantBookManuscriptWithAI(params: {
       hit.manuscript.chapters.length > 0 &&
       hit.manuscript.generationStatus === 'approved' &&
       hit.manuscript.documentaryAudit?.auditVersion === CANONICAL_AUDIT_RULES_VERSION &&
-      hit.manuscript.editorialAudit?.passed === true
+      hit.manuscript.editorialAudit?.passed === true &&
+      // V5.1: a cached manuscript is only served while its approval evidence still verifies
+      // against the CURRENT answers, style and rules.
+      verifyBookApprovalEvidence({
+        manuscript: hit.manuscript,
+        interviewId: interview.id,
+        narrativeStyle,
+        currentSourceFingerprint: sourceFingerprint,
+      }).valid
     ) {
       return {
+        sourceFingerprint,
         manuscript: {
           ...hit.manuscript,
           narrativeStyle,
@@ -3018,7 +3517,15 @@ export async function generateParticipantBookManuscriptWithAI(params: {
     if (initialBatchCheckpoints && !forceRefresh) {
       for (const [k, cp] of Object.entries(initialBatchCheckpoints)) {
         const bIdxNum = Number(k);
-        if (!Number.isNaN(bIdxNum) && cp?.parsed && !batchCheckpointMap.has(bIdxNum)) {
+        // V5.1: a persisted batch is reused only when it was drafted from these exact sources,
+        // style, prompt and settings. Checkpoints from an edited interview, another style or an
+        // older engine (no fingerprint) are discarded and that batch is drafted again.
+        if (
+          !Number.isNaN(bIdxNum) &&
+          cp?.parsed &&
+          cp.sourceFingerprint === sourceFingerprint &&
+          !batchCheckpointMap.has(bIdxNum)
+        ) {
           batchCheckpointMap.set(bIdxNum, cp);
         }
       }
@@ -3100,6 +3607,23 @@ ${structureInstructions}`;
 
         let batchResult = batchCheckpointMap.get(batchIdx) || null;
 
+        if (!batchResult && pipelineOverrides.draftBatch) {
+          batchResult = await pipelineOverrides.draftBatch({
+            batchIdx,
+            totalBatches: chapterBatches.length,
+            batchChapters,
+            narrativeStyle,
+          });
+          if (batchResult?.parsed) {
+            const stampedOverrideCheckpoint: BookBatchCheckpointPayload = {
+              ...batchResult,
+              sourceFingerprint,
+            };
+            batchCheckpointMap.set(batchIdx, stampedOverrideCheckpoint);
+            onBatchCheckpoint?.(batchIdx, stampedOverrideCheckpoint);
+          }
+        }
+
         if (!batchResult) {
           const isReasoningModel = /^gpt-6|^gpt-5|^o1|^o3|^o4/i.test(effectiveModel);
           const timeoutMs = isReasoningModel ? 65000 : 38000;
@@ -3168,8 +3692,12 @@ ${structureInstructions}`;
           }
 
           if (batchResult?.parsed) {
-            batchCheckpointMap.set(batchIdx, batchResult);
-            onBatchCheckpoint?.(batchIdx, batchResult);
+            const stampedCheckpoint: BookBatchCheckpointPayload = {
+              ...batchResult,
+              sourceFingerprint,
+            };
+            batchCheckpointMap.set(batchIdx, stampedCheckpoint);
+            onBatchCheckpoint?.(batchIdx, stampedCheckpoint);
           }
         }
 
@@ -3490,6 +4018,7 @@ ${structureInstructions}`;
         model: effectiveModel,
         alternateProvider,
         alternateModel,
+        aiJudgeOverride: pipelineOverrides.aiJudge,
       });
 
       let repairPassesUsed = 0;
@@ -3533,6 +4062,9 @@ ${structureInstructions}`;
           model: effectiveModel,
           alternateProvider,
           alternateModel,
+          precomputedBeforeAudit: auditedResult,
+          aiJudgeOverride: pipelineOverrides.aiJudge,
+          batchCallerOverride: pipelineOverrides.repairBatchCaller,
           onRepairProgress: (done, total) => {
             onProgress?.({
               phase: 'repairing_chapters',
@@ -3558,7 +4090,11 @@ ${structureInstructions}`;
         }
       }
 
-      // Deterministic post-AI hygiene pass ONLY if small structural/editorial defects remain
+      // Deterministic post-AI hygiene pass ONLY if small structural/editorial defects remain.
+      // V5.1: (1) it never pastes rule-rewritten testimony into AI prose (`integrateMissingUnits:
+      // false`) — omissions are repaired narratively above or reported honestly; (2) its result is
+      // judged by the SAME hybrid policy as everything else, instead of comparing a deterministic
+      // score against a hybrid one.
       if (!auditedResult.report.passed || !auditedResult.editorialAudit.passed) {
         const hygieneRepaired = repairManuscriptOmissions({
           manuscript: auditedResult.manuscript,
@@ -3567,10 +4103,22 @@ ${structureInstructions}`;
           storyMode: interview.storyMode,
           participantNames,
           maxAttempts: 2,
+          integrateMissingUnits: false,
+        });
+        const hygieneAudited = await auditWithHybridSemantics({
+          manuscript: hygieneRepaired.manuscript,
+          answers,
+          questions,
+          provider: effectiveProvider,
+          model: effectiveModel,
+          alternateProvider,
+          alternateModel,
+          repairAttemptsUsed: repairPassesUsed,
+          aiJudgeOverride: pipelineOverrides.aiJudge,
         });
         const hygieneScore = computeManuscriptDefectScore(
-          hygieneRepaired.report,
-          hygieneRepaired.editorialAudit
+          hygieneAudited.report,
+          hygieneAudited.editorialAudit
         );
         const preScore = computeManuscriptDefectScore(
           auditedResult.report,
@@ -3578,18 +4126,9 @@ ${structureInstructions}`;
         );
         if (
           hygieneScore < preScore ||
-          (hygieneRepaired.report.passed && hygieneRepaired.editorialAudit.passed)
+          (hygieneAudited.report.passed && hygieneAudited.editorialAudit.passed)
         ) {
-          auditedResult = await auditWithHybridSemantics({
-            manuscript: hygieneRepaired.manuscript,
-            answers,
-            questions,
-            provider: effectiveProvider,
-            model: effectiveModel,
-            alternateProvider,
-            alternateModel,
-            repairAttemptsUsed: repairPassesUsed,
-          });
+          auditedResult = hygieneAudited;
         }
       }
 
@@ -3613,17 +4152,56 @@ ${structureInstructions}`;
             repairPassesAttempted: repairPassesUsed,
           });
 
-      const finalManuscript: DemoManuscript = {
+      const unsignedFinalManuscript: DemoManuscript = {
         ...auditedResult.manuscript,
         aiGenerated: true,
         isPartialMemoir: fallbackResult.editorialPlan.isPartialMemoir,
         documentedStages: fallbackResult.editorialPlan.documentedStages,
         generationStatus: finalGenerationStatus,
         status: finalGenerationStatus,
-        incompleteDraftNotice: fullyVerified ? undefined : PLAIN_INCOMPLETE_DRAFT_USER_NOTICE,
+        // V5.1: the participant reads a message that matches the real cause of the incomplete draft.
+        incompleteDraftNotice: failureDiag
+          ? buildIncompleteDraftUserNotice(failureDiag.category)
+          : undefined,
+        failureCategory: failureDiag?.category,
         internalReasonCode: failureDiag?.code,
         diagnosticSummary: failureDiag?.summary,
+        approvalEvidence: undefined,
       };
+      // V5.1: approval is recorded once, here, as server-signed evidence bound to this exact text
+      // and these exact sources. Saving verifies this evidence instead of auditing again by other rules.
+      const finalManuscript: DemoManuscript = fullyVerified
+        ? attachApprovalEvidence(
+            unsignedFinalManuscript,
+            auditedResult.report,
+            auditedResult.editorialAudit.passed
+          )
+        : unsignedFinalManuscript;
+
+      // V5.1: when the draft fails for reasons in its CONTENT, replaying the same drafted batches
+      // on the next attempt reproduces the same manuscript and the same failure. Batches holding
+      // chapters with confirmed defects are discarded so only those chapters are written again.
+      // Technical failures keep every batch: the text was never the problem.
+      let invalidatedBatchIndexes: number[] = [];
+      if (failureDiag && failureDiag.category !== 'technical') {
+        const defectiveChapterIds = new Set(
+          Array.from(
+            countUnresolvedDefectsByChapter(
+              auditedResult,
+              buildAnswerHomeChapterMap(rawCandidateManuscript)
+            ).keys()
+          )
+        );
+        invalidatedBatchIndexes = chapterBatches
+          .map((batch, idx) => ({ batch, idx }))
+          .filter(
+            ({ batch }) =>
+              defectiveChapterIds.size === 0 ||
+              batch.some((seg) => defectiveChapterIds.has(seg.id))
+          )
+          .map(({ idx }) => idx);
+        for (const idx of invalidatedBatchIndexes) batchCheckpointMap.delete(idx);
+      }
 
       // Update chapterPhotos captions with the audited shortCaption when available, and map custom chapter IDs
       const updatedChapterPhotos: Record<string, DemoInMemoryPhoto | null> = {
@@ -3668,7 +4246,9 @@ ${structureInstructions}`;
         manuscriptAiMemoryCache.set(canonicalKey, cacheEntry);
         manuscriptAiMemoryCache.set(fullCacheKey, cacheEntry);
         manuscriptAiMemoryCache.set(scopeCacheKey, cacheEntry);
-        persistManuscriptCacheToDisk();
+        if (!pipelineOverrides.skipDiskCache) {
+          persistManuscriptCacheToDisk();
+        }
         manuscriptBatchCheckpoints.delete(canonicalKey);
       }
 
@@ -3685,6 +4265,9 @@ ${structureInstructions}`;
         cachedContextUsed: anyProviderCachedTokens,
         internalReasonCode: failureDiag?.code,
         diagnosticSummary: failureDiag?.summary,
+        failureCategory: failureDiag?.category,
+        sourceFingerprint,
+        invalidatedBatchIndexes,
         batchesCompleted: completedBatchesCount,
         totalBatches: chapterBatches.length,
       };
@@ -3717,9 +4300,11 @@ ${structureInstructions}`;
         aiGenerated: false,
         generationStatus: 'incomplete_draft',
         status: 'incomplete_draft',
-        incompleteDraftNotice: PLAIN_INCOMPLETE_DRAFT_USER_NOTICE,
+        incompleteDraftNotice: buildIncompleteDraftUserNotice(failureDiag.category),
+        failureCategory: failureDiag.category,
         internalReasonCode: failureDiag.code,
         diagnosticSummary: failureDiag.summary,
+        approvalEvidence: undefined,
       };
 
       return {
@@ -3729,12 +4314,14 @@ ${structureInstructions}`;
         scope,
         providerUsed: effectiveProvider,
         modelUsed: effectiveModel,
-        providerFallbackNotice: PLAIN_INCOMPLETE_DRAFT_USER_NOTICE,
+        providerFallbackNotice: buildIncompleteDraftUserNotice(failureDiag.category),
         compilationPdfId: compilationPdfRecord?.pdfId,
         compilationPdfSha256: compilationPdfRecord?.sha256Hash,
         cachedContextUsed: false,
         internalReasonCode: failureDiag.code,
         diagnosticSummary: failureDiag.summary,
+        failureCategory: failureDiag.category,
+        sourceFingerprint,
         batchesCompleted: completedBatchesCount,
         totalBatches: chapterBatches.length,
       };

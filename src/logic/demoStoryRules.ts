@@ -94,8 +94,8 @@ export type ManuscriptGenerationStatus =
   | 'failed_audit'
   | 'error';
 
-export const CANONICAL_AUDIT_RULES_VERSION = 'v4.1.0-propositional-hybrid-audit';
-export const BOOK_GENERATION_ENGINE_VERSION = 'v4.1.0-resumable-book-engine';
+export const CANONICAL_AUDIT_RULES_VERSION = 'v5.1.0-judge-arbitrated-hybrid-audit';
+export const BOOK_GENERATION_ENGINE_VERSION = 'v5.1.0-fingerprinted-resumable-book-engine';
 
 export type BookGenerationReasonCode =
   | 'PROVIDER_ERROR'
@@ -108,7 +108,96 @@ export type BookGenerationReasonCode =
   | 'PRIVACY_VALIDATION_FAILURE'
   | 'PHOTO_PLACEMENT_FAILURE'
   | 'REPAIR_EXHAUSTED'
-  | 'AUDIT_INCONCLUSIVE';
+  | 'AUDIT_INCONCLUSIVE'
+  | 'SEMANTIC_JUDGE_UNAVAILABLE'
+  | 'SOURCE_CHANGED_SINCE_APPROVAL';
+
+/**
+ * V5.1 — Coarse failure family derived from `BookGenerationReasonCode`. Unlike the granular
+ * internal code (administrators only), the category is safe to show to participants and decides
+ * WHICH message they read and WHAT a retry will actually do.
+ * - technical: provider outage, timeout, invalid JSON, partial batches, judge unavailable. Retrying resumes.
+ * - documentary: real omissions / contradictions / unsupported data confirmed by the audit.
+ * - editorial: style, title, duplicate or formatting defects.
+ * - privacy: excluded content leaked into the manuscript.
+ * - repair_pending: automatic repairs ran but did not manage to clear every defect.
+ * - source_changed: the interview changed after the manuscript was approved.
+ */
+export type BookFailureCategory =
+  | 'technical'
+  | 'documentary'
+  | 'editorial'
+  | 'privacy'
+  | 'repair_pending'
+  | 'source_changed';
+
+export function resolveBookFailureCategory(
+  code: BookGenerationReasonCode | undefined | null
+): BookFailureCategory {
+  switch (code) {
+    case 'PROVIDER_ERROR':
+    case 'MODEL_TIMEOUT':
+    case 'INVALID_MODEL_RESPONSE':
+    case 'PARTIAL_BATCH_GENERATION':
+    case 'SEMANTIC_JUDGE_UNAVAILABLE':
+      return 'technical';
+    case 'PRIVACY_VALIDATION_FAILURE':
+      return 'privacy';
+    case 'EDITORIAL_QUALITY_FAILURE':
+      return 'editorial';
+    case 'REPAIR_EXHAUSTED':
+      return 'repair_pending';
+    case 'SOURCE_CHANGED_SINCE_APPROVAL':
+      return 'source_changed';
+    case 'DOCUMENTARY_COVERAGE_FAILURE':
+    case 'SEMANTIC_CONTRADICTION':
+    case 'PHOTO_PLACEMENT_FAILURE':
+    case 'AUDIT_INCONCLUSIVE':
+    default:
+      return 'documentary';
+  }
+}
+
+/** Plain-language participant notice per failure family (never exposes internal codes). */
+export function buildIncompleteDraftUserNotice(category: BookFailureCategory): string {
+  switch (category) {
+    case 'technical':
+      return 'Tuvimos un inconveniente técnico temporal al preparar tu libro. Tus recuerdos están a salvo y el avance quedó guardado: al volver a intentarlo continuaremos desde donde nos quedamos.';
+    case 'privacy':
+      return 'Detectamos que este borrador todavía menciona algo que pediste no incluir. Por tu privacidad no lo guardaremos como versión definitiva; vuelve a intentarlo para prepararlo de nuevo sin esa parte.';
+    case 'editorial':
+      return 'Tus recuerdos ya están reunidos en este borrador, pero la redacción todavía necesita un pulido de estilo antes de quedar como versión definitiva. Vuelve a intentarlo para terminar ese pulido.';
+    case 'repair_pending':
+      return 'Este borrador ya reúne casi toda tu historia, pero algunos recuerdos aún no quedaron integrados con la fidelidad necesaria. Vuelve a intentarlo: volveremos a escribir únicamente los capítulos pendientes.';
+    case 'source_changed':
+      return 'Tus respuestas cambiaron después de preparar este libro. Vuelve a prepararlo para que incluya tus recuerdos más recientes antes de guardarlo.';
+    case 'documentary':
+    default:
+      return 'Este borrador preliminar todavía no incluye todos tus recuerdos con total fidelidad. Puedes leerlo ahora y volver a intentarlo; no se guardará como versión definitiva hasta quedar completo.';
+  }
+}
+
+/**
+ * V5.1 — Server-issued approval evidence. It binds one approved manuscript text to the exact
+ * interview sources, narrative style and audit rules it was approved with. The signature is an
+ * HMAC computed with a server-only secret, so a browser can carry the evidence but cannot forge
+ * or re-target it. `src/server/bookApproval.ts` issues and verifies it.
+ */
+export interface BookApprovalEvidence {
+  evidenceVersion: 1;
+  auditRulesVersion: string;
+  engineVersion: string;
+  auditPolicy: 'hybrid_arbitrated';
+  interviewId: string;
+  narrativeStyle: DemoNarrativeStyleId;
+  sourceFingerprint: string;
+  manuscriptContentHash: string;
+  coveragePercentage: number;
+  totalSourceUnits: number;
+  judgeResolvedUnits: number;
+  issuedAt: string;
+  signature: string;
+}
 
 export type DocumentaryExclusionReason =
   | 'none'
@@ -258,7 +347,13 @@ export interface TraceabilityMatrixEntry {
   verificationStatus?: UnitVerificationStatus;
   semanticIssues?: string[];
   ambiguityReason?: string;
-  aiJudgeVerdict?: 'supported' | 'contradicted' | 'inconclusive';
+  /** V5.1: deterministic rules could not settle this unit alone; a semantic judge must arbitrate. */
+  needsSemanticReview?: boolean;
+  semanticReviewReason?: string;
+  aiJudgeVerdict?: 'supported' | 'contradicted' | 'omitted' | 'inconclusive';
+  aiJudgeRationale?: string;
+  /** V5.1: true when the judge could not be reached (technical), as opposed to an inconclusive verdict. */
+  aiJudgeUnavailable?: boolean;
   exclusionReason?: DocumentaryExclusionReason;
   eventId?: string;
   lifeStage?: string;
@@ -286,6 +381,11 @@ export interface DocumentaryAuditReport {
   passed: boolean;
   internalReasonCode?: BookGenerationReasonCode;
   diagnosticSummary?: string;
+  /**
+   * V5.1: which policy produced this verdict. 'deterministic_only' reports are conservative
+   * locators (suspicions block until arbitrated); 'hybrid_arbitrated' is the single approval policy.
+   */
+  auditPolicy?: 'deterministic_only' | 'hybrid_arbitrated';
   totalSourceUnits: number;
   integratedUnits: number;
   omittedNotRecalledUnits: number;
@@ -327,6 +427,11 @@ export interface DocumentaryAuditReport {
     uncertainUnitsCount: number;
     ambiguousUnitsCount?: number;
     ambiguousUnitIds?: string[];
+    /** V5.1: every unit the deterministic rules could not settle (superset of ambiguousUnitIds). */
+    reviewCandidateUnitIds?: string[];
+    /** V5.1: units a semantic judge ruled on, and those left unresolved because it was unreachable. */
+    judgeResolvedUnitIds?: string[];
+    judgeUnavailableUnitIds?: string[];
     directionAChecked: number;
     directionBChecked: number;
   };
@@ -416,6 +521,10 @@ export interface DemoManuscript {
   incompleteDraftNotice?: string;
   internalReasonCode?: BookGenerationReasonCode;
   diagnosticSummary?: string;
+  /** V5.1: participant-safe failure family (see `BookFailureCategory`). */
+  failureCategory?: BookFailureCategory;
+  /** V5.1: server-signed proof that this exact text was approved for these exact sources. */
+  approvalEvidence?: BookApprovalEvidence;
   auditReport?: DocumentaryAuditReport;
   documentaryAudit?: DocumentaryAuditReport;
   editorialAudit?: EditorialQualityAuditReport;
@@ -4549,6 +4658,167 @@ function normalizePlainAscii(text: string): string {
     .trim();
 }
 
+// ---------------------------------------------------------------------------------------------
+// V5.1 — Spanish number normalization.
+// A testimony may say "veinticinco años" / "en el 75" while a faithful manuscript writes "25 años" /
+// "en 1975" (or the reverse). Treating those as different facts produced false "invented data" and
+// false "missing year" defects. These helpers let both audit directions compare numeric VALUES.
+// ---------------------------------------------------------------------------------------------
+const SPANISH_NUMBER_UNIT_WORDS: Record<string, number> = {
+  un: 1, uno: 1, una: 1, dos: 2, tres: 3, cuatro: 4, cinco: 5, seis: 6, siete: 7, ocho: 8,
+  nueve: 9, diez: 10, once: 11, doce: 12, trece: 13, catorce: 14, quince: 15, dieciseis: 16,
+  diecisiete: 17, dieciocho: 18, diecinueve: 19, veinte: 20, veintiun: 21, veintiuno: 21,
+  veintiuna: 21, veintidos: 22, veintitres: 23, veinticuatro: 24, veinticinco: 25,
+  veintiseis: 26, veintisiete: 27, veintiocho: 28, veintinueve: 29,
+};
+const SPANISH_NUMBER_TENS_WORDS: Record<string, number> = {
+  treinta: 30, cuarenta: 40, cincuenta: 50, sesenta: 60, setenta: 70, ochenta: 80, noventa: 90,
+};
+const SPANISH_NUMBER_HUNDREDS_WORDS: Record<string, number> = {
+  cien: 100, ciento: 100, doscientos: 200, doscientas: 200, trescientos: 300, trescientas: 300,
+  cuatrocientos: 400, cuatrocientas: 400, quinientos: 500, quinientas: 500, seiscientos: 600,
+  seiscientas: 600, setecientos: 700, setecientas: 700, ochocientos: 800, ochocientas: 800,
+  novecientos: 900, novecientas: 900,
+};
+const SPANISH_AMBIGUOUS_ARTICLE_NUMBERS = new Set(['un', 'uno', 'una']);
+
+/**
+ * Parses spelled-out Spanish numbers found in already ASCII-normalized text and returns their
+ * digit strings ("mil novecientos setenta y cinco" -> "1975", "treinta y dos" -> "32").
+ * A lone article ("un", "una", "uno") is never reported as the number 1.
+ */
+export function extractSpanishNumberWordValues(normalizedAsciiText: string): string[] {
+  const words = (normalizedAsciiText || '').split(/\s+/).filter(Boolean);
+  const values: string[] = [];
+  let i = 0;
+  while (i < words.length) {
+    let total = 0;
+    let current = 0;
+    let consumed = 0;
+    let onlyAmbiguousArticle = true;
+    let lastKind: 'none' | 'unit' | 'tens' | 'hundreds' | 'mil' = 'none';
+    let j = i;
+    while (j < words.length) {
+      const w = words[j];
+      if (w in SPANISH_NUMBER_HUNDREDS_WORDS && (lastKind === 'none' || lastKind === 'mil')) {
+        current += SPANISH_NUMBER_HUNDREDS_WORDS[w];
+        lastKind = 'hundreds';
+        onlyAmbiguousArticle = false;
+      } else if (
+        w in SPANISH_NUMBER_TENS_WORDS &&
+        (lastKind === 'none' || lastKind === 'mil' || lastKind === 'hundreds')
+      ) {
+        current += SPANISH_NUMBER_TENS_WORDS[w];
+        lastKind = 'tens';
+        onlyAmbiguousArticle = false;
+      } else if (
+        w === 'y' &&
+        lastKind === 'tens' &&
+        words[j + 1] in SPANISH_NUMBER_UNIT_WORDS &&
+        SPANISH_NUMBER_UNIT_WORDS[words[j + 1]] < 10
+      ) {
+        current += SPANISH_NUMBER_UNIT_WORDS[words[j + 1]];
+        lastKind = 'unit';
+        j += 1;
+        consumed += 1;
+      } else if (
+        w in SPANISH_NUMBER_UNIT_WORDS &&
+        (lastKind === 'none' || lastKind === 'mil' || lastKind === 'hundreds')
+      ) {
+        current += SPANISH_NUMBER_UNIT_WORDS[w];
+        lastKind = 'unit';
+        if (!SPANISH_AMBIGUOUS_ARTICLE_NUMBERS.has(w)) onlyAmbiguousArticle = false;
+      } else if (w === 'mil' && lastKind !== 'mil' && total === 0) {
+        total += (current || 1) * 1000;
+        current = 0;
+        lastKind = 'mil';
+        onlyAmbiguousArticle = false;
+      } else {
+        break;
+      }
+      consumed += 1;
+      j += 1;
+    }
+    if (consumed === 0) {
+      i += 1;
+      continue;
+    }
+    const value = total + current;
+    if (value > 0 && !onlyAmbiguousArticle) values.push(String(value));
+    i = j;
+  }
+  return values;
+}
+
+/** Spells a non-negative integer below 10000 as ASCII-normalized Spanish words. */
+function spellSpanishNumberAsAsciiWords(value: number): string[] {
+  if (!Number.isInteger(value) || value <= 0 || value >= 10000) return [];
+  const out: string[] = [];
+  const unitByValue = new Map<number, string>();
+  for (const [w, v] of Object.entries(SPANISH_NUMBER_UNIT_WORDS)) {
+    if (!unitByValue.has(v) && w !== 'un' && w !== 'una' && w !== 'veintiun' && w !== 'veintiuna') {
+      unitByValue.set(v, w);
+    }
+  }
+  const tensByValue = new Map<number, string>(
+    Object.entries(SPANISH_NUMBER_TENS_WORDS).map(([w, v]) => [v, w])
+  );
+  const hundredsByValue: Record<number, string> = {
+    100: 'ciento', 200: 'doscientos', 300: 'trescientos', 400: 'cuatrocientos', 500: 'quinientos',
+    600: 'seiscientos', 700: 'setecientos', 800: 'ochocientos', 900: 'novecientos',
+  };
+  let rest = value;
+  const thousands = Math.floor(rest / 1000);
+  if (thousands > 0) {
+    if (thousands > 1) out.push(unitByValue.get(thousands) || String(thousands));
+    out.push('mil');
+    rest %= 1000;
+  }
+  const hundreds = Math.floor(rest / 100) * 100;
+  if (hundreds > 0) {
+    out.push(rest === 100 ? 'cien' : hundredsByValue[hundreds]);
+    rest %= 100;
+  }
+  if (rest > 0) {
+    if (rest < 30) {
+      out.push(unitByValue.get(rest) || String(rest));
+    } else {
+      out.push(tensByValue.get(Math.floor(rest / 10) * 10) || '');
+      if (rest % 10 > 0) out.push(unitByValue.get(rest % 10) || '');
+    }
+  }
+  return out.filter(Boolean);
+}
+
+/**
+ * Two-digit years said aloud ("en el 75", "del 82", "año 68") expanded to their 4-digit form.
+ * Only fires after a year-introducing cue, so ages ("tenía 75 años") are not turned into years.
+ */
+export function expandSpokenTwoDigitYears(normalizedAsciiText: string): string[] {
+  const out: string[] = [];
+  const rx = /\b(?:en\s+el|del|desde\s+el|hasta\s+el|por\s+el|ano|anos)\s+(\d{2})\b(?!\s+anos?\b)/g;
+  for (const m of (normalizedAsciiText || '').matchAll(rx)) {
+    const yy = Number(m[1]);
+    if (Number.isNaN(yy)) continue;
+    out.push(String(yy >= 30 ? 1900 + yy : 2000 + yy));
+  }
+  return out;
+}
+
+/**
+ * Extra index tokens that make numeric facts comparable regardless of how they are written:
+ * digits for spelled-out numbers, and spelled words for digits.
+ */
+function buildNumericEquivalenceTokens(normalizedAsciiText: string): string[] {
+  const extra: string[] = [];
+  for (const v of extractSpanishNumberWordValues(normalizedAsciiText)) extra.push(v);
+  for (const y of expandSpokenTwoDigitYears(normalizedAsciiText)) extra.push(y);
+  for (const d of normalizedAsciiText.match(/\b\d{1,4}\b/g) || []) {
+    for (const w of spellSpanishNumberAsAsciiWords(Number(d))) extra.push(w);
+  }
+  return extra;
+}
+
 export function resolveAnswerExclusionReason(
   ansOrText: DocumentarySourceAnswerInput | string
 ): DocumentaryExclusionReason {
@@ -5147,13 +5417,20 @@ export function buildDocumentaryInventory(params: {
     for (const yn of u.yearsOrNumbers) corpusYearsSet.add(yn);
     for (const pn of u.properNames) corpusNamesSet.add(pn);
     for (const pl of u.places) corpusNamesSet.add(pl);
-    for (const w of normalizePlainAscii(`${u.cleanText} ${u.questionText}`).split(/\s+/)) {
+    const unitNormText = normalizePlainAscii(`${u.cleanText} ${u.questionText}`);
+    for (const w of unitNormText.split(/\s+/)) {
       if (w.length >= 3) corpusNamesSet.add(w);
     }
+    // V5.1: a number the interviewee SPOKE ("veinticinco", "en el 75") is as documented as a digit.
+    for (const v of extractSpanishNumberWordValues(unitNormText)) corpusYearsSet.add(v);
+    for (const y of expandSpokenTwoDigitYears(unitNormText)) corpusYearsSet.add(y);
   }
   for (const p of photosInventory) {
     if (!p.isExcluded && p.caption) {
       for (const m of p.caption.match(/\b\d+\b/g) || []) corpusYearsSet.add(m);
+      const captionNorm = normalizePlainAscii(p.caption);
+      for (const v of extractSpanishNumberWordValues(captionNorm)) corpusYearsSet.add(v);
+      for (const y of expandSpokenTwoDigitYears(captionNorm)) corpusYearsSet.add(y);
       for (const w of normalizePlainAscii(p.caption).split(/\s+/)) {
         if (w.length >= 3) corpusNamesSet.add(w);
       }
@@ -6721,6 +6998,33 @@ function stripSpanishDiscourseNoiseForPolarity(clauseText: string): string {
   );
 }
 
+/**
+ * V5.1 — Negation bindings: for every negation cue, the stem of the predicate it governs (the
+ * next significant word inside the same punctuation-delimited segment). Oral fillers, repeated
+ * words and tag questions (", ¿no?") do not create bindings, so a testimony and its cleaned-up
+ * rendering yield the same set even when a fixed word window would have drifted.
+ */
+function collectNegationBindings(text: string): string[] {
+  const bindings: string[] = [];
+  const segments = normalizeAsciiPreserveClausePunctuation(text)
+    .split(/[.,;:!?]+/)
+    .map((seg) => seg.trim().split(/\s+/).filter(Boolean))
+    .filter((segWords) => segWords.length > 0);
+  for (const segWords of segments) {
+    for (let i = 0; i < segWords.length; i++) {
+      if (!NEGATION_CUES_RX.test(segWords[i])) continue;
+      for (let k = i + 1; k < segWords.length; k++) {
+        const candidate = segWords[k];
+        if (candidate.length < 4 || NEGATION_CUES_RX.test(candidate)) continue;
+        if (tokenizeSignificantWords(candidate).length === 0) continue;
+        bindings.push(candidate.slice(0, 3));
+        break;
+      }
+    }
+  }
+  return bindings;
+}
+
 function selectAlignedTargetClauses(params: {
   sourceText: string;
   targetSentencesRaw: string[];
@@ -6828,9 +7132,25 @@ function detectSemanticContradictionsBetweenTexts(params: {
     stemPrefix: string
   ): { polarity: 'affirmed' | 'negated' | 'absent'; usedDiscourseTag: boolean } => {
     const hadDiscourseStarter = LEADING_DISCOURSE_NO_RX.test(rawClause);
-    const cleaned = stripSpanishDiscourseNoiseForPolarity(rawClause);
-    const words = cleaned.split(/\s+/).filter(Boolean);
-    const hitIdx = words.findIndex((w) => w.startsWith(stemPrefix));
+    // V5.1: a negation only governs the predicate inside its own comma-delimited segment.
+    // Looking back across a comma ("...ellos no lo sepan, mis papás ...") attached the previous
+    // segment's negation to an unrelated noun and produced false polarity inversions.
+    const commaSegments = rawClause
+      .replace(LEADING_DISCOURSE_NO_RX, '')
+      .replace(TRAILING_TAG_NO_RX, '')
+      .split(',')
+      .map((seg) => normalizePlainAscii(seg).split(/\s+/).filter(Boolean))
+      .filter((segWords) => segWords.length > 0);
+    let words: string[] = [];
+    let hitIdx = -1;
+    for (const segWords of commaSegments) {
+      const idx = segWords.findIndex((w) => w.startsWith(stemPrefix));
+      if (idx >= 0) {
+        words = segWords;
+        hitIdx = idx;
+        break;
+      }
+    }
     if (hitIdx < 0) return { polarity: 'absent', usedDiscourseTag: hadDiscourseStarter };
     const windowBefore = words.slice(Math.max(0, hitIdx - 4), hitIdx).join(' ');
     // Exclude benign rhetorical or epistemic idioms across 1st/2nd/3rd person ("no recuerdo/recuerda", "no me/se acuerda", "no cabe duda")
@@ -6847,7 +7167,22 @@ function detectSemanticContradictionsBetweenTexts(params: {
     return { polarity: 'affirmed', usedDiscourseTag: hadDiscourseStarter };
   };
 
-  for (const tok of significantActionOrSubjectTokens.slice(0, 12)) {
+  // V5.1: when every negation of the testimony governs the same predicate in the manuscript and
+  // the manuscript adds no negation over a predicate the testimony affirmed, polarity was
+  // preserved by construction and the word-window heuristic below cannot add information.
+  const srcNegationBindings = new Set(collectNegationBindings(sourceText));
+  const tgtNegationBindings = new Set(collectNegationBindings(alignedOrFullTargetRaw));
+  const srcPredicateStems = new Set(
+    normSource
+      .split(/\s+/)
+      .filter((w) => w.length >= 4)
+      .map((w) => w.slice(0, 3))
+  );
+  const polarityStructurePreserved =
+    Array.from(srcNegationBindings).every((b) => tgtNegationBindings.has(b)) &&
+    Array.from(tgtNegationBindings).every((b) => !srcPredicateStems.has(b) || srcNegationBindings.has(b));
+
+  for (const tok of polarityStructurePreserved ? [] : significantActionOrSubjectTokens.slice(0, 12)) {
     const stem = tok.slice(0, 5);
     let srcHasAffirmed = false;
     let srcHasNegated = false;
@@ -6895,7 +7230,24 @@ function detectSemanticContradictionsBetweenTexts(params: {
   if (srcPassiveM && tgtActiveM) {
     const srcStem = srcPassiveM[1].slice(0, 4);
     const tgtStem = tgtActiveM[1].slice(0, 4);
-    if (srcStem === tgtStem && !tgtFull.match(passiveToFirstPersonRx)) {
+    // V5.1: "-aba" forms are identical in 1st and 3rd person. In a third-person biography
+    // "me cuidaba" is correctly rendered as "le/lo/la cuidaba": the object clitic proves the
+    // protagonist still RECEIVES the action, so it is not an agency reversal.
+    const tgtVerb = tgtActiveM[1];
+    const isPersonAmbiguousImperfect = /aba$/.test(tgtVerb);
+    const keepsObjectClitic = new RegExp(
+      `\\b(?:le|lo|la|les|los|las|nos|se)\\s+${tgtVerb}\\b`
+    ).test(tgtFull);
+    const hasExplicitFirstPersonSubject = new RegExp(
+      `\\byo\\s+(?:(?:le|lo|la|les|los|las)\\s+)?${tgtVerb}\\b`
+    ).test(tgtFull);
+    const isThirdPersonRendering =
+      isPersonAmbiguousImperfect && keepsObjectClitic && !hasExplicitFirstPersonSubject;
+    if (
+      srcStem === tgtStem &&
+      !tgtFull.match(passiveToFirstPersonRx) &&
+      !isThirdPersonRendering
+    ) {
       issues.push(
         `Inversión de agencia (quién realizó la acción): el testimonio indica "me ${srcPassiveM[1]}" pero el manuscrito invierte el rol hacia "${tgtActiveM[0]}".`
       );
@@ -6955,6 +7307,12 @@ function detectSemanticContradictionsBetweenTexts(params: {
   return { issues, ambiguousEdge };
 }
 
+/**
+ * V5.1: below this lexical overlap the best-matching paragraph shares almost nothing with the
+ * testimony, so the unit is a genuine omission and needs no semantic judge (saves tokens).
+ */
+const SEMANTIC_REVIEW_MIN_LEXICAL_SCORE = 0.2;
+
 interface PreIndexedChapterParagraph {
   raw: string;
   norm: string;
@@ -6977,7 +7335,8 @@ function buildChapterAuditIndex(chapters: DemoChapterManuscript[]): PreIndexedCh
     const rawParas = ch.paragraphs || [];
     const normList = rawParas.map((p) => {
       const norm = normalizePlainAscii(p);
-      const words = norm.split(/\s+/).filter(Boolean);
+      // V5.1: index numeric facts by value so "1975" and "mil novecientos setenta y cinco" match.
+      const words = [...norm.split(/\s+/).filter(Boolean), ...buildNumericEquivalenceTokens(norm)];
       const sentencesRaw = (p || '')
         .split(/(?<=[.!?…])\s+/)
         .map((s) => s.trim())
@@ -7029,6 +7388,8 @@ export function verifyDocumentaryUnitInManuscript(params: {
   verificationStatus: UnitVerificationStatus;
   semanticIssues: string[];
   ambiguityReason?: string;
+  needsSemanticReview: boolean;
+  semanticReviewReason?: string;
   semanticMatchScore: number;
   chapterIndex: number;
   paragraphIndex: number;
@@ -7045,6 +7406,7 @@ export function verifyDocumentaryUnitInManuscript(params: {
       verified: false,
       verificationStatus: 'missing',
       semanticIssues: ['Manuscrito vacío'],
+      needsSemanticReview: false,
       semanticMatchScore: 0,
       chapterIndex: -1,
       paragraphIndex: -1,
@@ -7282,11 +7644,31 @@ export function verifyDocumentaryUnitInManuscript(params: {
   const paragraphId =
     targetCh.paragraphIds?.[bestParaIdx] || `${targetCh.id}_p_${bestParaIdx + 1}`;
 
+  // V5.1 — Deterministic rules are LOCATORS, not judges. Word overlap, facet lists and
+  // negation/antonym patterns can prove that a memory is literally present, and they can prove
+  // that nothing resembling it exists. Everything in between (a paraphrase that changed the
+  // vocabulary, a facet expressed differently, a suspected contradiction) is a hypothesis that
+  // only a contextual reading can settle, so it is flagged for semantic arbitration instead of
+  // being treated as a final omission or contradiction.
+  const needsSemanticReview =
+    !verified &&
+    unitRequiredTokens.length > 0 &&
+    (hasContradiction || semanticMatchScore >= SEMANTIC_REVIEW_MIN_LEXICAL_SCORE);
+  const semanticReviewReason = !needsSemanticReview
+    ? undefined
+    : hasContradiction
+    ? `Posible contradicción detectada por reglas (${semanticIssues[0]}); requiere confirmación contextual.`
+    : missingFacets.length > 0
+    ? `Coincidencia léxica ${(semanticMatchScore * 100).toFixed(0)}% con detalles no localizados literalmente (${missingFacets.join('; ')}).`
+    : `Posible paráfrasis: coincidencia léxica ${(semanticMatchScore * 100).toFixed(0)}% por debajo del umbral automático.`;
+
   return {
     verified,
     verificationStatus,
     semanticIssues,
     ambiguityReason,
+    needsSemanticReview,
+    semanticReviewReason,
     semanticMatchScore,
     chapterIndex: bestChapterIdx,
     paragraphIndex: bestParaIdx,
@@ -7559,7 +7941,12 @@ export function auditBookEditorialQuality(params: {
     /(?<![A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9])(yo|mi|mis|mío|mía|míos|mías|conmigo|nosotros|nosotras|nuestro|nuestra|nuestros|nuestras|nací|crecí|viví|aprendí|conocí|salí|volví|sentí|decidí|descubrí|compartí|recibí|elegí|construí|tuve|estuve|hice|pude|supe|quise|fui|empecé|comencé|terminé|trabajé|estudié|llegué|jugué|logré|pasé|encontré|formé|cuidé|disfruté|amé|tengo|soy|estoy|voy|quiero|pienso|siento|considero|agradezco|vivíamos|teníamos|éramos|estábamos|jugábamos|íbamos|tuvimos|fuimos|hicimos)(?![A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9])/i;
 
   const findFirstPersonLeakOutsideQuotes = (rawText: string): string | null => {
-    const outsideQuotes = rawText.replace(/«[^»]*»|"[^"]*"/g, ' ');
+    // V5.1: language models usually emit typographic quotes (“ ”, ‘ ’) and em-dash dialogue lines.
+    // Only straight quotes and guillemets were stripped, so every faithfully quoted first-person
+    // testimony inside a third-person biography was reported as a perspective leak.
+    const outsideQuotes = rawText
+      .replace(/«[^»]*»|"[^"]*"|“[^”]*”|‘[^’]*’/g, ' ')
+      .replace(/(^|[\n.!?:]\s*)[—–]\s*[^—–\n]*(?:[—–]|$)/g, '$1 ');
     const directMatch = outsideQuotes.match(firstPersonMarkerRx);
     if (directMatch) return directMatch[1];
 
@@ -7990,6 +8377,7 @@ export function auditAndApproveBookManuscript(params: {
   let uncertaintiesPreserved = true;
   const missingUnitIds: string[] = [];
   const ambiguousUnitIds: string[] = [];
+  const reviewCandidateUnitIds: string[] = [];
   const uncertaintyViolations: string[] = [];
   const semanticContradictionFlags: string[] = [];
   let uncertainUnitsCount = 0;
@@ -8041,6 +8429,9 @@ export function auditAndApproveBookManuscript(params: {
 
     if (verification.verificationStatus === 'ambiguous') {
       ambiguousUnitIds.push(unit.unitId);
+    }
+    if (verification.needsSemanticReview) {
+      reviewCandidateUnitIds.push(unit.unitId);
     }
 
     if (verification.semanticIssues.length > 0) {
@@ -8141,6 +8532,8 @@ export function auditAndApproveBookManuscript(params: {
         verificationStatus: verification.verificationStatus,
         semanticIssues: verification.semanticIssues,
         ambiguityReason: verification.ambiguityReason,
+        needsSemanticReview: verification.needsSemanticReview,
+        semanticReviewReason: verification.semanticReviewReason,
         exclusionReason: 'none',
         verified: false,
       });
@@ -8229,6 +8622,7 @@ export function auditAndApproveBookManuscript(params: {
     status: passed ? 'approved' : 'failed_audit',
     approved: passed,
     passed,
+    auditPolicy: 'deterministic_only',
     totalSourceUnits,
     integratedUnits,
     omittedNotRecalledUnits,
@@ -8279,6 +8673,7 @@ export function auditAndApproveBookManuscript(params: {
       uncertainUnitsCount,
       ambiguousUnitsCount: ambiguousUnitIds.length,
       ambiguousUnitIds,
+      reviewCandidateUnitIds,
       directionAChecked: inventory.eligibleFactUnits.length,
       directionBChecked: normalizedChapters.reduce((sum, ch) => sum + ch.paragraphs.length, 0),
     },
@@ -8752,6 +9147,17 @@ export function repairManuscriptOmissions(params: {
   storyMode?: 'individual' | 'compartida';
   participantNames?: string[];
   maxAttempts?: number;
+  /**
+   * V5.1: when false, the pass only performs structural/editorial hygiene (regrouping, privacy
+   * scrubbing, de-duplication, paragraph splitting) and NEVER pastes rule-rewritten testimony into
+   * the prose. AI-written manuscripts use false: omissions there are repaired narratively by the
+   * model, and the deterministic audit used inside this function would otherwise re-insert
+   * memories that the semantic judge already confirmed as present (the source of duplicated,
+   * mechanically concatenated paragraphs). Defaults to true for the rule-based fallback/demo flows.
+   */
+  integrateMissingUnits?: boolean;
+  /** V5.1: restricts integration to these unit ids (e.g. omissions confirmed by the hybrid audit). */
+  onlyIntegrateUnitIds?: string[];
 }): {
   manuscript: DemoManuscript;
   report: DocumentaryAuditReport;
@@ -8770,7 +9176,10 @@ export function repairManuscriptOmissions(params: {
       .map((s) => s.trim())
       .filter(Boolean),
     maxAttempts = 2,
+    integrateMissingUnits = true,
+    onlyIntegrateUnitIds,
   } = params;
+  const integrationAllowList = onlyIntegrateUnitIds ? new Set(onlyIntegrateUnitIds) : null;
 
   const isCouple = storyMode === 'compartida' && participantNames.length >= 2;
   const narrativeStyle = manuscript.narrativeStyle || 'first_person_literary';
@@ -9004,7 +9413,11 @@ export function repairManuscriptOmissions(params: {
     }
 
     // Step D: Locally integrate each missing or contradicted DocumentaryFactUnit cleanly into its planned chapter
-    const missingIds = currentAudit.report.coverageAudit?.missingUnitIds || [];
+    const missingIds = !integrateMissingUnits
+      ? []
+      : (currentAudit.report.coverageAudit?.missingUnitIds || []).filter(
+          (id) => !integrationAllowList || integrationAllowList.has(id)
+        );
     for (let mIdx = 0; mIdx < missingIds.length; mIdx++) {
       const missingId = missingIds[mIdx];
       const missingUnit = currentAudit.inventory.eligibleFactUnits.find(
@@ -9274,4 +9687,35 @@ export function computeCanonicalManuscriptCacheKey(params: {
   ].join(';');
 
   return `canonical_${narrativeStyle}_${simpleHash(payload)}`;
+}
+
+/**
+ * V5.1 — Canonical serialization of everything in a manuscript that the audit actually judged:
+ * narrative style, introduction, closing message and every chapter's id, title, paragraphs and
+ * photo anchors. Title, subtitle, authors and dedication are deliberately excluded because the
+ * participant customizes them in the layout studio after approval and they carry no testimony.
+ * Whitespace and Unicode form are normalized so a JSON round-trip through the browser yields the
+ * same payload. The server hashes this string; any edit to audited text changes the hash.
+ */
+export function buildManuscriptApprovalDigestPayload(manuscript: DemoManuscript): string {
+  const clean = (text: string | undefined | null): string =>
+    String(text || '')
+      .normalize('NFC')
+      .replace(/\s+/g, ' ')
+      .trim();
+  const chapters = (manuscript.chapters || []).map((ch) => ({
+    id: clean(ch.id),
+    title: clean(ch.title),
+    paragraphs: (ch.paragraphs || []).map((p) => clean(p)),
+    photos: (ch.photoPlacements || [])
+      .map((pl) => `${pl.photoId}@${Number(pl.paragraphIndex) || 0}`)
+      .sort(),
+  }));
+  return JSON.stringify({
+    style: manuscript.narrativeStyle || '',
+    mode: manuscript.mode || '',
+    introduction: clean(manuscript.introduction),
+    closingMessage: clean(manuscript.closingMessage),
+    chapters,
+  });
 }

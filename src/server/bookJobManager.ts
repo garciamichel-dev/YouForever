@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import type {
+  BookFailureCategory,
   BookGenerationReasonCode,
   DemoInMemoryPhoto,
   DemoManuscript,
@@ -27,6 +28,12 @@ export interface BookJobResultPayload {
   activePromptVersionId?: string;
   internalReasonCode?: BookGenerationReasonCode;
   diagnosticSummary?: string;
+  /** V5.1: participant-safe failure family; unlike the internal code it is shown to the user. */
+  failureCategory?: BookFailureCategory;
+  /** V5.1: fingerprint of the sources/configuration the result was generated from. */
+  sourceFingerprint?: string;
+  /** V5.1: batches that must be drafted again because their chapters carry confirmed defects. */
+  invalidatedBatchIndexes?: number[];
   batchesCompleted?: number;
   totalBatches?: number;
 }
@@ -56,12 +63,37 @@ export interface BookGenerationJobRecord {
   totalRepairChapters: number;
   userMessage: string;
   batchCheckpoints: Record<string, BookBatchCheckpointPayload>;
+  /**
+   * V5.1: fingerprint of the interview content, style, prompt and settings this job works on.
+   * Checkpoints and results are only reused by a job carrying the same fingerprint.
+   */
+  sourceFingerprint?: string;
+  failureCategory?: BookFailureCategory;
   internalReasonCode?: BookGenerationReasonCode;
   diagnosticSummary?: string;
   result?: BookJobResultPayload;
   error?: string;
   createdAt: string;
   updatedAt: string;
+  /**
+   * V5.1: strictly increasing creation order. Timestamps have millisecond resolution, so two jobs
+   * settled within the same millisecond used to be ordered arbitrarily when choosing which one
+   * to resume from.
+   */
+  creationOrder?: number;
+}
+
+/** Newest first: by last update, then by creation order when the timestamps tie. */
+function compareJobsNewestFirst(a: BookGenerationJobRecord, b: BookGenerationJobRecord): number {
+  const byUpdate = new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+  if (byUpdate !== 0) return byUpdate;
+  return (b.creationOrder || 0) - (a.creationOrder || 0);
+}
+
+let jobCreationCounter = 0;
+function nextJobCreationOrder(): number {
+  jobCreationCounter = (jobCreationCounter + 1) % 1000;
+  return Date.now() * 1000 + jobCreationCounter;
 }
 
 export interface ParticipantBookJobView {
@@ -78,6 +110,7 @@ export interface ParticipantBookJobView {
   repairedChapters: number;
   totalRepairChapters: number;
   userMessage: string;
+  failureCategory?: BookFailureCategory;
   result?: Omit<BookJobResultPayload, 'internalReasonCode' | 'diagnosticSummary'> & {
     manuscript: Omit<DemoManuscript, 'internalReasonCode' | 'diagnosticSummary'>;
   };
@@ -135,6 +168,7 @@ export function toParticipantBookJobView(job: BookGenerationJobRecord): Particip
     repairedChapters: job.repairedChapters,
     totalRepairChapters: job.totalRepairChapters,
     userMessage: job.userMessage,
+    failureCategory: job.failureCategory,
     result: job.result ? sanitizeBookResultForParticipant(job.result) : undefined,
     error: job.error,
     createdAt: job.createdAt,
@@ -181,9 +215,7 @@ export class BookGenerationJobManager {
         fs.mkdirSync(dir, { recursive: true });
       }
       // Retain the 60 most recent jobs to keep disk file compact
-      const sorted = Array.from(this.jobs.values()).sort(
-        (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
-      );
+      const sorted = Array.from(this.jobs.values()).sort(compareJobsNewestFirst);
       const compactJobs = sorted.slice(0, 60);
       const tempPath = `${this.persistPath}.tmp.${process.pid}.${Date.now()}`;
       fs.writeFileSync(tempPath, JSON.stringify({ jobs: compactJobs }, null, 2), 'utf-8');
@@ -210,6 +242,11 @@ export class BookGenerationJobManager {
     interviewId: string;
     narrativeStyle?: DemoNarrativeStyleId;
     scope?: 'preview' | 'full';
+    /**
+     * V5.1: when given, only jobs generated from these exact sources are returned, so a finished
+     * job built from answers that were later edited is never offered as the current book.
+     */
+    resolveCurrentSourceFingerprint?: (job: BookGenerationJobRecord) => string | undefined;
   }): BookGenerationJobRecord | null {
     this.ensureHydrated();
     const candidates = Array.from(this.jobs.values())
@@ -217,9 +254,13 @@ export class BookGenerationJobManager {
         if (j.interviewId !== params.interviewId) return false;
         if (params.narrativeStyle && j.narrativeStyle !== params.narrativeStyle) return false;
         if (params.scope && j.scope !== params.scope) return false;
+        if (params.resolveCurrentSourceFingerprint) {
+          const current = params.resolveCurrentSourceFingerprint(j);
+          if (current && j.sourceFingerprint !== current) return false;
+        }
         return true;
       })
-      .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+      .sort(compareJobsNewestFirst);
 
     // Prefer an active running/queued job if any
     const active = candidates.find(
@@ -263,6 +304,11 @@ export class BookGenerationJobManager {
     narrativeStyle: DemoNarrativeStyleId;
     scope: 'preview' | 'full';
     forceRefresh?: boolean;
+    /**
+     * V5.1: fingerprint of the current interview content and configuration. When provided, an
+     * active job or saved checkpoints are reused ONLY if they carry the same fingerprint.
+     */
+    sourceFingerprint?: string;
     executor: BookJobExecutor;
     onJobSettled?: (job: BookGenerationJobRecord) => Promise<void> | void;
   }): BookGenerationJobRecord {
@@ -275,6 +321,10 @@ export class BookGenerationJobManager {
 
     // 1. If a worker is actively running for this exact key:
     const activeJobId = this.activeJobByKey.get(jobKey);
+    const isSameSources = (candidate: BookGenerationJobRecord): boolean =>
+      params.sourceFingerprint === undefined ||
+      candidate.sourceFingerprint === params.sourceFingerprint;
+    let activeJobIsStale = false;
     if (activeJobId && !params.forceRefresh) {
       const existingActive = this.jobs.get(activeJobId);
       if (
@@ -282,12 +332,17 @@ export class BookGenerationJobManager {
         (existingActive.status === 'running' || existingActive.status === 'queued') &&
         this.runningWorkers.has(activeJobId)
       ) {
-        return existingActive;
+        if (isSameSources(existingActive)) {
+          return existingActive;
+        }
+        // V5.1: the interview or its settings changed while a job was still running for the old
+        // content. Joining it would deliver a book built from outdated testimony.
+        activeJobIsStale = true;
       }
     }
 
-    // 2. If forceRefresh, cancel any prior active job for this key and start clean
-    if (params.forceRefresh && activeJobId) {
+    // 2. If forceRefresh (or the running job works on outdated sources), cancel it and start clean
+    if ((params.forceRefresh || activeJobIsStale) && activeJobId) {
       this.cancelJob(activeJobId);
     }
 
@@ -296,7 +351,7 @@ export class BookGenerationJobManager {
     if (!params.forceRefresh) {
       const priorCandidates = Array.from(this.jobs.values())
         .filter((j) => j.jobKey === jobKey)
-        .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+        .sort(compareJobsNewestFirst);
       const resumable = priorCandidates[0];
       if (
         resumable &&
@@ -305,9 +360,19 @@ export class BookGenerationJobManager {
           resumable.status === 'failed' ||
           resumable.status === 'incomplete') &&
         resumable.batchCheckpoints &&
-        Object.keys(resumable.batchCheckpoints).length > 0
+        Object.keys(resumable.batchCheckpoints).length > 0 &&
+        // V5.1: never inherit batches drafted from different answers, style, prompt or settings.
+        isSameSources(resumable)
       ) {
-        inheritedCheckpoints = { ...resumable.batchCheckpoints };
+        for (const [batchKey, checkpoint] of Object.entries(resumable.batchCheckpoints)) {
+          if (
+            params.sourceFingerprint === undefined ||
+            checkpoint?.sourceFingerprint === undefined ||
+            checkpoint.sourceFingerprint === params.sourceFingerprint
+          ) {
+            inheritedCheckpoints[batchKey] = checkpoint;
+          }
+        }
       }
     }
 
@@ -334,6 +399,8 @@ export class BookGenerationJobManager {
           ? 'Retomando la preparación de tu libro desde el último avance guardado...'
           : 'Reuniendo y ordenando tus recuerdos y fotografías...',
       batchCheckpoints: inheritedCheckpoints,
+      sourceFingerprint: params.sourceFingerprint,
+      creationOrder: nextJobCreationOrder(),
       createdAt: now,
       updatedAt: now,
     };
@@ -400,8 +467,21 @@ export class BookGenerationJobManager {
           result.internalReasonCode || result.manuscript?.internalReasonCode;
         job.diagnosticSummary =
           result.diagnosticSummary || result.manuscript?.diagnosticSummary;
+        job.failureCategory = isIncomplete
+          ? result.failureCategory || result.manuscript?.failureCategory
+          : undefined;
+        if (result.sourceFingerprint && !job.sourceFingerprint) {
+          job.sourceFingerprint = result.sourceFingerprint;
+        }
+        // V5.1: drop the checkpoints of batches whose chapters carry confirmed defects, so the
+        // next attempt rewrites those chapters instead of replaying the same failing draft.
+        for (const staleIdx of result.invalidatedBatchIndexes || []) {
+          delete job.batchCheckpoints[String(staleIdx)];
+        }
         job.userMessage = isIncomplete
-          ? 'Tu borrador preliminar está listo para revisión.'
+          ? job.failureCategory === 'technical'
+            ? 'Tuvimos un inconveniente técnico temporal. Tu avance quedó guardado para continuar.'
+            : 'Tu borrador preliminar está listo para revisión.'
           : '¡Tu libro ha sido preparado y verificado con éxito!';
         job.result = result;
         job.updatedAt = new Date().toISOString();
@@ -421,6 +501,7 @@ export class BookGenerationJobManager {
           job.error =
             'Ocurrió un inconveniente temporal al preparar tu libro. Puedes intentarlo de nuevo y continuaremos desde donde avanzamos.';
           job.internalReasonCode = 'PROVIDER_ERROR';
+          job.failureCategory = 'technical';
           job.diagnosticSummary = String(err?.message || err || 'Error desconocido en tarea de libro.');
           job.userMessage = job.error;
         }
