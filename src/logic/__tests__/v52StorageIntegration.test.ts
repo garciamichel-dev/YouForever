@@ -115,7 +115,7 @@ after(() => {
 
 async function createSyntheticInterview(
   size: 'small' | 'medium' | 'large',
-  options: { withPhotos?: boolean; extraBase?: string[] } = {}
+  options: { withPhotos?: boolean; extraBase?: string[]; variantOffset?: number; extraMemories?: string[]; extraFollowUps?: string[] } = {}
 ) {
   const created = await storage.createInterview({
     title: `Memorias sintéticas ${size}`,
@@ -130,7 +130,10 @@ async function createSyntheticInterview(
   interview.maxFollowUpsAtCreation = 0;
   const token = created.participantTokens[0].plainToken;
   const questions = storage.getQuestionsForVersion(interview.questionnaireVersionId);
-  const specs = helpers.buildSyntheticInterviewSpecs(size, { withPhotos: options.withPhotos });
+  const specs = helpers.buildSyntheticInterviewSpecs(size, {
+    withPhotos: options.withPhotos,
+    variantOffset: options.variantOffset,
+  });
   let fu = 0;
   let add = 0;
   for (const spec of specs) {
@@ -182,8 +185,37 @@ async function createSyntheticInterview(
       idempotencyKey: `extra_${i}`,
     });
   }
+  for (const [i, text] of (options.extraMemories || []).entries()) {
+    await storage.submitAnswer({
+      plainToken: token,
+      questionId: `mem_extra_${i}`,
+      questionText: 'Recuerdo adicional',
+      answerText: text,
+      notRecalled: false,
+      isAdditionalMemory: true,
+      idempotencyKey: `extra_mem_${i}`,
+    });
+  }
+  // Deepenings attached to existing base questions (they join the chapters of those questions).
+  for (const [i, text] of (options.extraFollowUps || []).entries()) {
+    const parent = questions[(i * 3) % specs.filter((sp: any) => sp.kind === 'base').length];
+    await storage.submitAnswer({
+      plainToken: token,
+      questionId: `${parent.id}_fu_extra_${i}`,
+      questionText: 'Cuéntame un poco más',
+      answerText: text,
+      notRecalled: false,
+      isFollowUp: true,
+      parentQuestionId: parent.id,
+      idempotencyKey: `extra_fu_${i}`,
+    });
+  }
   await storage.declareVoluntaryCompletion(token, 'Declaración voluntaria');
-  return { interview: storage.getInterviewById(interview.id), token, specsCount: specs.length + (options.extraBase || []).length };
+  return {
+    interview: storage.getInterviewById(interview.id),
+    token,
+    specsCount: specs.length + (options.extraBase || []).length + (options.extraMemories || []).length + (options.extraFollowUps || []).length,
+  };
 }
 
 function auditContext(interviewId: string, style: StyleId) {
@@ -456,109 +488,136 @@ const replaceInText = (manuscript: any, from: RegExp, to: string) => ({
   })),
 });
 
-test('V5.2-N1: el servidor rechaza recuerdos omitidos, contradicciones reales y manuscritos modificados tras aprobarse', async () => {
-  const style: StyleId = 'first_person_literary';
-  const { interview, token } = await createSyntheticInterview('small', { extraBase: [RIVER_TESTIMONY] });
-  const { result } = await generateApproved(interview.id, token, style, riverJudge());
-  assert.equal(result.manuscript.generationStatus, 'approved', result.diagnosticSummary);
-  const approved = result.manuscript;
-  scenario.judge = riverJudge().judge;
-
-  // Omitted memory (the bakery, its town and its owner disappear) — evidence still attached.
-  const omissionLog = await expectSaveRejected({
-    token,
-    interviewId: interview.id,
-    style,
-    manuscript: removeSentences(approved, /panader/),
-    message: rules.buildIncompleteDraftUserNotice('documentary'),
-  });
-  assert.equal(omissionLog.details.approvalPath, 'hybrid_reaudit');
-  assert.equal(omissionLog.details.evidenceStatus, 'manuscript_changed');
-  assert.equal(omissionLog.details.internalReasonCode, 'DOCUMENTARY_COVERAGE_FAILURE');
-
-  // Real contradiction with many shared words ("salvó" -> "empujó").
-  const contradicted = replaceInText(approved, /me salvó de caer al río/, 'me empujó al río');
-  assert.notEqual(
-    approval.computeManuscriptContentHash(contradicted),
-    approval.computeManuscriptContentHash(approved),
-    'La alteración debe cambiar el texto auditado.'
-  );
-  const contradictionLog = await expectSaveRejected({
-    token,
-    interviewId: interview.id,
-    style,
-    manuscript: contradicted,
-  });
-  assert.equal(contradictionLog.details.failureCategory, 'documentary');
-  assert.equal(contradictionLog.details.internalReasonCode, 'SEMANTIC_CONTRADICTION');
-
-  // Modified after approval: an invented biographical fact in the introduction.
-  const editedIntro = { ...approved, introduction: `${approved.introduction} En 1999 gané la lotería en Madrid.` };
-  const editedLog = await expectSaveRejected({ token, interviewId: interview.id, style, manuscript: editedIntro });
-  assert.equal(editedLog.details.evidenceStatus, 'manuscript_changed');
-
-  // The untouched approved manuscript still saves through its signed evidence.
+/** V5.3: a manuscript saved after re-audit, with its persisted admin report. */
+async function saveAndLoadReport(token: string, style: StyleId, manuscript: any) {
   const saved = await storage.saveParticipantBookVersion({
     plainToken: token,
     narrativeStyle: style,
     editorialConfig: editorialConfigFor(style),
-    manuscript: jsonRoundTrip(approved),
+    manuscript: jsonRoundTrip(manuscript),
     coverPhoto: null,
     chapterPhotos: {},
     pageCount: 20,
   });
-  assert.equal(lastAuditLog('CREATE_PARTICIPANT_BOOK', saved.bookVersion.id)?.details?.approvalPath, 'signed_evidence');
+  const log =
+    lastAuditLog('CREATE_PARTICIPANT_BOOK', saved.bookVersion.id) ||
+    lastAuditLog('MODIFY_PARTICIPANT_BOOK_LAYOUT', saved.bookVersion.id);
+  const report = await storage.getBookAuditReport(saved.bookVersion.id);
+  return { saved, log, report };
+}
+
+async function freshApprovedBook(style: StyleId, judge?: any, options: { extraBase?: string[]; variantOffset?: number } = {}) {
+  const { interview, token } = await createSyntheticInterview('small', {
+    extraBase: options.extraBase ?? [RIVER_TESTIMONY],
+    variantOffset: options.variantOffset,
+  });
+  const { result } = await generateApproved(interview.id, token, style, judge || riverJudge());
+  assert.equal(result.manuscript.generationStatus, 'approved', result.diagnosticSummary);
+  scenario.judge = (judge || riverJudge()).judge;
+  return { interview, token, approved: result.manuscript };
+}
+
+test('V5.2-N1 (V5.3): omisiones, contradicciones y textos modificados tras aprobarse se DETECTAN y quedan registrados; con cobertura >= 60 % el libro se entrega con observaciones', async () => {
+  const style: StyleId = 'first_person_literary';
+
+  // Omitted memory (the bakery, its town and its owner disappear) — evidence still attached.
+  const omission = await freshApprovedBook(style);
+  const om = await saveAndLoadReport(omission.token, style, removeSentences(omission.approved, /panader/));
+  assert.equal(om.log.details.approvalPath, 'hybrid_reaudit', 'La firma ya no corresponde al texto.');
+  assert.equal(om.log.details.evidenceStatus, 'manuscript_changed');
+  assert.equal(om.report.strictAudit.documentaryPassed, false, 'La auditoría estricta no se altera.');
+  assert.equal(om.report.delivery.deliveryStatus, 'delivered_with_observations');
+  assert.ok(om.report.incidents.some((i: any) => i.kind === 'omission' && /panader/i.test(i.testimony || '')));
+  assert.ok(om.report.coverage.exactPercent < 100 && om.report.coverage.exactPercent >= 60);
+
+  // Real contradiction with many shared words ("salvó" -> "empujó"): recorded, not hidden.
+  const contra = await freshApprovedBook(style);
+  const contradicted = replaceInText(contra.approved, /me salvó de caer al río/, 'me empujó al río');
+  assert.notEqual(
+    approval.computeManuscriptContentHash(contradicted),
+    approval.computeManuscriptContentHash(contra.approved),
+    'La alteración debe cambiar el texto auditado.'
+  );
+  const ct = await saveAndLoadReport(contra.token, style, contradicted);
+  assert.equal(ct.log.details.evidenceStatus, 'manuscript_changed');
+  const contradictionIncident = ct.report.incidents.find((i: any) => i.kind === 'contradiction');
+  assert.ok(contradictionIncident, 'La contradicción queda en el informe administrativo.');
+  assert.match(contradictionIncident.excerpt || '', /empujó/);
+  assert.match(contradictionIncident.testimony || '', /salvó/);
+  assert.ok(contradictionIncident.judgeRationale, 'Con la explicación del juez.');
+  assert.equal(ct.report.strictAudit.documentaryPassed, false);
+
+  // Modified after approval: an invented biographical fact in the introduction.
+  const edit = await freshApprovedBook(style);
+  const ed = await saveAndLoadReport(edit.token, style, {
+    ...edit.approved,
+    introduction: `${edit.approved.introduction} En 1999 gané la lotería en Madrid.`,
+  });
+  assert.equal(ed.log.details.evidenceStatus, 'manuscript_changed');
+  assert.ok(ed.report.incidents.some((i: any) => i.kind === 'invented_data' && /1999/.test(i.detail || i.excerpt || '')));
+
+  // The untouched approved manuscript still saves through its signed evidence.
+  const clean = await freshApprovedBook(style);
+  const cl = await saveAndLoadReport(clean.token, style, clean.approved);
+  assert.equal(cl.log.details.approvalPath, 'signed_evidence');
 });
 
-test('V5.2-N2: aprobaciones falsificadas, de otra entrevista, de otro estilo o caducadas no sirven para guardar', async () => {
+test('V5.2-N2 (V5.3): aprobaciones falsificadas, de otra entrevista, de otro estilo o caducadas nunca autorizan por sí mismas; el servidor decide', async () => {
   const style: StyleId = 'first_person_literary';
-  const { interview, token } = await createSyntheticInterview('small', { extraBase: [RIVER_TESTIMONY] });
-  const { result } = await generateApproved(interview.id, token, style, riverJudge());
-  const approved = result.manuscript;
-  assert.equal(approved.generationStatus, 'approved', result.diagnosticSummary);
 
-  // (a) Forged signature on a manuscript with an omission: rejected.
-  const forged = jsonRoundTrip(removeSentences(approved, /panader/));
-  forged.approvalEvidence.signature = forged.approvalEvidence.signature.replace(/^./, (c: string) => (c === 'a' ? 'b' : 'a'));
-  const forgedLog = await expectSaveRejected({ token, interviewId: interview.id, style, manuscript: forged });
-  assert.equal(forgedLog.details.evidenceStatus, 'invalid_signature');
+  // (a) Forged signature: the evidence is ignored and the server re-audits the text itself.
+  const forgedCase = await freshApprovedBook(style);
+  const forged = jsonRoundTrip(removeSentences(forgedCase.approved, /panader/));
+  const forgedSignature = forged.approvalEvidence.signature.replace(/^./, (c: string) => (c === 'a' ? 'b' : 'a'));
+  forged.approvalEvidence.signature = forgedSignature;
+  const fg = await saveAndLoadReport(forgedCase.token, style, forged);
+  assert.equal(fg.log.details.approvalPath, 'hybrid_reaudit');
+  assert.equal(fg.log.details.evidenceStatus, 'invalid_signature');
+  assert.notEqual(fg.saved.bookVersion.manuscript.approvalEvidence.signature, forgedSignature, 'Nunca se guarda la firma falsa.');
+  assert.ok(fg.report.incidents.some((i: any) => i.kind === 'omission'));
 
   // (b) Evidence "re-targeted" to other sources without re-signing: the signature breaks.
-  const retargeted = jsonRoundTrip(approved);
+  const retargeted = jsonRoundTrip(forgedCase.approved);
   retargeted.approvalEvidence.sourceFingerprint = 'f'.repeat(64);
   assert.equal(
     approval.verifyBookApprovalEvidence({
       manuscript: retargeted,
-      interviewId: interview.id,
+      interviewId: forgedCase.interview.id,
       narrativeStyle: style,
-      currentSourceFingerprint: auditContext(interview.id, style).sourceFingerprint,
+      currentSourceFingerprint: auditContext(forgedCase.interview.id, style).sourceFingerprint,
     }).reason,
     'invalid_signature'
   );
 
-  // (c) Approval of ANOTHER interview submitted with this participant's token: rejected.
-  const other = await createSyntheticInterview('small');
-  const otherApproved = (await generateApproved(other.interview.id, other.token, style)).result.manuscript;
-  assert.equal(otherApproved.generationStatus, 'approved');
-  scenario.judge = riverJudge().judge;
-  const otherLog = await expectSaveRejected({ token, interviewId: interview.id, style, manuscript: otherApproved });
+  // (c) Approval of ANOTHER interview (a different life story): rejected, below the minimum.
+  const target = await freshApprovedBook(style);
+  const other = await freshApprovedBook(style, undefined, { extraBase: [], variantOffset: 7 });
+  const otherLog = await expectSaveRejected({
+    token: target.token,
+    interviewId: target.interview.id,
+    style,
+    manuscript: other.approved,
+  });
   assert.equal(otherLog.details.evidenceStatus, 'interview_mismatch');
+  assert.ok(otherLog.details.deliveryBlockers.includes('COVERAGE_BELOW_MINIMUM'));
 
-  // (d) Approval of ANOTHER style (a first-person A manuscript declared as a C biography).
-  const styleA = (await generateApproved(interview.id, token, 'first_person_simple')).result.manuscript;
+  // (d) A style-A manuscript declared as a style-C book: tampering, rejected before any audit.
+  const styleA = (await generateApproved(target.interview.id, target.token, 'first_person_simple', riverJudge())).result.manuscript;
   assert.equal(styleA.generationStatus, 'approved');
   const styleLog = await expectSaveRejected({
-    token,
-    interviewId: interview.id,
+    token: target.token,
+    interviewId: target.interview.id,
     style: 'third_person_biography',
     manuscript: styleA,
   });
-  assert.equal(styleLog.details.evidenceStatus, 'style_mismatch');
+  assert.equal(styleLog.details.internalReasonCode, 'STYLE_MISMATCH');
 
-  // (e) Approval expired by a change in the sources (a new memory added after approval).
-  await storage.reopenInterview(interview.id, 7, 'Agregar un recuerdo', 'admin_pruebas');
+  // (e) Approval expired by a change in the sources: the server re-audits against the CURRENT
+  // testimony; the new memory is recorded as missing for the administrator.
+  const stale = await freshApprovedBook(style);
+  await storage.reopenInterview(stale.interview.id, 7, 'Agregar un recuerdo', 'admin_pruebas');
   await storage.submitAnswer({
-    plainToken: token,
+    plainToken: stale.token,
     questionId: 'mem_adicional_post',
     questionText: 'Recuerdo adicional',
     answerText: 'En 1977 mi vecino Bartolomé construyó un horno de leña en Sola.',
@@ -566,35 +625,22 @@ test('V5.2-N2: aprobaciones falsificadas, de otra entrevista, de otro estilo o c
     isAdditionalMemory: true,
     idempotencyKey: 'post_approval_memory',
   });
-  await storage.declareVoluntaryCompletion(token, 'Declaración voluntaria');
-  const staleLog = await expectSaveRejected({
-    token,
-    interviewId: interview.id,
-    style,
-    manuscript: approved,
-    message: rules.buildIncompleteDraftUserNotice('source_changed'),
-  });
-  assert.equal(staleLog.details.evidenceStatus, 'source_changed');
-  assert.equal(staleLog.details.internalReasonCode, 'SOURCE_CHANGED_SINCE_APPROVAL');
+  await storage.declareVoluntaryCompletion(stale.token, 'Declaración voluntaria');
+  scenario.judge = riverJudge().judge;
+  const st = await saveAndLoadReport(stale.token, style, stale.approved);
+  assert.equal(st.log.details.approvalPath, 'hybrid_reaudit');
+  assert.equal(st.log.details.evidenceStatus, 'source_changed');
+  assert.ok(st.report.incidents.some((i: any) => /Bartolomé/.test(i.testimony || '')), 'El recuerdo nuevo queda registrado como pendiente.');
 
   // (f) A forged signature on a FAITHFUL text is not trusted either: the server re-audits it
   // and signs its own evidence (the forged one is never stored).
-  const regenerated = (await generateApproved(interview.id, token, style, riverJudge())).result.manuscript;
-  const forgedFaithful = jsonRoundTrip(regenerated);
-  const forgedSignature = forgedFaithful.approvalEvidence.signature.replace(/^./, (c: string) => (c === 'a' ? 'b' : 'a'));
-  forgedFaithful.approvalEvidence.signature = forgedSignature;
-  scenario.judge = riverJudge().judge;
-  const saved = await storage.saveParticipantBookVersion({
-    plainToken: token,
-    narrativeStyle: style,
-    editorialConfig: editorialConfigFor(style),
-    manuscript: forgedFaithful,
-    coverPhoto: null,
-    chapterPhotos: {},
-    pageCount: 20,
-  });
-  assert.equal(lastAuditLog('CREATE_PARTICIPANT_BOOK', saved.bookVersion.id)?.details?.approvalPath, 'hybrid_reaudit');
-  assert.notEqual(saved.bookVersion.manuscript.approvalEvidence.signature, forgedSignature);
+  const faithfulCase = await freshApprovedBook(style);
+  const forgedFaithful = jsonRoundTrip(faithfulCase.approved);
+  const forgedSig2 = forgedFaithful.approvalEvidence.signature.replace(/^./, (c: string) => (c === 'a' ? 'b' : 'a'));
+  forgedFaithful.approvalEvidence.signature = forgedSig2;
+  const ff = await saveAndLoadReport(faithfulCase.token, style, forgedFaithful);
+  assert.equal(ff.log.details.approvalPath, 'hybrid_reaudit');
+  assert.notEqual(ff.saved.bookVersion.manuscript.approvalEvidence.signature, forgedSig2);
 });
 
 test('V5.2-N3: un participante no autorizado no puede guardar', async () => {
@@ -724,7 +770,7 @@ const dropSentences = (rx: RegExp) => (_id: string, paragraphs: string[]) =>
     .map((p) => p.split(/(?<=[.!?])\s+/).filter((s) => !rx.test(s)).join(' '))
     .filter((p) => p.trim().length > 0);
 
-test('V5.2-S2/S3: omisión real y contradicción confirmadas se rechazan mientras no se reparen', async () => {
+test('V5.2-S2/S3 (V5.3): omisión y contradicción confirmadas quedan registradas sin pegado mecánico; con cobertura >= 60 % el libro se entrega con observaciones', async () => {
   for (const style of ALL_STYLES) {
     const { interview, token } = await createSyntheticInterview('small', { extraBase: [RIVER_TESTIMONY] });
     // Omission confirmed, repair fails.
@@ -736,48 +782,44 @@ test('V5.2-S2/S3: omisión real y contradicción confirmadas se rechazan mientra
       judge: riverJudge().judge,
       repair: async () => null,
     });
-    assert.equal(omitted.result.manuscript.generationStatus, 'incomplete_draft', STYLE_LABEL[style]);
-    assert.equal(omitted.result.manuscript.approvalEvidence, undefined);
-    assert.ok(['repair_pending', 'documentary'].includes(omitted.result.failureCategory), omitted.result.failureCategory);
+    const om = omitted.result.manuscript;
+    assert.equal(om.generationStatus, 'approved', STYLE_LABEL[style]);
+    assert.equal(om.approvalEvidence.verificationLevel, 'delivered_with_observations');
+    assert.equal(om.documentaryAudit.passed, false, 'La auditoría estricta sigue sin aprobar.');
+    assert.equal(omitted.result.deliveryDecision.eligible, true);
+    assert.ok(omitted.result.deliveryDecision.observations.omittedUnits >= 1);
+    const bakery = om.documentaryAudit.traceabilityMatrix.filter((t: any) => /panader/i.test(t.excerpt || ''));
+    assert.ok(bakery.length > 0 && bakery.every((t: any) => t.verified === false), 'La omisión no se marca cubierta.');
     assert.equal(
-      omitted.result.manuscript.chapters.some((c: any) => c.paragraphs.some((p: string) => /panader/.test(p))),
+      om.chapters.some((c: any) => c.paragraphs.some((p: string) => /panader/.test(p))),
       false,
       'Sin pegado mecánico del recuerdo omitido.'
     );
-    await assert.rejects(
-      storage.saveParticipantBookVersion({
-        plainToken: token,
-        narrativeStyle: style,
-        editorialConfig: editorialConfigFor(style),
-        manuscript: jsonRoundTrip(omitted.result.manuscript),
-        coverPhoto: null,
-        chapterPhotos: {},
-        pageCount: 20,
-      }),
-      /borrador incompleto/
-    );
+    assert.ok(omitted.result.repairSummary.roundsExecuted <= 1, 'A lo sumo una ronda de reparación al ya ser entregable.');
 
-    // Contradiction confirmed by the judge.
+    // Contradiction confirmed by the judge: recorded, not resolved artificially.
     const contradicted = await generateWith({
       interviewId: interview.id,
       token,
       style,
-      transform: (_id, ps) => ps.map((p) => p.replace(/me salvó de caer al río/, 'me empujó al río').replace(/la salvó de caer al río/, 'la empujó al río')),
+      transform: (_id, ps) => ps.map((p) => p.replace(/(me|la) salvó de caer al río/, '$1 empujó al río')),
       judge: riverJudge().judge,
       repair: async () => null,
     });
-    assert.equal(contradicted.result.manuscript.generationStatus, 'incomplete_draft', STYLE_LABEL[style]);
-    assert.equal(contradicted.result.manuscript.approvalEvidence, undefined);
-    const riverTrace = contradicted.result.manuscript.documentaryAudit.traceabilityMatrix.find((t: any) => /salvó/.test(t.excerpt || ''));
+    const ct = contradicted.result.manuscript;
+    assert.equal(ct.generationStatus, 'approved', STYLE_LABEL[style]);
+    assert.equal(ct.approvalEvidence.verificationLevel, 'delivered_with_observations');
+    const riverTrace = ct.documentaryAudit.traceabilityMatrix.find((t: any) => /salvó/.test(t.excerpt || ''));
     assert.equal(riverTrace?.verified, false);
     assert.ok(
       riverTrace?.aiJudgeVerdict === 'contradicted' || riverTrace?.verificationStatus === 'contradicted',
       JSON.stringify(riverTrace)
     );
+    assert.ok(contradicted.result.deliveryDecision.observations.contradictions >= 1);
   }
 });
 
-test('V5.2-S4: si el juez no responde (error o sin veredictos) el fallo es técnico y nunca se aprueba; con juez sí se aprueba', async () => {
+test('V5.2-S4 (V5.3): si el juez no responde, la unidad queda sin verificar (nunca se da por cubierta); el libro se entrega con observaciones si alcanza el 60 %', async () => {
   for (const style of ALL_STYLES) {
     const { interview, token } = await createSyntheticInterview('small', { extraBase: [RIVER_TESTIMONY] });
     const paraphrase = (_id: string, ps: string[]) =>
@@ -793,16 +835,20 @@ test('V5.2-S4: si el juez no responde (error o sin veredictos) el fallo es técn
     assert.match(paraphrased, /aquel día junto al agua/, `${STYLE_LABEL[style]}: la paráfrasis debe aplicarse.`);
     for (const brokenJudge of [helpers.throwingJudge, helpers.silentJudge]) {
       const out = await generateWith({ interviewId: interview.id, token, style, transform: paraphrase, judge: brokenJudge, repair: async () => null });
-      assert.equal(out.result.manuscript.generationStatus, 'incomplete_draft', STYLE_LABEL[style]);
-      assert.equal(out.result.failureCategory, 'technical');
-      assert.equal(out.result.internalReasonCode, 'SEMANTIC_JUDGE_UNAVAILABLE');
-      assert.equal(out.result.manuscript.approvalEvidence, undefined);
+      const m = out.result.manuscript;
+      const river = m.documentaryAudit.traceabilityMatrix.find((t: any) => /salvó/.test(t.excerpt || ''));
+      assert.equal(river.verified, false, 'Sin juez, la paráfrasis no se da por verificada.');
+      assert.equal(river.aiJudgeUnavailable, true);
+      assert.equal(m.documentaryAudit.passed, false);
+      assert.equal(m.generationStatus, 'approved', STYLE_LABEL[style]);
+      assert.equal(m.approvalEvidence.verificationLevel, 'delivered_with_observations');
     }
-    // Positive control: a judge that recognizes the paraphrase approves the same text.
+    // Positive control: a judge that recognizes the paraphrase verifies it.
     const judge = helpers.createScenarioJudge({ paraphrases: [{ testimony: /salvo de caer al rio/, excerpt: /gracias a (mi|su) padre, aquel dia junto al agua/ }] });
     const ok = await generateWith({ interviewId: interview.id, token, style, transform: paraphrase, judge: judge.judge });
     assert.equal(ok.result.manuscript.generationStatus, 'approved', `${STYLE_LABEL[style]}: ${ok.result.diagnosticSummary}`);
-    assert.ok(judge.judgedCases().some((c: any) => /salvó/.test(c.originalTestimony)), 'La paráfrasis pasó por el juez.');
+    const riverOk = ok.result.manuscript.documentaryAudit.traceabilityMatrix.find((t: any) => /salvó/.test(t.excerpt || ''));
+    assert.equal(riverOk.verified, true);
   }
 });
 
@@ -960,8 +1006,11 @@ test('V5.2-S7/S8: reparación exitosa integra el recuerdo sin perder otros; una 
   const finalB = mixed.result.manuscript.chapters.find((c: any) => c.id === chB.id);
   assert.ok(finalA.paragraphs.join(' ').includes(lostA), 'El capítulo que mejoró se conserva reparado.');
   assert.notDeepEqual(finalB.paragraphs, ['Fueron años que quedaron atrás.'], 'El capítulo que empeoró se rechaza.');
-  assert.equal(mixed.result.manuscript.generationStatus, 'incomplete_draft');
-  assert.equal(mixed.result.manuscript.approvalEvidence, undefined);
+  // V5.3: the remaining omission is an observation; the book (well above 60 %) is delivered.
+  assert.equal(mixed.result.manuscript.generationStatus, 'approved');
+  assert.equal(mixed.result.manuscript.approvalEvidence.verificationLevel, 'delivered_with_observations');
+  assert.equal(mixed.result.manuscript.documentaryAudit.passed, false);
+  assert.ok(mixed.result.repairSummary.repairsRejected >= 1, 'La reparación defectuosa queda registrada como rechazada.');
 });
 
 test('V5.2-S9: el navegador no puede sustituir la introducción aprobada; una edición voluntaria se detecta', async () => {
@@ -1503,7 +1552,16 @@ test('V5.2-F1: clave dedicada persistente, independiente de las claves de provee
     process.env.GEMINI_API_KEY = 'gemini-clave-legado-v51';
     approval.__resetProcessLocalApprovalSecretForTests();
     const crypto = await import('node:crypto');
-    const { signature: _s, ...unsigned } = issue();
+    const { signature: _s, ...issued } = issue();
+    // Emulate a V5.1/V5.2 evidence (version 1, no delivery fields).
+    const {
+      deliveryPolicyVersion: _p,
+      verificationLevel: _l,
+      deliveryEligible: _e,
+      verifiedUnits: _v,
+      ...v1Fields
+    } = issued as any;
+    const unsigned = { ...v1Fields, evidenceVersion: 1 } as any;
     const legacyKey = crypto.createHash('sha256').update(`yf-book-approval-derived::${process.env.GEMINI_API_KEY}`).digest();
     const signingString = JSON.stringify([
       unsigned.evidenceVersion, unsigned.auditRulesVersion, unsigned.engineVersion, unsigned.auditPolicy,
@@ -1538,4 +1596,546 @@ test('V5.2-F1: clave dedicada persistente, independiente de las claves de provee
     }
     approval.__resetProcessLocalApprovalSecretForTests();
   }
+});
+
+// =============================================================================================
+// V5.3 — Política de entrega (cobertura mínima 60 %), confidencialidad y auditoría administrativa
+// =============================================================================================
+
+const CONTRADICTION_TESTIMONIES = [
+  'Mi padre me salvó de caer al río cuando tenía seis años.',
+  'Mi abuela Remedios me regaló su anillo de bodas en Navidad.',
+  'Mi hermano Gonzalo ganó el concurso de pintura del colegio.',
+  'Mi tía Clemencia aprobó el examen de enfermera en Morelia.',
+  'Mi vecino Anselmo compró la casa azul de la esquina.',
+  'Mi primo Teodoro aceptó la invitación a mi boda en Zamora.',
+];
+const CONTRADICTION_SWAPS: Array<[RegExp, string]> = [
+  [/salvó de caer al río/, 'empujó al río'],
+  [/regaló su anillo/, 'quitó su anillo'],
+  [/ganó el concurso/, 'perdió el concurso'],
+  [/aprobó el examen/, 'reprobó el examen'],
+  [/compró la casa azul/, 'vendió la casa azul'],
+  [/aceptó la invitación/, 'rechazó la invitación'],
+];
+const sixContradictionsJudge = () =>
+  helpers.createScenarioJudge({
+    contradictions: [
+      { source: /salvo de caer/, reversed: /empujo/ },
+      { source: /regalo su anillo/, reversed: /quito su anillo/ },
+      { source: /gano el concurso/, reversed: /perdio el concurso/ },
+      { source: /aprobo el examen/, reversed: /reprobo el examen/ },
+      { source: /compro la casa azul/, reversed: /vendio la casa azul/ },
+      { source: /acepto la invitacion/, reversed: /rechazo la invitacion/ },
+    ],
+  });
+const contradictSix = (paragraphs: string[]) =>
+  paragraphs.map((p) => CONTRADICTION_SWAPS.reduce((acc, [rx, to]) => acc.replace(rx, to), p));
+
+const CONTRADICTION_KEEP = /empujó|quitó su anillo|perdió el concurso|reprobó el examen|vendió la casa|rechazó la invitación/;
+/** Omits every sentence of the given chapters (except the contradicted ones and the first one). */
+const omitChapters = (chapterIds: string[], fraction = 1) => (id: string, ps: string[]) => {
+  if (!chapterIds.includes(id)) return ps;
+  const sentences = ps.flatMap((p) => p.split(/(?<=[.!?])\s+/));
+  const limit = Math.ceil((sentences.length - 1) * fraction);
+  let dropped = 0;
+  return ps
+    .map((p, pi) =>
+      p
+        .split(/(?<=[.!?])\s+/)
+        .filter((sent, si) => {
+          if (pi === 0 && si === 0) return true;
+          if (CONTRADICTION_KEEP.test(sent)) return true;
+          if (dropped >= limit) return true;
+          dropped++;
+          return false;
+        })
+        .join(' ')
+    )
+    .filter((p) => p.trim().length > 0);
+};
+
+const REPLICA_OMISSIONS = /panader|Amasaba|adobe/;
+let jobManager: any;
+async function loadJobManager() {
+  jobManager ||= await import(path.join(REPO_ROOT, 'src/server/bookJobManager.ts'));
+  return jobManager;
+}
+
+/** Medium interview (46 answers) + 6 deepenings whose action the drafter will invert. */
+async function generateScenarioBook(style: StyleId, extraTransform?: (id: string, ps: string[]) => string[]) {
+  const { interview, token } = await createSyntheticInterview('medium', { extraFollowUps: CONTRADICTION_TESTIMONIES });
+  const judge = sixContradictionsJudge();
+  let repairCalls = 0;
+  const out = await generateWith({
+    interviewId: interview.id,
+    token,
+    style,
+    transform: (id, ps) => contradictSix((extraTransform ? extraTransform(id, dropSentences(REPLICA_OMISSIONS)(id, ps)) : dropSentences(REPLICA_OMISSIONS)(id, ps))),
+    judge: judge.judge,
+    // The focused repair "answers" but recovers nothing (a repair without improvement).
+    repair: async () => {
+      repairCalls++;
+      return null;
+    },
+  });
+  return { interview, token, judge, out, repairCalls: () => repairCalls };
+}
+
+/** What the browser receives and sends back: the participant-sanitized manuscript. */
+async function asParticipantSees(result: any) {
+  const jm = await loadJobManager();
+  return jsonRoundTrip(jm.sanitizeBookResultForParticipant(result));
+}
+
+const ADMIN_ONLY_PATTERN =
+  /coverage|cobertura|contradic|deliveryEligible|deliveryDecision|verificationLevel|verifiedUnits|integratedUnits|traceability|documentaryAudit|editorialAudit|auditSummary|auditReport|diagnosticSummary|internalReasonCode|repairSummary|generationMetrics|previewFidelity|judge|"band"|pending_review|orange|yellow|green/i;
+
+function assertNothingAdminOnly(label: string, payload: unknown) {
+  const json = JSON.stringify(payload);
+  const hit = json.match(ADMIN_ONLY_PATTERN);
+  assert.equal(hit, null, `${label}: el participante recibe datos administrativos (${hit?.[0]}).`);
+}
+
+async function renderPersistedPdf(version: any, result: any) {
+  const composed = rules.composeBookPages({
+    manuscript: version.manuscript,
+    editorialConfig: version.editorialConfig,
+    chapterPhotos: result.chapterPhotos || {},
+    allPhotosById: result.allPhotosById || {},
+    previewSampleOnly: false,
+    maxContentPages: 500,
+  });
+  const pdf = pdfGen.generateRealDemoBookPdf({
+    composed,
+    profile: {
+      mode: 'individual',
+      displayName: 'Elena Robles',
+      fullName: 'Elena Robles',
+      partner1Name: '',
+      partner2Name: '',
+      hasAcceptedTemporaryNotice: true,
+    },
+  });
+  const header = Buffer.from(await pdf.blob.arrayBuffer()).subarray(0, 5).toString('ascii');
+  return { header, pageCount: pdf.pageCount };
+}
+
+test('V5.3-T1: tabla de umbrales con conteos exactos (sin redondeo favorable) y bandas de color', () => {
+  const table: Array<[number, number, string, boolean]> = [
+    [5999, 10000, 'pending_review', false], // 59,99 %
+    [6000, 10000, 'orange', true], // 60 %
+    [6500, 10000, 'orange', true], // 65 %
+    [7000, 10000, 'orange', true], // 70 %
+    [7999, 10000, 'orange', true], // 79,99 %
+    [8000, 10000, 'yellow', true], // 80 %
+    [9099, 10000, 'yellow', true], // 90,99 %
+    [9100, 10000, 'green', true], // 91 %
+    [10000, 10000, 'green', true], // 100 %
+    [43, 73, 'pending_review', false], // 58,90 %
+    [44, 73, 'orange', true], // 60,27 %
+    [2, 3, 'orange', true], // 66,66 %
+    [0, 0, 'pending_review', false], // sin unidades
+  ];
+  for (const [verified, eligible, band, deliverable] of table) {
+    assert.equal(rules.classifyCoverageCounts(verified, eligible), band, `${verified}/${eligible}`);
+    if (eligible > 0) assert.equal(rules.classifyCoveragePercentage((verified / eligible) * 100), band, `${verified}/${eligible} (%)`);
+    const decision = rules.evaluateBookDeliveryEligibility({
+      report: { totalSourceUnits: eligible, integratedUnits: verified, passed: verified === eligible && eligible > 0, traceabilityMatrix: [] } as any,
+    });
+    assert.equal(decision.eligible, deliverable, `${verified}/${eligible}`);
+    assert.equal(decision.band, band);
+    assert.equal(decision.coverageExactPercent, eligible > 0 ? (verified / eligible) * 100 : 0, 'Porcentaje exacto, sin redondear.');
+    if (!deliverable) {
+      assert.ok(decision.blockers.some((b: any) => b.code === (eligible === 0 ? 'NO_DOCUMENTARY_SOURCES' : 'COVERAGE_BELOW_MINIMUM')));
+      assert.equal(decision.verificationLevel, 'not_eligible');
+    }
+  }
+  // Contradictions alone never block: 100 % of units counted, 6 contradictions reported.
+  const withContradictions = rules.evaluateBookDeliveryEligibility({
+    report: {
+      totalSourceUnits: 10,
+      integratedUnits: 8,
+      passed: false,
+      traceabilityMatrix: Array.from({ length: 2 }, (_, i) => ({ unitId: `u${i}`, verified: false, verificationStatus: 'contradicted' })),
+    } as any,
+  });
+  assert.equal(withContradictions.eligible, true);
+  assert.equal(withContradictions.verificationLevel, 'delivered_with_observations');
+  assert.equal(withContradictions.observations.contradictions, 2);
+  // A privacy leak blocks delivery even at 100 %.
+  const leak = rules.evaluateBookDeliveryEligibility({
+    report: { totalSourceUnits: 10, integratedUnits: 10, passed: true, veracityAudit: { leakedExcludedContentFlags: ['x'] }, traceabilityMatrix: [] } as any,
+  });
+  assert.equal(leak.eligible, false);
+  assert.ok(leak.blockers.some((b: any) => b.code === 'PRIVACY_EXCLUSION_LEAK'));
+  // A technically broken structure blocks too.
+  const broken = rules.evaluateBookDeliveryEligibility({
+    report: { totalSourceUnits: 10, integratedUnits: 10, passed: true, traceabilityMatrix: [] } as any,
+    manuscript: { chapters: [] } as any,
+  });
+  assert.ok(broken.blockers.some((b: any) => b.code === 'STRUCTURE_INVALID'));
+});
+
+test('V5.3-T2: réplica del fallo real (Estilo A, 3 lotes, 5 capítulos, 80 %, 6 contradicciones, 1 reparación sin mejora) → entregable, guardado, PDF e informe; el participante no ve nada', async () => {
+  const style: StyleId = 'first_person_simple';
+  const { interview, token, out, repairCalls } = await generateScenarioBook(style);
+  const result = out.result;
+  const m = result.manuscript;
+  const d = result.deliveryDecision;
+
+  // Same shape as the real failure.
+  assert.equal(result.totalBatches, 3);
+  assert.equal(m.chapters.length, 5);
+  assert.equal(d.eligibleUnits, 73);
+  assert.equal(d.verifiedUnits, 59);
+  assert.equal(d.coverageExactPercent, (59 / 73) * 100, 'Cobertura exacta 80,82 %.');
+  assert.equal(d.band, 'yellow');
+  assert.equal(d.observations.contradictions, 6);
+  // The strict audit is NOT altered: it still fails and lists the contradictions.
+  assert.equal(m.documentaryAudit.passed, false);
+  assert.equal(m.documentaryAudit.traceabilityMatrix.filter((t: any) => t.verificationStatus === 'contradicted').length, 6);
+  // One focused repair round without improvement, no forced second round, valid batches kept.
+  assert.equal(result.repairSummary.roundsExecuted, 1);
+  assert.equal(result.repairSummary.repairsAccepted, 0);
+  assert.equal(result.repairSummary.stopReason, 'no_improvement');
+  assert.ok(repairCalls() >= 1);
+  assert.deepEqual(result.invalidatedBatchIndexes || [], []);
+  // Delivered with observations: the signature says so.
+  assert.equal(m.generationStatus, 'approved');
+  assert.equal(m.approvalEvidence.verificationLevel, 'delivered_with_observations');
+  assert.equal(m.approvalEvidence.deliveryEligible, true);
+  assert.equal(m.approvalEvidence.deliveryPolicyVersion, rules.BOOK_DELIVERY_POLICY_VERSION);
+
+  // The participant receives only an opaque reference and the book text.
+  const seen = await asParticipantSees(result);
+  assertNothingAdminOnly('Resultado de generación', seen);
+  assert.deepEqual(Object.keys(seen.manuscript.approvalEvidence), ['evidenceRef']);
+  assert.equal(seen.manuscript.incompleteDraftNotice, undefined);
+
+  // Save exactly what the browser holds: the server resolves the reference (no second audit).
+  const before = storage.getInterviewById(interview.id).bookGeneratedCount || 0;
+  const saved = await storage.saveParticipantBookVersion({
+    plainToken: token,
+    narrativeStyle: style,
+    editorialConfig: editorialConfigFor(style),
+    manuscript: seen.manuscript,
+    coverPhoto: null,
+    chapterPhotos: {},
+    pageCount: 20,
+  });
+  const log = lastAuditLog('CREATE_PARTICIPANT_BOOK', saved.bookVersion.id);
+  assert.equal(log.details.approvalPath, 'signed_evidence');
+  assert.equal(log.details.deliveryStatus, 'delivered_with_observations');
+  assert.equal(log.details.coverageBand, 'yellow');
+  assert.equal(saved.interview.bookGeneratedCount, before + 1);
+  assert.equal(
+    approval.computeManuscriptContentHash(saved.bookVersion.manuscript),
+    approval.computeManuscriptContentHash(m),
+    'Se guarda exactamente el manuscrito auditado.'
+  );
+
+  // Participant view of the saved version.
+  const jm = await loadJobManager();
+  assertNothingAdminOnly('Versión guardada', jm.sanitizeBookVersionForParticipant(jsonRoundTrip(saved.bookVersion)));
+
+  // PDF from the persisted version (after a restart).
+  const reloaded = new mod.StorageManager({ remoteDocStore: fakeRemoteStore });
+  assert.equal(reloaded['loadStateFromDisk'](), true);
+  const persisted = reloaded.getBookVersionsForInterview(interview.id, false).find((v: any) => v.id === saved.bookVersion.id);
+  const pdf = await renderPersistedPdf(persisted, result);
+  assert.equal(pdf.header, '%PDF-');
+  assert.ok(pdf.pageCount >= 5);
+
+  // Administrative report (also after the restart).
+  const report = await reloaded.getBookAuditReport(saved.bookVersion.id);
+  assert.ok(report, 'El informe persiste.');
+  assert.equal(report.identification.versionId, saved.bookVersion.id);
+  assert.equal(report.identification.interviewId, interview.id);
+  assert.equal(report.identification.versionNumber, 1);
+  assert.equal(report.identification.protagonistName, 'Elena Robles');
+  assert.equal(report.identification.narrativeStyle, style);
+  assert.equal(report.identification.engineVersion, rules.BOOK_GENERATION_ENGINE_VERSION);
+  assert.equal(report.identification.rulesVersion, rules.CANONICAL_AUDIT_RULES_VERSION);
+  assert.equal(report.identification.deliveryPolicyVersion, rules.BOOK_DELIVERY_POLICY_VERSION);
+  assert.equal(report.identification.source, 'generated_on_save');
+  assert.equal(report.coverage.exactPercent, (59 / 73) * 100);
+  assert.equal(report.coverage.band, 'yellow');
+  assert.equal(report.coverage.eligibleUnits, 73);
+  assert.equal(report.coverage.verifiedUnits, 59);
+  assert.equal(report.coverage.contradictions, 6);
+  assert.equal(report.strictAudit.documentaryPassed, false);
+  const contradictions = report.incidents.filter((i: any) => i.kind === 'contradiction');
+  assert.equal(contradictions.length, 6);
+  for (const c of contradictions) {
+    assert.ok(c.unitId && c.answerId && c.testimony && c.excerpt, JSON.stringify(c));
+    assert.ok(c.chapterId || c.chapterTitle, 'Capítulo indicado.');
+    assert.ok(c.judgeRationale, 'Explicación del juez.');
+    assert.ok(c.verifiedAt);
+    assert.ok(['possible_contradiction', 'confirmed_by_audit'].includes(c.adminStatus), c.adminStatus);
+  }
+  assert.ok(report.incidents.some((i: any) => i.kind === 'omission' && /panader/i.test(i.testimony || '')));
+  assert.equal(report.repair?.roundsExecuted, 1);
+  assert.equal(report.repair?.stopReason, 'no_improvement');
+  assert.ok(report.history.length >= 1);
+  const summary = reloaded.listBookAuditSummaries(interview.id).find((x: any) => x.versionId === saved.bookVersion.id);
+  assert.equal(summary.summary.band, 'yellow');
+});
+
+test('V5.3-T3: variante al 60 % (60,27 %): entregable, guardada y banda naranja; por debajo (58,90 %) no se entrega ni se guarda', async () => {
+  const style: StyleId = 'first_person_simple';
+  const at60 = await generateScenarioBook(style, (id, ps) => dropSentences(/coche/)(id, omitChapters(['part_ch_legado'])(id, ps)));
+  const d60 = at60.out.result.deliveryDecision;
+  assert.equal(d60.verifiedUnits, 44);
+  assert.equal(d60.eligibleUnits, 73);
+  assert.equal(d60.band, 'orange');
+  assert.equal(at60.out.result.manuscript.generationStatus, 'approved');
+  const seen60 = await asParticipantSees(at60.out.result);
+  const saved60 = await storage.saveParticipantBookVersion({
+    plainToken: at60.token,
+    narrativeStyle: style,
+    editorialConfig: editorialConfigFor(style),
+    manuscript: seen60.manuscript,
+    coverPhoto: null,
+    chapterPhotos: {},
+    pageCount: 20,
+  });
+  const report60 = await storage.getBookAuditReport(saved60.bookVersion.id);
+  assert.equal(report60.coverage.band, 'orange');
+  assert.equal(report60.coverage.exactPercent, (44 / 73) * 100);
+  assert.equal((await renderPersistedPdf(saved60.bookVersion, at60.out.result)).header, '%PDF-');
+
+  const below = await generateScenarioBook(style, (id, ps) => dropSentences(/coche|alegría/)(id, omitChapters(['part_ch_legado'])(id, ps)));
+  const dBelow = below.out.result.deliveryDecision;
+  assert.ok(dBelow.verifiedUnits * 100 < 60 * dBelow.eligibleUnits, `${dBelow.verifiedUnits}/${dBelow.eligibleUnits}`);
+  assert.equal(dBelow.eligible, false);
+  assert.ok(dBelow.blockers.some((b: any) => b.code === 'COVERAGE_BELOW_MINIMUM'));
+  assert.equal(below.out.result.manuscript.generationStatus, 'incomplete_draft');
+  assert.equal(below.out.result.manuscript.approvalEvidence, undefined);
+  // The participant only sees a simple message (no percentage, no threshold).
+  const seenBelow = await asParticipantSees(below.out.result);
+  assertNothingAdminOnly('Borrador por debajo del mínimo', seenBelow);
+  assert.doesNotMatch(String(seenBelow.manuscript.incompleteDraftNotice || ''), /\d+\s*%|60/);
+  await expectSaveRejected({ token: below.token, interviewId: below.interview.id, style, manuscript: seenBelow.manuscript });
+  // Forging the server's decision in the browser changes nothing.
+  const forged = jsonRoundTrip(below.out.result.manuscript);
+  forged.generationStatus = 'approved';
+  forged.status = 'approved';
+  delete forged.failureCategory;
+  delete forged.internalReasonCode;
+  forged.incompleteDraftNotice = undefined;
+  forged.deliveryDecision = { ...dBelow, eligible: true, band: 'green', verifiedUnits: dBelow.eligibleUnits };
+  forged.documentaryAudit = { ...forged.documentaryAudit, passed: true, integratedUnits: dBelow.eligibleUnits };
+  forged.approvalEvidence = { evidenceRef: 'f'.repeat(64) };
+  const forgedLog = await expectSaveRejected({ token: below.token, interviewId: below.interview.id, style, manuscript: forged });
+  assert.ok(forgedLog.details.deliveryBlockers.includes('COVERAGE_BELOW_MINIMUM'));
+});
+
+test('V5.3-T4: guardado al 70 %, 80 % y 100 %: misma política en generación y guardado, banda correcta', async () => {
+  const style: StyleId = 'first_person_simple';
+  const cases: Array<{ label: string; transform?: (id: string, ps: string[]) => string[]; band: string; min: number; max: number }> = [
+    { label: '70 %', transform: omitChapters(['part_ch_madurez', 'part_ch_juventud']), band: 'orange', min: 70, max: 80 },
+    { label: '80 %', band: 'yellow', min: 80, max: 91 },
+  ];
+  for (const c of cases) {
+    const g = await generateScenarioBook(style, c.transform);
+    const d = g.out.result.deliveryDecision;
+    assert.ok(d.coverageExactPercent >= c.min && d.coverageExactPercent < c.max, `${c.label}: ${d.coverageExactPercent}`);
+    assert.equal(d.band, c.band, c.label);
+    const seen = await asParticipantSees(g.out.result);
+    const saved: any = await storage.saveParticipantBookVersion({
+      plainToken: g.token,
+      narrativeStyle: style,
+      editorialConfig: editorialConfigFor(style),
+      manuscript: seen.manuscript,
+      coverPhoto: null,
+      chapterPhotos: {},
+      pageCount: 20,
+    });
+    assert.equal(saved.bookVersion.auditSummary?.band, c.band, `${c.label}: resumen administrativo`);
+  }
+  // 100 %: fully verified, green, delivered without observations.
+  for (const s of ALL_STYLES) {
+    const { interview, token } = await createSyntheticInterview('medium');
+    const { result } = await generateApproved(interview.id, token, s);
+    assert.equal(result.deliveryDecision.coverageExactPercent, 100);
+    assert.equal(result.deliveryDecision.band, 'green');
+    assert.equal(result.manuscript.approvalEvidence.verificationLevel, 'fully_verified');
+    assert.equal(result.repairSummary.roundsExecuted, 0, 'Sin reparaciones innecesarias.');
+    const seen = await asParticipantSees(result);
+    const saved = await storage.saveParticipantBookVersion({
+      plainToken: token,
+      narrativeStyle: s,
+      editorialConfig: editorialConfigFor(s),
+      manuscript: seen.manuscript,
+      coverPhoto: null,
+      chapterPhotos: {},
+      pageCount: 20,
+    });
+    const log = lastAuditLog('CREATE_PARTICIPANT_BOOK', saved.bookVersion.id);
+    assert.equal(log.details.approvalPath, 'signed_evidence');
+    assert.equal(log.details.deliveryStatus, 'delivered');
+  }
+});
+
+test('V5.3-T5: el guardado re-audita con la MISMA política cuando la evidencia no es válida (70 % → entregable con observaciones)', async () => {
+  const style: StyleId = 'first_person_simple';
+  const g = await generateScenarioBook(style, omitChapters(['part_ch_madurez', 'part_ch_juventud']));
+  const genDecision = g.out.result.deliveryDecision;
+  const unsigned = jsonRoundTrip(g.out.result.manuscript);
+  unsigned.approvalEvidence = { evidenceRef: 'referencia-inexistente' };
+  // Inflated audit data from the browser is discarded by the server.
+  unsigned.documentaryAudit = { passed: true, integratedUnits: 999, totalSourceUnits: 999 };
+  unsigned.deliveryDecision = { eligible: true, band: 'green' };
+  scenario.judge = sixContradictionsJudge().judge;
+  const { saved, log, report } = await saveAndLoadReport(g.token, style, unsigned);
+  assert.equal(log.details.approvalPath, 'hybrid_reaudit');
+  assert.equal(report.coverage.verifiedUnits, genDecision.verifiedUnits, 'Misma decisión que en la generación.');
+  assert.equal(report.coverage.eligibleUnits, genDecision.eligibleUnits);
+  assert.equal(report.coverage.band, genDecision.band);
+  assert.equal(report.delivery.deliveryStatus, 'delivered_with_observations');
+  assert.notEqual(saved.bookVersion.manuscript.documentaryAudit?.integratedUnits, 999);
+  assert.equal(saved.bookVersion.manuscript.approvalEvidence.deliveryEligible, true, 'Evidencia emitida por el servidor.');
+});
+
+test('V5.3-T6: vista previa rápida: solo la muestra, sin juez, sin auditoría global, sin versión ni cuota; caché reutilizable (A, B y C)', async () => {
+  for (const style of ALL_STYLES) {
+    const { interview, token } = await createSyntheticInterview('medium');
+    const before = snapshotPersistenceState(interview.id);
+    const base = baseManuscriptFor(interview.id, style);
+    const drafter = helpers.createFaithfulDrafter(base);
+    const judge = helpers.createScenarioJudge();
+    scenario.draftBatch = drafter.draftBatch;
+    scenario.judge = judge.judge;
+    let repairs = 0;
+    scenario.repair = async () => {
+      repairs++;
+      return null;
+    };
+    const started = Date.now();
+    const preview = await storage.generateParticipantBookManuscript({ plainToken: token, narrativeStyle: style, scope: 'preview', forceRefresh: true });
+    const elapsed = Date.now() - started;
+    const pm = preview.manuscript;
+    assert.equal(pm.generationStatus, 'preview_sample', STYLE_LABEL[style]);
+    assert.equal(pm.isPreviewSample, true);
+    assert.equal(pm.approvalEvidence, undefined, 'Una muestra nunca lleva aprobación.');
+    assert.equal(judge.calls.length, 0, 'La vista previa no invoca al juez semántico.');
+    assert.equal(repairs, 0, 'Ni reparaciones.');
+    assert.equal(drafter.calls.length, 1, 'Una sola llamada de redacción para la muestra.');
+    assert.ok(pm.previewFidelity, 'Fidelidad local de la muestra (solo servidor).');
+    assert.ok(
+      pm.previewFidelity.checkedUnits > 0 && pm.previewFidelity.checkedUnits < 67,
+      `Solo se verifican los recuerdos de la muestra (${pm.previewFidelity.checkedUnits} de 67).`
+    );
+    assert.ok(elapsed < 60000, `Vista previa simulada en ${elapsed} ms`);
+    assert.deepEqual(snapshotPersistenceState(interview.id), before, 'Sin versión, sin cuota, sin escrituras.');
+    assertNothingAdminOnly('Vista previa', await asParticipantSees(preview));
+    // Second request with the same inputs: served from the preview cache (no drafting).
+    scenario.draftBatch = async () => {
+      throw new Error('La vista previa debía venir de la caché.');
+    };
+    const again = await storage.generateParticipantBookManuscript({ plainToken: token, narrativeStyle: style, scope: 'preview', forceRefresh: false });
+    assert.equal(again.manuscript.generationStatus, 'preview_sample');
+    // A preview sample can never be saved as a book.
+    await expectSaveRejected({ token, interviewId: interview.id, style, manuscript: preview.manuscript });
+  }
+});
+
+test('V5.3-T7: administración: notas, estados, solicitud de corrección, historial persistente y "corregida en versión posterior"', async () => {
+  const style: StyleId = 'first_person_simple';
+  const { interview, token, out } = await generateScenarioBook(style);
+  const seen = await asParticipantSees(out.result);
+  const saved = await storage.saveParticipantBookVersion({
+    plainToken: token,
+    narrativeStyle: style,
+    editorialConfig: editorialConfigFor(style),
+    manuscript: seen.manuscript,
+    coverPhoto: null,
+    chapterPhotos: {},
+    pageCount: 20,
+  });
+  const versionId = saved.bookVersion.id;
+  const report = await storage.getBookAuditReport(versionId);
+  const contradiction = report.incidents.find((i: any) => i.kind === 'contradiction');
+  const omission = report.incidents.find((i: any) => i.kind === 'omission' && /panader/i.test(i.testimony || ''));
+  assert.ok(contradiction && omission);
+
+  await storage.addBookAuditNote({ versionId, note: 'Revisar con la familia.', performedBy: 'admin_pruebas' });
+  await storage.addBookAuditNote({ versionId, note: 'El padre la salvó.', incidentId: contradiction.incidentId, performedBy: 'admin_pruebas' });
+  await assert.rejects(storage.addBookAuditNote({ versionId, note: '   ', performedBy: 'admin_pruebas' }), /vacía/);
+  await storage.updateBookAuditIncidentStatus({ versionId, incidentId: contradiction.incidentId, status: 'reviewed_by_admin', performedBy: 'admin_pruebas' });
+  await assert.rejects(
+    storage.updateBookAuditIncidentStatus({ versionId, incidentId: contradiction.incidentId, status: 'borrado' as any, performedBy: 'admin_pruebas' }),
+    /no válido/
+  );
+  await storage.requestBookAuditCorrection({ versionId, incidentIds: [contradiction.incidentId, omission.incidentId], note: 'Corregir el río y la panadería.', performedBy: 'admin_pruebas' });
+  await assert.rejects(storage.requestBookAuditCorrection({ versionId, incidentIds: ['inexistente'], note: '', performedBy: 'admin_pruebas' }), /al menos una/);
+  // The saved version is never modified by admin actions.
+  assert.equal(
+    approval.computeManuscriptContentHash(storage.getBookVersionsForInterview(interview.id, false).find((v: any) => v.id === versionId).manuscript),
+    approval.computeManuscriptContentHash(saved.bookVersion.manuscript)
+  );
+
+  // Everything persists across a restart; history keeps every step.
+  const reloaded = new mod.StorageManager({ remoteDocStore: fakeRemoteStore });
+  assert.equal(reloaded['loadStateFromDisk'](), true);
+  const r2 = await reloaded.getBookAuditReport(versionId);
+  assert.equal(r2.adminNotes.length, 1);
+  const c2 = r2.incidents.find((i: any) => i.incidentId === contradiction.incidentId);
+  assert.equal(c2.adminStatus, 'reviewed_by_admin');
+  assert.equal(c2.adminNotes.length, 1);
+  assert.ok(c2.statusHistory.length >= 2, 'El estado anterior se conserva.');
+  assert.equal(r2.correctionRequests.length, 1);
+  for (const ev of ['admin_note', 'incident_status', 'correction_requested']) {
+    assert.ok(r2.history.some((h: any) => h.event === ev), ev);
+  }
+  // JSON export = the report itself, serializable.
+  assert.equal(JSON.parse(JSON.stringify(r2)).identification.versionId, versionId);
+
+  // A later, faithful version marks the incidents it verifies as corrected (the reviewed one stays reviewed).
+  const { result: fixed } = await generateApproved(interview.id, token, style, sixContradictionsJudge());
+  assert.equal(fixed.deliveryDecision.coverageExactPercent, 100);
+  const savedFixed = await storage.saveParticipantBookVersion({
+    plainToken: token,
+    narrativeStyle: style,
+    editorialConfig: editorialConfigFor(style),
+    manuscript: (await asParticipantSees(fixed)).manuscript,
+    coverPhoto: null,
+    chapterPhotos: {},
+    pageCount: 20,
+  });
+  const r3 = await storage.getBookAuditReport(versionId);
+  const om3 = r3.incidents.find((i: any) => i.incidentId === omission.incidentId);
+  assert.equal(om3.adminStatus, 'corrected_in_later_version');
+  assert.equal(om3.correctedInVersionId, savedFixed.bookVersion.id);
+  assert.equal(r3.incidents.find((i: any) => i.incidentId === contradiction.incidentId).adminStatus, 'reviewed_by_admin');
+  assert.ok(r3.history.some((h: any) => h.event === 'incidents_corrected_by_later_version'));
+  assert.equal(r3.incidents.length, report.incidents.length, 'Nunca se borra el historial de incidencias.');
+  // The earlier version still exists.
+  assert.ok(storage.getBookVersionsForInterview(interview.id, false).some((v: any) => v.id === versionId));
+});
+
+test('V5.3-T8: seguridad: toda ruta del informe exige administrador en el servidor y ninguna ruta de participante lo expone', () => {
+  const apiSource = fs.readFileSync(path.join(REPO_ROOT, 'src/server/api.ts'), 'utf-8');
+  const routeDecls = Array.from(apiSource.matchAll(/apiRouter\.(get|post|put|delete|patch)\(\s*'([^']+)'\s*,\s*([A-Za-z]+)/g));
+  const auditRoutes = routeDecls.filter((r) => /book-audits|\/audit(\/|$)/.test(r[2]));
+  assert.equal(auditRoutes.length, 6, auditRoutes.map((r) => r[2]).join(', '));
+  for (const r of auditRoutes) {
+    assert.match(r[2], /^\/admin\//, `${r[2]} debe vivir bajo /admin`);
+    assert.equal(r[3], 'requireAdmin', `${r[2]} debe exigir requireAdmin`);
+  }
+  // Admin storage methods are only called from admin routes.
+  const adminCalls = ['getBookAuditReport', 'listBookAuditSummaries', 'addBookAuditNote', 'updateBookAuditIncidentStatus', 'requestBookAuditCorrection'];
+  const blocks = apiSource.split(/\napiRouter\./);
+  for (const block of blocks) {
+    if (adminCalls.some((c) => block.includes(`storage.${c}(`))) {
+      assert.match(block.slice(0, 200), /requireAdmin/, `Llamada administrativa fuera de una ruta protegida: ${block.slice(0, 80)}`);
+    }
+  }
+  // Participant routes sanitize what they return.
+  assert.match(apiSource, /sanitizeBookVersionForParticipant/);
+  const participantSave = blocks.find((b) => b.includes("'/participant/book/save-version'"));
+  assert.ok(participantSave && /sanitizeBookVersionForParticipant/.test(participantSave));
+  const participantSession = blocks.find((b) => b.includes("'/participant/session'"));
+  assert.ok(participantSession && /sanitizeBookVersionForParticipant/.test(participantSession));
 });

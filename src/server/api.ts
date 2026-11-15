@@ -37,8 +37,10 @@ import { normalizeCanonicalPublicOrigin } from '../logic/freeRegistration.ts';
 import {
   bookJobManager,
   sanitizeBookResultForParticipant,
+  sanitizeBookVersionForParticipant,
   toParticipantBookJobView,
 } from './bookJobManager.ts';
+import type { BookAuditIncidentStatus } from '../logic/bookAuditReport.ts';
 
 export const apiRouter: Router = express.Router();
 apiRouter.use(express.json({ limit: '100mb' }));
@@ -1231,7 +1233,10 @@ apiRouter.post('/participant/session', async (req: Request, res: Response) => {
     const questions = storage.getQuestionsForVersion(interview.questionnaireVersionId);
     const answers = storage.getAnswersForInterview(interview.id);
     const otherParticipants = storage.getParticipantsForInterview(interview.id);
-    const bookVersions = storage.getBookVersionsForInterview(interview.id);
+    // V5.3: participants never receive audit information (coverage, contradictions, reports).
+    const bookVersions = storage
+      .getBookVersionsForInterview(interview.id)
+      .map((v) => sanitizeBookVersionForParticipant(v));
 
     // Verify existing informed consent on record for this specific participant
     const consent = storage.getActiveConsent(interview.id, participant.id) || storage.getConsentForParticipant(participant.id, PRIVACY_NOTICE_VERSION);
@@ -1699,11 +1704,103 @@ apiRouter.post('/participant/book/save-version', async (req: Request, res: Respo
       chapterPhotos,
       pageCount: Number(pageCount) || 5,
     });
-    const sanitizedSaveResult =
-      result && (result as any).interview
-        ? { ...result, interview: sanitizeInterviewForParticipant((result as any).interview) }
-        : result;
+    // V5.3: the saved version and the history go back to the participant WITHOUT audit data.
+    const sanitizedSaveResult = {
+      ...result,
+      interview: sanitizeInterviewForParticipant(result.interview),
+      bookVersion: sanitizeBookVersionForParticipant(result.bookVersion),
+      allVersions: (result.allVersions || []).map((v) => sanitizeBookVersionForParticipant(v)),
+    };
     res.json({ success: true, data: sanitizedSaveResult });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
+// =============================================================================================
+// V5.3 — ADMINISTRATIVE BOOK AUDIT ("Ver auditoría del libro"). Admin-only on the server: every
+// route goes through `requireAdmin`; none of this data is reachable from participant routes.
+// =============================================================================================
+apiRouter.get('/admin/book-audits', requireAdmin, (req: Request, res: Response) => {
+  try {
+    const interviewId = typeof req.query.interviewId === 'string' ? req.query.interviewId : undefined;
+    res.json({ success: true, data: storage.listBookAuditSummaries(interviewId) });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
+apiRouter.get('/admin/book-versions/:versionId/audit', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const report = await storage.getBookAuditReport(req.params.versionId);
+    if (!report) {
+      res.status(404).json({ success: false, error: 'Informe de auditoría no encontrado.' });
+      return;
+    }
+    res.json({ success: true, data: report });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
+apiRouter.get('/admin/book-versions/:versionId/audit/export', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const report = await storage.getBookAuditReport(req.params.versionId);
+    if (!report) {
+      res.status(404).json({ success: false, error: 'Informe de auditoría no encontrado.' });
+      return;
+    }
+    const safeId = req.params.versionId.replace(/[^A-Za-z0-9_-]/g, '_');
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="auditoria_${safeId}.json"`);
+    res.send(JSON.stringify(report, null, 2));
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
+apiRouter.post('/admin/book-versions/:versionId/audit/notes', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const report = await storage.addBookAuditNote({
+      versionId: req.params.versionId,
+      note: String(req.body?.note || ''),
+      incidentId: req.body?.incidentId ? String(req.body.incidentId) : undefined,
+      performedBy: (req as any).adminUser as string,
+    });
+    res.json({ success: true, data: report });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
+apiRouter.post(
+  '/admin/book-versions/:versionId/audit/incidents/:incidentId/status',
+  requireAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const report = await storage.updateBookAuditIncidentStatus({
+        versionId: req.params.versionId,
+        incidentId: req.params.incidentId,
+        status: String(req.body?.status || '') as BookAuditIncidentStatus,
+        note: req.body?.note ? String(req.body.note) : undefined,
+        performedBy: (req as any).adminUser as string,
+      });
+      res.json({ success: true, data: report });
+    } catch (err: unknown) {
+      res.status(400).json({ success: false, error: (err as Error).message });
+    }
+  }
+);
+
+apiRouter.post('/admin/book-versions/:versionId/audit/corrections', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const report = await storage.requestBookAuditCorrection({
+      versionId: req.params.versionId,
+      incidentIds: Array.isArray(req.body?.incidentIds) ? req.body.incidentIds.map(String) : [],
+      note: String(req.body?.note || ''),
+      performedBy: (req as any).adminUser as string,
+    });
+    res.json({ success: true, data: report });
   } catch (err: unknown) {
     res.status(400).json({ success: false, error: (err as Error).message });
   }

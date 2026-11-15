@@ -2,10 +2,14 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import {
+  BOOK_DELIVERY_POLICY_VERSION,
   BOOK_GENERATION_ENGINE_VERSION,
   CANONICAL_AUDIT_RULES_VERSION,
   buildManuscriptApprovalDigestPayload,
+  evaluateBookDeliveryEligibility,
+  isFullBookApprovalEvidence,
   type BookApprovalEvidence,
+  type BookDeliveryDecision,
   type DemoManuscript,
   type DemoNarrativeStyleId,
   type DocumentaryAuditReport,
@@ -298,6 +302,26 @@ function resolveVerificationKeys(): Buffer[] {
 }
 
 function buildEvidenceSigningString(evidence: Omit<BookApprovalEvidence, 'signature'>): string {
+  if (evidence.evidenceVersion === 2) {
+    return JSON.stringify([
+      evidence.evidenceVersion,
+      evidence.auditRulesVersion,
+      evidence.engineVersion,
+      evidence.auditPolicy,
+      evidence.interviewId,
+      evidence.narrativeStyle,
+      evidence.sourceFingerprint,
+      evidence.manuscriptContentHash,
+      evidence.coveragePercentage,
+      evidence.totalSourceUnits,
+      evidence.judgeResolvedUnits,
+      evidence.deliveryPolicyVersion,
+      evidence.verificationLevel,
+      evidence.deliveryEligible,
+      evidence.verifiedUnits,
+      evidence.issuedAt,
+    ]);
+  }
   return JSON.stringify([
     evidence.evidenceVersion,
     evidence.auditRulesVersion,
@@ -326,19 +350,36 @@ function signEvidence(evidence: Omit<BookApprovalEvidence, 'signature'>): string
  * Issues approval evidence. Throws when the report did not pass: evidence can only ever describe
  * a manuscript that the hybrid audit approved.
  */
+/**
+ * V5.3 — Issues the server-signed DELIVERY AUTHORIZATION for an exact manuscript.
+ *
+ * It is issued only when the server-computed delivery decision is eligible (coverage >= 60 %,
+ * valid structure, no privacy leak). The signature binds the interview, the sources, the exact
+ * manuscript, the style, the rules version, the delivery-policy version and the eligibility
+ * result, and records whether the text was fully verified or authorized with observations.
+ * (`report.passed` / `editorialAuditPassed` keep their strict meaning and are NOT required.)
+ */
 export function issueBookApprovalEvidence(params: {
   interviewId: string;
   manuscript: DemoManuscript;
   sourceFingerprint: string;
   report: DocumentaryAuditReport;
   editorialAuditPassed: boolean;
+  deliveryDecision?: BookDeliveryDecision;
 }): BookApprovalEvidence {
   const { interviewId, manuscript, sourceFingerprint, report, editorialAuditPassed } = params;
-  if (!report.passed || !editorialAuditPassed) {
-    throw new Error('No se puede emitir evidencia de aprobación para un manuscrito no aprobado.');
+  const decision =
+    params.deliveryDecision ||
+    evaluateBookDeliveryEligibility({
+      report,
+      editorialAudit: { passed: editorialAuditPassed, blockingDefects: [] } as any,
+      manuscript,
+    });
+  if (!decision.eligible) {
+    throw new Error('No se puede emitir autorización de entrega para un manuscrito no elegible.');
   }
   const unsigned: Omit<BookApprovalEvidence, 'signature'> = {
-    evidenceVersion: 1,
+    evidenceVersion: 2,
     auditRulesVersion: CANONICAL_AUDIT_RULES_VERSION,
     engineVersion: BOOK_GENERATION_ENGINE_VERSION,
     auditPolicy: 'hybrid_arbitrated',
@@ -349,6 +390,11 @@ export function issueBookApprovalEvidence(params: {
     coveragePercentage: report.coveragePercentage,
     totalSourceUnits: report.totalSourceUnits,
     judgeResolvedUnits: (report.semanticAudit?.judgeResolvedUnitIds || []).length,
+    deliveryPolicyVersion: BOOK_DELIVERY_POLICY_VERSION,
+    verificationLevel:
+      decision.verificationLevel === 'fully_verified' ? 'fully_verified' : 'delivered_with_observations',
+    deliveryEligible: true,
+    verifiedUnits: decision.verifiedUnits,
     issuedAt: new Date().toISOString(),
   };
   return { ...unsigned, signature: signEvidence(unsigned) };
@@ -362,6 +408,7 @@ export type BookApprovalVerificationFailure =
   | 'style_mismatch'
   | 'source_changed'
   | 'manuscript_changed'
+  | 'policy_version_changed'
   | 'invalid_signature';
 
 export interface BookApprovalVerificationResult {
@@ -381,12 +428,14 @@ export function verifyBookApprovalEvidence(params: {
   narrativeStyle: DemoNarrativeStyleId;
   currentSourceFingerprint: string;
 }): BookApprovalVerificationResult {
+  // A participant's opaque reference ({ evidenceRef }) must be resolved by the server into the
+  // stored evidence before calling this function; on its own it proves nothing.
   const evidence = params.manuscript?.approvalEvidence;
-  if (!evidence || typeof evidence !== 'object') {
+  if (!isFullBookApprovalEvidence(evidence)) {
     return { valid: false, reason: 'missing_evidence' };
   }
   if (
-    evidence.evidenceVersion !== 1 ||
+    (evidence.evidenceVersion !== 1 && evidence.evidenceVersion !== 2) ||
     typeof evidence.signature !== 'string' ||
     typeof evidence.sourceFingerprint !== 'string' ||
     typeof evidence.manuscriptContentHash !== 'string' ||
@@ -403,6 +452,12 @@ export function verifyBookApprovalEvidence(params: {
   });
   if (!signatureMatches) {
     return { valid: false, reason: 'invalid_signature' };
+  }
+  if (
+    evidence.evidenceVersion === 2 &&
+    (evidence.deliveryPolicyVersion !== BOOK_DELIVERY_POLICY_VERSION || evidence.deliveryEligible !== true)
+  ) {
+    return { valid: false, reason: 'policy_version_changed' };
   }
   if (
     evidence.auditRulesVersion !== CANONICAL_AUDIT_RULES_VERSION ||

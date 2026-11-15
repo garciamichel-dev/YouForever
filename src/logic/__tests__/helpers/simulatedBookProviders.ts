@@ -111,17 +111,19 @@ function additionalMemoryText(k: number): string {
  */
 export function buildSyntheticInterviewSpecs(
   size: 'small' | 'medium' | 'large',
-  options: { withPhotos?: boolean; baseQuestionCount?: number } = {}
+  options: { withPhotos?: boolean; baseQuestionCount?: number; variantOffset?: number } = {}
 ): SyntheticAnswerSpec[] {
+  // V5.3: a different offset yields a different life story (other names, places and years).
+  const off = options.variantOffset || 0;
   const baseCount = Math.min(options.baseQuestionCount ?? 20, size === 'small' ? 8 : 20);
   const specs: SyntheticAnswerSpec[] = [];
   for (let i = 0; i < baseCount; i++) {
     specs.push({
       kind: 'base',
       baseIndex: i,
-      text: baseAnswerText(i),
+      text: baseAnswerText(i + off),
       ...(options.withPhotos && (i === 0 || i === 4)
-        ? { photoCaption: i === 0 ? `Mi casa de adobe en ${pick(TOWNS, i)}` : `La fiesta en ${pick(TOWNS, i)}` }
+        ? { photoCaption: i === 0 ? `Mi casa de adobe en ${pick(TOWNS, i + off)}` : `La fiesta en ${pick(TOWNS, i + off)}` }
         : {}),
     });
   }
@@ -133,7 +135,7 @@ export function buildSyntheticInterviewSpecs(
         kind: 'follow_up',
         baseIndex: i,
         questionText: `¿Qué más recuerdas de ese momento? (${k + 1})`,
-        text: followUpText(i, k),
+        text: followUpText(i + off, k),
       });
     }
   }
@@ -143,7 +145,7 @@ export function buildSyntheticInterviewSpecs(
       kind: 'additional',
       baseIndex: -1,
       questionText: 'Recuerdo adicional',
-      text: additionalMemoryText(k),
+      text: additionalMemoryText(k + off),
     });
   }
   return specs;

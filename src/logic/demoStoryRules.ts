@@ -90,12 +90,14 @@ export type ManuscriptGenerationStatus =
   | 'needs_correction'
   | 'incomplete_draft'
   | 'approved'
+  /** V5.3: fast 5-page editorial sample; never a full book, never saved as a version. */
+  | 'preview_sample'
   | 'failed_ai'
   | 'failed_audit'
   | 'error';
 
-export const CANONICAL_AUDIT_RULES_VERSION = 'v5.1.0-judge-arbitrated-hybrid-audit';
-export const BOOK_GENERATION_ENGINE_VERSION = 'v5.1.0-fingerprinted-resumable-book-engine';
+export const CANONICAL_AUDIT_RULES_VERSION = 'v5.3.0-priority-judged-hybrid-audit';
+export const BOOK_GENERATION_ENGINE_VERSION = 'v5.3.0-delivery-policy-book-engine';
 
 export type BookGenerationReasonCode =
   | 'PROVIDER_ERROR'
@@ -168,13 +170,212 @@ export function buildIncompleteDraftUserNotice(category: BookFailureCategory): s
     case 'editorial':
       return 'Tus recuerdos ya están reunidos en este borrador, pero la redacción todavía necesita un pulido de estilo antes de quedar como versión definitiva. Vuelve a intentarlo para terminar ese pulido.';
     case 'repair_pending':
-      return 'Este borrador ya reúne casi toda tu historia, pero algunos recuerdos aún no quedaron integrados con la fidelidad necesaria. Vuelve a intentarlo: volveremos a escribir únicamente los capítulos pendientes.';
+      return 'Tu libro todavía necesita reunir más de tus recuerdos antes de quedar listo. Vuelve a intentarlo: continuaremos con los capítulos pendientes sin empezar desde cero.';
     case 'source_changed':
       return 'Tus respuestas cambiaron después de preparar este libro. Vuelve a prepararlo para que incluya tus recuerdos más recientes antes de guardarlo.';
     case 'documentary':
     default:
-      return 'Este borrador preliminar todavía no incluye todos tus recuerdos con total fidelidad. Puedes leerlo ahora y volver a intentarlo; no se guardará como versión definitiva hasta quedar completo.';
+      return 'Tu libro todavía necesita reunir más de tus recuerdos antes de quedar listo. Puedes leer este borrador y volver a intentarlo; continuaremos desde donde nos quedamos.';
   }
+}
+
+// =============================================================================================
+// V5.3 — DELIVERY POLICY (separate from the strict audit verdict)
+// =============================================================================================
+
+export const BOOK_DELIVERY_POLICY_VERSION = 'v5.3.0-delivery-min-60';
+/** Minimum calculated documentary coverage for delivery (inclusive): 60 %. */
+export const DELIVERY_MIN_COVERAGE_PERCENT = 60;
+export const COVERAGE_BAND_YELLOW_FROM_PERCENT = 80;
+export const COVERAGE_BAND_GREEN_FROM_PERCENT = 91;
+
+/** Admin-only coverage indicator. Below 60 % there is no acceptance indicator (pending review). */
+export type CoverageBand = 'pending_review' | 'orange' | 'yellow' | 'green';
+
+/**
+ * Band of an exact percentage value (never a rounded display value):
+ * < 60 pending_review · 60 to < 80 orange · 80 to < 91 yellow · 91 to 100 green.
+ */
+export function classifyCoveragePercentage(exactPercent: number): CoverageBand {
+  if (!Number.isFinite(exactPercent)) return 'pending_review';
+  if (exactPercent >= COVERAGE_BAND_GREEN_FROM_PERCENT) return 'green';
+  if (exactPercent >= COVERAGE_BAND_YELLOW_FROM_PERCENT) return 'yellow';
+  if (exactPercent >= DELIVERY_MIN_COVERAGE_PERCENT) return 'orange';
+  return 'pending_review';
+}
+
+/**
+ * Band from the ORIGINAL unit counts, compared in integer arithmetic
+ * (`verified * 100 >= threshold * eligible`), so no floating-point or display rounding can push a
+ * value below a threshold over it (e.g. 59.99 % stays below 60 %).
+ */
+export function classifyCoverageCounts(verifiedUnits: number, eligibleUnits: number): CoverageBand {
+  if (!(eligibleUnits > 0) || !(verifiedUnits >= 0)) return 'pending_review';
+  const v = Math.floor(verifiedUnits) * 100;
+  if (v >= COVERAGE_BAND_GREEN_FROM_PERCENT * eligibleUnits) return 'green';
+  if (v >= COVERAGE_BAND_YELLOW_FROM_PERCENT * eligibleUnits) return 'yellow';
+  if (v >= DELIVERY_MIN_COVERAGE_PERCENT * eligibleUnits) return 'orange';
+  return 'pending_review';
+}
+
+export type BookDeliveryBlockerCode =
+  | 'COVERAGE_BELOW_MINIMUM'
+  | 'PRIVACY_EXCLUSION_LEAK'
+  | 'STRUCTURE_INVALID'
+  | 'NO_DOCUMENTARY_SOURCES';
+
+export interface BookDeliveryDecision {
+  policyVersion: string;
+  /** Server-computed. The browser can never set it. */
+  eligible: boolean;
+  band: CoverageBand;
+  /** Exact ratio * 100, NOT rounded. */
+  coverageExactPercent: number;
+  verifiedUnits: number;
+  eligibleUnits: number;
+  /** fully_verified: strict documentary + editorial audits passed; otherwise with observations. */
+  verificationLevel: 'fully_verified' | 'delivered_with_observations' | 'not_eligible';
+  deliveryStatus: 'delivered' | 'delivered_with_observations' | 'pending_review';
+  blockers: Array<{ code: BookDeliveryBlockerCode; message: string }>;
+  observations: {
+    contradictions: number;
+    omittedUnits: number;
+    pendingVerificationUnits: number;
+    ambiguousUnits: number;
+    inventedDataFlags: number;
+    unsupportedAdditions: number;
+    uncertaintyViolations: number;
+    editorialDefects: number;
+    photosPending: number;
+  };
+  decidedAt: string;
+}
+
+/**
+ * V5.3 — Technical integrity of a manuscript received for saving: something that can really be
+ * stored, versioned and composed. Returns the problems found (empty when valid).
+ */
+export function validateManuscriptTechnicalIntegrity(manuscript: any): string[] {
+  const problems: string[] = [];
+  if (!manuscript || typeof manuscript !== 'object') return ['El manuscrito no es un objeto válido.'];
+  if (!Array.isArray(manuscript.chapters) || manuscript.chapters.length === 0) {
+    return ['El manuscrito no contiene capítulos.'];
+  }
+  const ids = new Set<string>();
+  let textChars = 0;
+  manuscript.chapters.forEach((ch: any, idx: number) => {
+    if (!ch || typeof ch !== 'object') {
+      problems.push(`Capítulo ${idx + 1} inválido.`);
+      return;
+    }
+    if (typeof ch.id !== 'string' || !ch.id.trim()) problems.push(`Capítulo ${idx + 1} sin identificador.`);
+    else if (ids.has(ch.id)) problems.push(`Identificador de capítulo duplicado: ${ch.id}.`);
+    else ids.add(ch.id);
+    if (!Array.isArray(ch.paragraphs) || ch.paragraphs.some((p: unknown) => typeof p !== 'string')) {
+      problems.push(`Capítulo ${idx + 1} con párrafos inválidos.`);
+    } else {
+      textChars += ch.paragraphs.join('').trim().length;
+    }
+  });
+  if (problems.length === 0 && textChars === 0) problems.push('El manuscrito no contiene texto.');
+  return problems;
+}
+
+/**
+ * V5.3 — DELIVERY ELIGIBILITY, independent of the strict audit verdict.
+ *
+ * The documentary and editorial audits keep measuring how well the manuscript was verified and
+ * are never altered. Delivery (save, version, export, hand to the participant) is decided here:
+ *   1. calculated coverage >= 60 % (inclusive, original unit counts, no rounding),
+ *   2. technically valid structure,
+ *   3. no leak of content the interviewee explicitly excluded (privacy),
+ *   4. at least one eligible documentary unit.
+ * Contradictions, omissions, pending verifications and editorial defects are OBSERVATIONS for the
+ * administrator, never blockers by themselves.
+ */
+export function evaluateBookDeliveryEligibility(params: {
+  report: DocumentaryAuditReport;
+  editorialAudit?: EditorialQualityAuditReport | null;
+  manuscript?: DemoManuscript | null;
+}): BookDeliveryDecision {
+  const { report, editorialAudit, manuscript } = params;
+  const eligibleUnits = Number(report.totalSourceUnits) || 0;
+  const verifiedUnits = Math.max(0, Math.min(Number(report.integratedUnits) || 0, eligibleUnits));
+  const coverageExactPercent = eligibleUnits > 0 ? (verifiedUnits / eligibleUnits) * 100 : 0;
+  const band = classifyCoverageCounts(verifiedUnits, eligibleUnits);
+  const blockers: BookDeliveryDecision['blockers'] = [];
+
+  if (eligibleUnits === 0) {
+    blockers.push({
+      code: 'NO_DOCUMENTARY_SOURCES',
+      message: 'No hay unidades documentales elegibles en las fuentes.',
+    });
+  } else if (band === 'pending_review') {
+    blockers.push({
+      code: 'COVERAGE_BELOW_MINIMUM',
+      message: `Cobertura documental calculada inferior al mínimo de entrega (${verifiedUnits}/${eligibleUnits}).`,
+    });
+  }
+  const leaks = [
+    ...(report.veracityAudit?.leakedExcludedContentFlags || []),
+    ...(report.leakedExcludedContentFlags || []),
+  ];
+  if (leaks.length > 0) {
+    blockers.push({
+      code: 'PRIVACY_EXCLUSION_LEAK',
+      message: `El manuscrito incluye contenido que el entrevistado excluyó expresamente (${leaks.length}).`,
+    });
+  }
+  const structuralProblems = manuscript ? validateManuscriptTechnicalIntegrity(manuscript) : [];
+  if (
+    structuralProblems.length > 0 ||
+    report.structuralAudit?.uniqueChapterIds === false ||
+    report.structuralAudit?.consecutiveNumbering === false
+  ) {
+    blockers.push({
+      code: 'STRUCTURE_INVALID',
+      message:
+        structuralProblems[0] || 'La estructura de capítulos del manuscrito no es técnicamente válida.',
+    });
+  }
+
+  const trace = report.traceabilityMatrix || [];
+  const inventedSet = new Set(report.veracityAudit?.inventedDataFlags || []);
+  const observations: BookDeliveryDecision['observations'] = {
+    contradictions:
+      trace.filter((t) => t.verificationStatus === 'contradicted' || t.aiJudgeVerdict === 'contradicted').length,
+    omittedUnits: trace.filter(
+      (t) =>
+        (t.exclusionReason || 'none') === 'none' &&
+        !t.verified &&
+        !t.judgeDeferred &&
+        t.verificationStatus !== 'contradicted' &&
+        t.aiJudgeVerdict !== 'contradicted'
+    ).length,
+    pendingVerificationUnits: trace.filter((t) => t.judgeDeferred).length,
+    ambiguousUnits: (report.semanticAudit?.ambiguousUnitIds || []).length,
+    inventedDataFlags: inventedSet.size,
+    unsupportedAdditions: (report.veracityAudit?.unsupportedAdditionFlags || []).filter((f) => !inventedSet.has(f))
+      .length,
+    uncertaintyViolations: (report.veracityAudit?.uncertaintyViolations || []).length,
+    editorialDefects: (editorialAudit?.blockingDefects || []).length,
+    photosPending: (report.photoAudit?.unplacedPhotoIds || []).length,
+  };
+  const eligible = blockers.length === 0;
+  const fullyVerified = eligible && report.passed === true && (editorialAudit ? editorialAudit.passed : true);
+  return {
+    policyVersion: BOOK_DELIVERY_POLICY_VERSION,
+    eligible,
+    band,
+    coverageExactPercent,
+    verifiedUnits,
+    eligibleUnits,
+    verificationLevel: !eligible ? 'not_eligible' : fullyVerified ? 'fully_verified' : 'delivered_with_observations',
+    deliveryStatus: !eligible ? 'pending_review' : fullyVerified ? 'delivered' : 'delivered_with_observations',
+    blockers,
+    observations,
+    decidedAt: new Date().toISOString(),
+  };
 }
 
 /**
@@ -244,6 +445,12 @@ export function finalizeGlobalAuditDecision(params: {
     for (const l of sem.contradictionsDetected || []) pushUnique(l);
     for (const l of ver?.inventedDataFlags || []) pushUnique(l);
     for (const l of sem.unsupportedAdditions || []) pushUnique(l);
+    const pending = sem.pendingVerificationUnitIds || [];
+    if (pending.length > 0) {
+      pushUnique(
+        `Verificación semántica pendiente para ${pending.length} unidad(es) de baja prioridad (no enviadas al juez).`
+      );
+    }
     const ambiguous = sem.ambiguousUnitIds || [];
     if (
       ambiguous.length > 0 &&
@@ -311,8 +518,27 @@ export function finalizeGlobalAuditDecision(params: {
  * HMAC computed with a server-only secret, so a browser can carry the evidence but cannot forge
  * or re-target it. `src/server/bookApproval.ts` issues and verifies it.
  */
+/** V5.3 — What a participant's browser holds instead of the evidence: an opaque reference. */
+export interface BookApprovalEvidenceRef {
+  evidenceRef: string;
+}
+
+export function isBookApprovalEvidenceRef(value: unknown): value is BookApprovalEvidenceRef {
+  return (
+    !!value &&
+    typeof value === 'object' &&
+    typeof (value as any).evidenceRef === 'string' &&
+    typeof (value as any).signature !== 'string'
+  );
+}
+
+export function isFullBookApprovalEvidence(value: unknown): value is BookApprovalEvidence {
+  return !!value && typeof value === 'object' && typeof (value as any).signature === 'string';
+}
+
 export interface BookApprovalEvidence {
-  evidenceVersion: 1;
+  /** 1: V5.1/V5.2 (full approvals only). 2: V5.3 delivery authorization. */
+  evidenceVersion: 1 | 2;
   auditRulesVersion: string;
   engineVersion: string;
   auditPolicy: 'hybrid_arbitrated';
@@ -323,6 +549,11 @@ export interface BookApprovalEvidence {
   coveragePercentage: number;
   totalSourceUnits: number;
   judgeResolvedUnits: number;
+  /** V5.3 (evidenceVersion 2): delivery policy and eligibility result bound into the signature. */
+  deliveryPolicyVersion?: string;
+  verificationLevel?: 'fully_verified' | 'delivered_with_observations';
+  deliveryEligible?: boolean;
+  verifiedUnits?: number;
   issuedAt: string;
   signature: string;
 }
@@ -480,6 +711,11 @@ export interface TraceabilityMatrixEntry {
   semanticReviewReason?: string;
   /** V5.2: why absence is considered demonstrated (concrete datum missing from the whole book). */
   evidenceOfAbsenceReason?: string;
+  /**
+   * V5.3: the unit needed the semantic judge but was NOT sent because the delivery decision was
+   * already reached with higher-priority cases. It stays unverified (pending), never "covered".
+   */
+  judgeDeferred?: boolean;
   aiJudgeVerdict?: 'supported' | 'contradicted' | 'omitted' | 'inconclusive';
   aiJudgeRationale?: string;
   /** V5.1: true when the judge could not be reached (technical), as opposed to an inconclusive verdict. */
@@ -575,6 +811,17 @@ export interface DocumentaryAuditReport {
     ambiguousUnitIds?: string[];
     /** V5.2: fact-like unsupported sentences waiting for the hybrid audit's contextual check. */
     unsupportedAdditionsPendingArbitration?: number;
+    /** V5.3: units the judge was not asked about (decision already reached). Unverified. */
+    pendingVerificationUnitIds?: string[];
+    /** V5.3: what the semantic judge actually did in this audit. */
+    judgeStats?: {
+      policy: 'priority' | 'exhaustive';
+      casesTotal: number;
+      casesSent: number;
+      casesFromCache: number;
+      casesDeferred: number;
+      invocations: number;
+    };
     /** V5.1: every unit the deterministic rules could not settle (superset of ambiguousUnitIds). */
     reviewCandidateUnitIds?: string[];
     /** V5.1: units a semantic judge ruled on, and those left unresolved because it was unreachable. */
@@ -672,13 +919,32 @@ export interface DemoManuscript {
   /** V5.1: participant-safe failure family (see `BookFailureCategory`). */
   failureCategory?: BookFailureCategory;
   /** V5.1: server-signed proof that this exact text was approved for these exact sources. */
-  approvalEvidence?: BookApprovalEvidence;
+  /**
+   * Server-signed delivery authorization. V5.3: participants only ever hold an opaque reference
+   * (`{ evidenceRef }`); the full evidence, with its coverage figures, stays on the server.
+   */
+  approvalEvidence?: BookApprovalEvidence | BookApprovalEvidenceRef;
   auditReport?: DocumentaryAuditReport;
   documentaryAudit?: DocumentaryAuditReport;
   editorialAudit?: EditorialQualityAuditReport;
+  /** V5.3: server-computed delivery decision (separate from the strict audit verdict). */
+  deliveryDecision?: BookDeliveryDecision;
+  /** V5.3: this manuscript is the fast editorial sample, not the full book. */
+  isPreviewSample?: boolean;
+  /** V5.3: local fidelity check of the sample (only the memories it uses). Admin-only. */
+  previewFidelity?: PreviewFidelityReport;
   includeTableOfContents?: boolean;
   includeEditorialCredits?: boolean;
   editorialCreditsText?: string;
+}
+
+/** V5.3 — Local fidelity check of the 5-page editorial sample. */
+export interface PreviewFidelityReport {
+  checkedAnswerIds: string[];
+  checkedUnits: number;
+  verifiedUnits: number;
+  replacedChapterIds: string[];
+  issues: string[];
 }
 
 export interface DemoInMemoryPhoto {
@@ -9483,7 +9749,13 @@ export function buildContextualRepairTasks(params: {
     }
   }
 
+  // V5.3: units still pending verification (judge deferred) are NOT confirmed omissions; rewriting
+  // their chapters would only risk damaging text that is probably faithful.
+  const deferredIds = new Set(
+    (report.traceabilityMatrix || []).filter((t) => t.judgeDeferred).map((t) => t.unitId)
+  );
   for (const unitId of missingOrContradictedIds) {
+    if (deferredIds.has(unitId)) continue;
     const unit = inventory.eligibleFactUnits.find((u) => u.unitId === unitId);
     if (!unit) continue;
     const targetCh = resolveChapterForUnit(unit);

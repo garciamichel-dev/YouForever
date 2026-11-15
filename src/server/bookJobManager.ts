@@ -7,6 +7,7 @@ import type {
   DemoManuscript,
   DemoNarrativeStyleId,
 } from '../logic/demoStoryRules.ts';
+import { isBookApprovalEvidenceRef, isFullBookApprovalEvidence } from '../logic/demoStoryRules.ts';
 import type { BookAiProvider } from '../logic/interviewRules.ts';
 import type {
   BookBatchCheckpointPayload,
@@ -129,33 +130,67 @@ export interface BookJobExecutionHooks {
   initialBatchCheckpoints: Record<string, BookBatchCheckpointPayload>;
   onBatchCheckpoint: (batchIdx: number, checkpoint: BookBatchCheckpointPayload) => void;
   isCancelled: () => boolean;
+  /** V5.3: id of the job running this execution (recorded in the admin audit report). */
+  jobId?: string;
 }
 
 export type BookJobExecutor = (hooks: BookJobExecutionHooks) => Promise<BookJobResultPayload>;
 
-export function sanitizeManuscriptForParticipant(
-  manuscript: DemoManuscript
-): Omit<DemoManuscript, 'internalReasonCode' | 'diagnosticSummary'> {
+/**
+ * V5.3 — Fields of a manuscript that participants must never receive: internal codes and
+ * diagnostics, the documentary/editorial audit reports, the delivery decision (coverage, colour
+ * band, contradictions) and the sample's local fidelity report. Administrators read them through
+ * the protected audit endpoints.
+ */
+export const PARTICIPANT_HIDDEN_MANUSCRIPT_FIELDS = [
+  'internalReasonCode',
+  'diagnosticSummary',
+  'documentaryAudit',
+  'auditReport',
+  'editorialAudit',
+  'deliveryDecision',
+  'previewFidelity',
+] as const;
+
+export function sanitizeManuscriptForParticipant(manuscript: DemoManuscript): DemoManuscript {
   if (!manuscript || typeof manuscript !== 'object') return manuscript;
-  const { internalReasonCode: _code, diagnosticSummary: _diag, ...rest } = manuscript as any;
-  return rest;
+  const copy: any = { ...manuscript };
+  for (const field of PARTICIPANT_HIDDEN_MANUSCRIPT_FIELDS) delete copy[field];
+  // The signed evidence carries coverage figures: the browser only keeps an opaque reference
+  // (the HMAC signature), which the server resolves when the book is saved.
+  if (isFullBookApprovalEvidence(copy.approvalEvidence)) {
+    copy.approvalEvidence = { evidenceRef: copy.approvalEvidence.signature };
+  } else if (!isBookApprovalEvidenceRef(copy.approvalEvidence)) {
+    delete copy.approvalEvidence;
+  }
+  return copy;
 }
 
-export function sanitizeBookResultForParticipant(
-  result: BookJobResultPayload
-): Omit<BookJobResultPayload, 'internalReasonCode' | 'diagnosticSummary'> & {
-  manuscript: Omit<DemoManuscript, 'internalReasonCode' | 'diagnosticSummary'>;
-} {
-  const {
-    internalReasonCode: _code,
-    diagnosticSummary: _diag,
-    manuscript,
-    ...rest
-  } = result;
-  return {
-    ...rest,
-    manuscript: sanitizeManuscriptForParticipant(manuscript),
-  };
+/** V5.3 — Result fields that are administrative only. */
+const PARTICIPANT_HIDDEN_RESULT_FIELDS = [
+  'internalReasonCode',
+  'diagnosticSummary',
+  'deliveryDecision',
+  'generationMetrics',
+  'repairSummary',
+  'invalidatedBatchIndexes',
+] as const;
+
+export function sanitizeBookResultForParticipant(result: BookJobResultPayload): BookJobResultPayload {
+  const copy: any = { ...result };
+  for (const field of PARTICIPANT_HIDDEN_RESULT_FIELDS) delete copy[field];
+  copy.manuscript = sanitizeManuscriptForParticipant(result.manuscript);
+  return copy;
+}
+
+/** V5.3 — A saved book version as a participant may see it (no audit information). */
+export function sanitizeBookVersionForParticipant<T extends { manuscript?: DemoManuscript }>(version: T): T {
+  if (!version || typeof version !== 'object') return version;
+  const copy: any = { ...version };
+  delete copy.auditReport;
+  delete copy.auditSummary;
+  if (copy.manuscript) copy.manuscript = sanitizeManuscriptForParticipant(copy.manuscript);
+  return copy;
 }
 
 export function toParticipantBookJobView(job: BookGenerationJobRecord): ParticipantBookJobView {
@@ -427,6 +462,7 @@ export class BookGenerationJobManager {
     const workerPromise = (async () => {
       try {
         const result = await params.executor({
+          jobId,
           initialBatchCheckpoints: { ...job.batchCheckpoints },
           isCancelled: () => this.cancelledJobIds.has(jobId),
           onProgress: (ev) => {

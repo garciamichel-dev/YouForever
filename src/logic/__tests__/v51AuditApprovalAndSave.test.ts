@@ -707,10 +707,10 @@ test('V5.1-C1: la evidencia de aprobación es verificable y no puede falsificars
   const { approvalEvidence: _dropped, ...withoutEvidence } = roundTripped;
   assert.equal(verify({ ...withoutEvidence, generationStatus: 'approved', status: 'approved' } as DemoManuscript).reason, 'missing_evidence');
   const retargeted: DemoManuscript = JSON.parse(JSON.stringify(editedText));
-  retargeted.approvalEvidence!.manuscriptContentHash = computeManuscriptContentHash(retargeted);
+  (retargeted.approvalEvidence as any).manuscriptContentHash = computeManuscriptContentHash(retargeted);
   assert.equal(verify(retargeted).reason, 'invalid_signature', 'Recalcular el hash en el cliente no sirve sin la clave del servidor.');
   const fakeSignature: DemoManuscript = JSON.parse(JSON.stringify(signed));
-  fakeSignature.approvalEvidence!.signature = 'a'.repeat(64);
+  (fakeSignature.approvalEvidence as any).signature = 'a'.repeat(64);
   assert.equal(verify(fakeSignature).reason, 'invalid_signature');
 
   // 6. Evidence signed with another server key is rejected (then saving re-audits instead).
@@ -721,16 +721,26 @@ test('V5.1-C1: la evidencia de aprobación es verificable y no puede falsificars
   __resetProcessLocalApprovalSecretForTests();
   assert.equal(verify(roundTripped).valid, true);
 
-  // 7. Evidence can never be issued for a manuscript that did not pass.
+  // 7. V5.3: evidence is a DELIVERY authorization. It is never issued for a manuscript below the
+  // 60 % minimum, and when the strict audit did not pass it says so (with observations).
   assert.throws(() =>
     issueBookApprovalEvidence({
       interviewId: 'int_evidence',
       manuscript: signed,
       sourceFingerprint,
-      report: { ...approved.report, passed: false },
+      report: { ...approved.report, passed: false, integratedUnits: 0 },
       editorialAuditPassed: true,
     })
   );
+  const withObservations = issueBookApprovalEvidence({
+    interviewId: 'int_evidence',
+    manuscript: signed,
+    sourceFingerprint,
+    report: { ...approved.report, passed: false },
+    editorialAuditPassed: true,
+  });
+  assert.equal(withObservations.verificationLevel, 'delivered_with_observations');
+  assert.equal((signed.approvalEvidence as any).verificationLevel, 'fully_verified');
 });
 
 test('V5.1-C2: generación y guardado aplican la misma política y producen el mismo veredicto sin volver a consultar a la IA', async () => {
@@ -1390,21 +1400,23 @@ test('V5.1-E1: una omisión real se repara de forma narrativa; si la reparación
       repairBatchCaller: async () => null,
     },
   });
-  assert.equal(unrepaired.manuscript.generationStatus, 'incomplete_draft');
-  assert.equal(unrepaired.manuscript.approvalEvidence, undefined);
-  assert.equal(unrepaired.internalReasonCode, 'REPAIR_EXHAUSTED');
-  assert.equal(unrepaired.failureCategory, 'repair_pending');
-  assert.equal(unrepaired.manuscript.incompleteDraftNotice, buildIncompleteDraftUserNotice('repair_pending'));
-  assert.match(unrepaired.diagnosticSummary || '', /Cobertura documental/);
+  // V5.3: the strict audit keeps reporting the omission (honest), but the book is well above the
+  // 60 % minimum, so it is delivered WITH OBSERVATIONS and every valid batch is kept.
+  assert.equal(unrepaired.manuscript.documentaryAudit?.passed, false);
+  assert.ok(
+    (unrepaired.manuscript.documentaryAudit?.coverageAudit?.missingUnitIds || []).length >= 1,
+    'La omisión sigue registrada en la auditoría.'
+  );
+  assert.equal(unrepaired.manuscript.generationStatus, 'approved');
+  assert.equal((unrepaired.manuscript.approvalEvidence as any)?.verificationLevel, 'delivered_with_observations');
+  assert.equal((unrepaired as any).deliveryDecision.eligible, true);
   assert.equal(
     unrepaired.manuscript.chapters.some((ch) => ch.paragraphs.some((p) => /canicas/.test(p))),
     false,
     'El testimonio omitido no debe pegarse mecánicamente en la prosa.'
   );
-  // Only the batch that holds the defective chapter is discarded for the next attempt.
-  const invalidated = unrepaired.invalidatedBatchIndexes || [];
-  assert.equal(invalidated.length >= 1, true);
-  assert.equal(invalidated.length < (unrepaired.totalBatches || 0), true, 'Los lotes sanos se conservan.');
+  assert.deepEqual(unrepaired.invalidatedBatchIndexes || [], [], 'Un libro entregable conserva todos sus lotes.');
+  assert.ok(((unrepaired as any).repairSummary?.roundsExecuted ?? 0) <= 1, 'A lo sumo una ronda al ser ya entregable.');
 });
 
 test('V5.1-E2: una reparación que arregla un capítulo y estropea otro conserva solo el capítulo que mejoró', async () => {

@@ -81,7 +81,22 @@ import {
   composeBookPages,
   hasUpdatedAnswersSinceBookVersion,
   repairManuscriptOmissions,
+  BookApprovalEvidence,
+  BookDeliveryDecision,
+  DocumentaryAuditReport,
+  EditorialQualityAuditReport,
+  classifyCoverageCounts,
+  evaluateBookDeliveryEligibility,
+  isBookApprovalEvidenceRef,
+  isFullBookApprovalEvidence,
+  validateManuscriptTechnicalIntegrity,
 } from '../logic/demoStoryRules.ts';
+import {
+  BookAuditIncidentStatus,
+  BookAuditReport,
+  buildBookAuditReport,
+  refreshBookAuditReportCounters,
+} from '../logic/bookAuditReport.ts';
 import {
   PrivacyConsentRecord,
   BookShareRecord,
@@ -193,11 +208,17 @@ interface QuestionnaireVersionDoc {
 export interface StorageRemoteDocStore {
   setDoc(collectionName: string, docId: string, data: Record<string, unknown>): Promise<void>;
   deleteDoc(collectionName: string, docId: string): Promise<void>;
+  /** V5.3: single-document read (used to recover an audit report not held in memory). */
+  getDoc?(collectionName: string, docId: string): Promise<Record<string, unknown> | null>;
 }
 
 const firestoreRemoteDocStore: StorageRemoteDocStore = {
   async setDoc(collectionName, docId, data) {
     await firestoreTelemetry.trackedSetDoc(serverDb, doc(serverDb, collectionName, docId), data, 'storage');
+  },
+  async getDoc(collectionName, docId) {
+    const snap = await firestoreTelemetry.trackedGetDoc(serverDb, doc(serverDb, collectionName, docId), 'storage');
+    return snap.exists() ? (snap.data() as Record<string, unknown>) : null;
   },
   async deleteDoc(collectionName, docId) {
     await firestoreTelemetry.trackedDeleteDoc(serverDb, doc(serverDb, collectionName, docId), 'storage');
@@ -235,9 +256,50 @@ export interface StorageManagerOptions {
   bookAiOverrides?: StorageBookAiOverrides;
 }
 
+/**
+ * V5.3 — A delivery authorization issued by this server for one exact manuscript, kept SERVER-SIDE
+ * with the real audit results that justified it. Participants only hold `evidenceRef` (the HMAC
+ * signature); at save time the server resolves it here, so neither the coverage figures nor the
+ * audit details travel to the browser, and the browser can never supply its own audit.
+ */
+export interface BookDeliveryAuthorizationRecord {
+  evidenceRef: string;
+  interviewId: string;
+  narrativeStyle: DemoNarrativeStyleId;
+  evidence: BookApprovalEvidence;
+  documentaryAudit?: DocumentaryAuditReport;
+  editorialAudit?: EditorialQualityAuditReport;
+  deliveryDecision?: BookDeliveryDecision;
+  generation?: {
+    provider?: string;
+    model?: string;
+    generatedAt?: string;
+    jobId?: string;
+    metrics?: Record<string, unknown> | null;
+    repairSummary?: Record<string, unknown> | null;
+  };
+  createdAt: string;
+}
+
+/** Compact, admin-only indicator stored with each version (stripped from participant responses). */
+export interface BookVersionAuditSummary {
+  band: ReturnType<typeof classifyCoverageCounts>;
+  coverageExactPercent: number;
+  verifiedUnits: number;
+  eligibleUnits: number;
+  verificationLevel: BookDeliveryDecision['verificationLevel'];
+  deliveryStatus: BookDeliveryDecision['deliveryStatus'];
+  contradictions: number;
+  reportAvailable: boolean;
+}
+
 export class StorageManager {
   private remoteDocStore: StorageRemoteDocStore;
   private bookAiOverrides?: StorageBookAiOverrides;
+  /** V5.3: server-side delivery authorizations, keyed by evidence signature. */
+  private bookDeliveryAuthorizations: Map<string, BookDeliveryAuthorizationRecord> = new Map();
+  /** V5.3: administrative audit report of each saved version, keyed by version id. */
+  private bookAuditReports: Map<string, BookAuditReport> = new Map();
 
   /**
    * V5.2 — Puts this instance in isolated test mode: remote writes go to `remoteDocStore` and the
@@ -444,6 +506,8 @@ export class StorageManager {
         participantBookVersions: Array.from(this.participantBookVersions.values()),
         deletedBookVersionIds: Array.from(this.deletedBookVersionIds),
         syncWatermarks: this.syncWatermarks,
+        bookDeliveryAuthorizations: Array.from(this.bookDeliveryAuthorizations.values()),
+        bookAuditReports: Array.from(this.bookAuditReports.values()),
       };
       const tempPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
       try {
@@ -579,6 +643,17 @@ export class StorageManager {
           }
         }
       }
+      if (Array.isArray(parsed.bookDeliveryAuthorizations)) {
+        for (const auth of parsed.bookDeliveryAuthorizations) {
+          if (auth?.evidenceRef) this.bookDeliveryAuthorizations.set(auth.evidenceRef, auth);
+        }
+      }
+      if (Array.isArray(parsed.bookAuditReports)) {
+        for (const rep of parsed.bookAuditReports) {
+          const vid = rep?.identification?.versionId;
+          if (vid) this.bookAuditReports.set(vid, rep);
+        }
+      }
       if (parsed.syncWatermarks && typeof parsed.syncWatermarks === 'object') {
         this.syncWatermarks = {
           fullBaselineSyncedAt: parsed.syncWatermarks.fullBaselineSyncedAt || null,
@@ -635,6 +710,317 @@ export class StorageManager {
         console.warn(`[Firestore Persistence Note] Document ${collectionName}/${docId} saved locally:`, err?.message || err);
       }
     }
+  }
+
+  /**
+   * V5.3 — Same remote write as `persistRemoteDoc`, but reports what really happened, so callers
+   * never claim a replica that was skipped (size guard, quota) or failed.
+   */
+  private async persistRemoteDocWithStatus<T>(
+    collectionName: string,
+    docId: string,
+    data: T
+  ): Promise<'written' | 'skipped' | 'failed'> {
+    try {
+      const sanitized = this.sanitizeDocForFirestore(data);
+      (sanitized as Record<string, unknown>)._syncedAt = new Date().toISOString();
+      if (Buffer.byteLength(JSON.stringify(sanitized), 'utf8') > 800_000) {
+        console.warn(
+          `[Firestore Size Guard] ${collectionName}/${docId} exceeds the safe size; kept in the local snapshot only.`
+        );
+        return 'skipped';
+      }
+      await Promise.race([
+        this.remoteDocStore.setDoc(collectionName, docId, sanitized as Record<string, unknown>),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Firestore write timed out')), 2500)),
+      ]);
+      return 'written';
+    } catch (err: any) {
+      console.warn(`[Firestore Persistence Note] ${collectionName}/${docId} kept locally:`, err?.message || err);
+      return 'failed';
+    }
+  }
+
+  /**
+   * V5.3 — Records, server-side, the delivery authorization of a generated manuscript together with
+   * the audit that justified it. Keeps the most recent authorizations per interview.
+   */
+  private registerBookDeliveryAuthorization(params: {
+    interviewId: string;
+    narrativeStyle: DemoNarrativeStyleId;
+    manuscript: DemoManuscript | undefined;
+    generation?: BookDeliveryAuthorizationRecord['generation'];
+  }): void {
+    const evidence = params.manuscript?.approvalEvidence;
+    if (!params.manuscript || !isFullBookApprovalEvidence(evidence)) return;
+    const existing = this.bookDeliveryAuthorizations.get(evidence.signature);
+    this.bookDeliveryAuthorizations.set(evidence.signature, {
+      evidenceRef: evidence.signature,
+      interviewId: params.interviewId,
+      narrativeStyle: params.narrativeStyle,
+      evidence,
+      documentaryAudit: params.manuscript.documentaryAudit || existing?.documentaryAudit,
+      editorialAudit: params.manuscript.editorialAudit || existing?.editorialAudit,
+      deliveryDecision: params.manuscript.deliveryDecision || existing?.deliveryDecision,
+      generation: { ...(existing?.generation || {}), ...(params.generation || {}) },
+      createdAt: existing?.createdAt || new Date().toISOString(),
+    });
+    const forInterview = Array.from(this.bookDeliveryAuthorizations.values())
+      .filter((a) => a.interviewId === params.interviewId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    for (const stale of forInterview.slice(12)) this.bookDeliveryAuthorizations.delete(stale.evidenceRef);
+  }
+
+  private buildVersionAuditSummary(report: BookAuditReport): BookVersionAuditSummary {
+    return {
+      band: report.coverage.band,
+      coverageExactPercent: report.coverage.exactPercent,
+      verifiedUnits: report.coverage.verifiedUnits,
+      eligibleUnits: report.coverage.eligibleUnits,
+      verificationLevel: report.delivery.verificationLevel,
+      deliveryStatus: report.delivery.deliveryStatus,
+      contradictions: report.coverage.contradictions,
+      reportAvailable: true,
+    };
+  }
+
+  /**
+   * V5.3 — When a new version of the same interview and style verifies a unit that an earlier
+   * version's report listed as an incident, that earlier incident is marked "corrected in a later
+   * version" (with the version id and a history entry). Nothing is deleted.
+   */
+  private markIncidentsCorrectedByVersion(
+    newReport: BookAuditReport,
+    newVersion: ParticipantBookVersionRecord
+  ): void {
+    const verifiedUnitIds = new Set(
+      (newVersion.manuscript?.documentaryAudit?.traceabilityMatrix || [])
+        .filter((t) => t.verified)
+        .map((t) => t.unitId)
+    );
+    if (verifiedUnitIds.size === 0) return;
+    const now = new Date().toISOString();
+    for (const [versionId, report] of this.bookAuditReports.entries()) {
+      if (versionId === newVersion.id) continue;
+      if (report.identification.interviewId !== newVersion.interviewId) continue;
+      if (report.identification.narrativeStyle !== newVersion.narrativeStyle) continue;
+      let changed = false;
+      for (const incident of report.incidents) {
+        if (
+          incident.unitId &&
+          verifiedUnitIds.has(incident.unitId) &&
+          incident.adminStatus !== 'corrected_in_later_version' &&
+          incident.adminStatus !== 'reviewed_by_admin'
+        ) {
+          incident.adminStatus = 'corrected_in_later_version';
+          incident.correctedInVersionId = newVersion.id;
+          incident.statusHistory.push({
+            status: 'corrected_in_later_version',
+            by: 'sistema',
+            at: now,
+            note: `Verificada en la versión ${newVersion.versionNumber}.`,
+          });
+          changed = true;
+        }
+      }
+      if (changed) {
+        refreshBookAuditReportCounters(report);
+        report.history.push({ event: 'incidents_corrected_by_later_version', by: 'sistema', at: now, detail: newVersion.id });
+        void this.persistRemoteDocWithStatus('bookAuditReports', versionId, report);
+      }
+    }
+  }
+
+  // ------------------------------------------------------------------------------------------
+  // V5.3 — Administrative book audit (callers MUST be authorized administrators; the API layer
+  // enforces it with `requireAdmin`). Participants never reach these methods.
+  // ------------------------------------------------------------------------------------------
+
+  /** Admin-only list of saved versions with their coverage indicator. */
+  public listBookAuditSummaries(interviewId?: string): Array<{
+    versionId: string;
+    interviewId: string;
+    versionNumber: number;
+    participantName: string;
+    narrativeStyle: DemoNarrativeStyleId;
+    createdAt: string;
+    summary: BookVersionAuditSummary | null;
+  }> {
+    return Array.from(this.participantBookVersions.values())
+      .filter((v) => !interviewId || v.interviewId === interviewId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .map((v) => {
+        const report = this.bookAuditReports.get(v.id);
+        return {
+          versionId: v.id,
+          interviewId: v.interviewId,
+          versionNumber: v.versionNumber,
+          participantName: v.participantName,
+          narrativeStyle: v.narrativeStyle,
+          createdAt: v.createdAt,
+          summary: report
+            ? this.buildVersionAuditSummary(report)
+            : ((v as any).auditSummary as BookVersionAuditSummary | undefined) || null,
+        };
+      });
+  }
+
+  /**
+   * Admin-only audit report of one version: memory, then the remote replica, then (for versions
+   * saved before V5.3) a reconstruction from the audit stored with the version or, if none was
+   * stored, from the deterministic rules. Reconstructions are labelled as such.
+   */
+  public async getBookAuditReport(versionId: string): Promise<BookAuditReport | null> {
+    const version = this.participantBookVersions.get(versionId);
+    const inMemory = this.bookAuditReports.get(versionId);
+    if (inMemory) return inMemory;
+    if (this.remoteDocStore.getDoc) {
+      try {
+        const remote = await this.remoteDocStore.getDoc('bookAuditReports', versionId);
+        if (remote && (remote as any).identification?.versionId === versionId) {
+          this.bookAuditReports.set(versionId, remote as unknown as BookAuditReport);
+          return remote as unknown as BookAuditReport;
+        }
+      } catch (err: any) {
+        console.warn('[BookAudit] Remote report read failed:', err?.message || err);
+      }
+    }
+    if (!version) return null;
+    let manuscript = version.manuscript;
+    let source: BookAuditReport['identification']['source'] = 'reconstructed_from_saved_version';
+    const interview = this.interviews.get(version.interviewId);
+    if (!manuscript.documentaryAudit && interview) {
+      const ctx = this.resolveParticipantBookAuditContext(interview, version.narrativeStyle);
+      const det = auditAndApproveBookManuscript({
+        manuscript: { ...manuscript, approvalEvidence: undefined },
+        answers: ctx.answers,
+        questions: ctx.questions,
+      });
+      manuscript = { ...manuscript, documentaryAudit: det.report, editorialAudit: det.editorialAudit };
+    } else if (!manuscript.documentaryAudit) {
+      source = 'restored_without_audit';
+    }
+    const report = buildBookAuditReport({
+      versionId,
+      versionNumber: version.versionNumber,
+      interviewId: version.interviewId,
+      protagonistName: version.participantName,
+      manuscript,
+      savedAt: version.createdAt,
+      source,
+    });
+    report.history.push({
+      event: 'report_reconstructed',
+      by: 'sistema',
+      at: new Date().toISOString(),
+      detail:
+        source === 'restored_without_audit'
+          ? 'La versión no conservaba resultados de auditoría.'
+          : version.manuscript.documentaryAudit
+          ? 'Reconstruido con la auditoría guardada en la versión.'
+          : 'Reconstruido con reglas deterministas y las fuentes actuales (sin IA).',
+    });
+    this.bookAuditReports.set(versionId, report);
+    this.saveStateToDisk();
+    void this.persistRemoteDocWithStatus('bookAuditReports', versionId, report);
+    return report;
+  }
+
+  private async saveAdminBookAuditChange(versionId: string, report: BookAuditReport): Promise<BookAuditReport> {
+    refreshBookAuditReportCounters(report);
+    this.bookAuditReports.set(versionId, report);
+    this.saveStateToDisk();
+    await this.persistRemoteDocWithStatus('bookAuditReports', versionId, report);
+    return report;
+  }
+
+  /** Admin note on the whole report or on one incident. Never removes earlier notes. */
+  public async addBookAuditNote(params: {
+    versionId: string;
+    note: string;
+    performedBy: string;
+    incidentId?: string;
+  }): Promise<BookAuditReport> {
+    const report = await this.getBookAuditReport(params.versionId);
+    if (!report) throw new Error('Informe de auditoría no encontrado.');
+    const note = String(params.note || '').trim().slice(0, 4000);
+    if (!note) throw new Error('La observación no puede estar vacía.');
+    const entry = { note, by: params.performedBy, at: new Date().toISOString() };
+    if (params.incidentId) {
+      const incident = report.incidents.find((i) => i.incidentId === params.incidentId);
+      if (!incident) throw new Error('Incidencia no encontrada.');
+      incident.adminNotes.push(entry);
+    } else {
+      report.adminNotes.push(entry);
+    }
+    report.history.push({ event: 'admin_note', by: params.performedBy, at: entry.at, detail: params.incidentId });
+    await this.addAuditLog('BOOK_AUDIT_NOTE', 'participantBookVersion', params.versionId, params.performedBy, {
+      incidentId: params.incidentId || null,
+    });
+    return this.saveAdminBookAuditChange(params.versionId, report);
+  }
+
+  /** Admin status change of an incident; the previous status stays in its history. */
+  public async updateBookAuditIncidentStatus(params: {
+    versionId: string;
+    incidentId: string;
+    status: BookAuditIncidentStatus;
+    performedBy: string;
+    note?: string;
+  }): Promise<BookAuditReport> {
+    const allowed: BookAuditIncidentStatus[] = [
+      'possible_contradiction',
+      'confirmed_by_audit',
+      'inconclusive',
+      'pending',
+      'reviewed_by_admin',
+      'corrected_in_later_version',
+    ];
+    if (!allowed.includes(params.status)) throw new Error('Estado administrativo no válido.');
+    const report = await this.getBookAuditReport(params.versionId);
+    if (!report) throw new Error('Informe de auditoría no encontrado.');
+    const incident = report.incidents.find((i) => i.incidentId === params.incidentId);
+    if (!incident) throw new Error('Incidencia no encontrada.');
+    const at = new Date().toISOString();
+    incident.adminStatus = params.status;
+    incident.statusHistory.push({ status: params.status, by: params.performedBy, at, note: params.note });
+    report.history.push({ event: 'incident_status', by: params.performedBy, at, detail: `${params.incidentId}:${params.status}` });
+    await this.addAuditLog('BOOK_AUDIT_INCIDENT_STATUS', 'participantBookVersion', params.versionId, params.performedBy, {
+      incidentId: params.incidentId,
+      status: params.status,
+    });
+    return this.saveAdminBookAuditChange(params.versionId, report);
+  }
+
+  /**
+   * Records an administrator's request for a focused correction of specific incidents. The saved
+   * version is not modified: a corrected book is a NEW version, saved under the existing rules.
+   */
+  public async requestBookAuditCorrection(params: {
+    versionId: string;
+    incidentIds: string[];
+    note: string;
+    performedBy: string;
+  }): Promise<BookAuditReport> {
+    const report = await this.getBookAuditReport(params.versionId);
+    if (!report) throw new Error('Informe de auditoría no encontrado.');
+    const known = new Set(report.incidents.map((i) => i.incidentId));
+    const incidentIds = (params.incidentIds || []).filter((id) => known.has(id));
+    if (incidentIds.length === 0) throw new Error('Selecciona al menos una incidencia del informe.');
+    const at = new Date().toISOString();
+    report.correctionRequests.push({
+      requestId: `corr_${Date.now().toString(36)}`,
+      incidentIds,
+      note: String(params.note || '').slice(0, 4000),
+      by: params.performedBy,
+      at,
+      status: 'requested',
+    });
+    report.history.push({ event: 'correction_requested', by: params.performedBy, at, detail: incidentIds.join(',') });
+    await this.addAuditLog('BOOK_AUDIT_CORRECTION_REQUESTED', 'participantBookVersion', params.versionId, params.performedBy, {
+      incidents: incidentIds.length,
+    });
+    return this.saveAdminBookAuditChange(params.versionId, report);
   }
 
   private async removeDoc(collectionName: string, docId: string): Promise<void> {
@@ -5244,6 +5630,8 @@ export class StorageManager {
     onBatchCheckpoint?: (batchIdx: number, checkpoint: BookBatchCheckpointPayload) => void;
     isCancelled?: () => boolean;
     maxRepairPasses?: number;
+    /** V5.3: background job that runs this generation (recorded in the admin report). */
+    generationJobId?: string;
   }): Promise<{
     manuscript: DemoManuscript;
     chapterPhotos: Record<string, DemoInMemoryPhoto | null>;
@@ -5264,6 +5652,10 @@ export class StorageManager {
     invalidatedBatchIndexes?: number[];
     batchesCompleted?: number;
     totalBatches?: number;
+    /** V5.3: admin-only data (removed from every participant response). */
+    deliveryDecision?: BookDeliveryDecision;
+    generationMetrics?: Record<string, unknown>;
+    repairSummary?: Record<string, unknown>;
   }> {
     const { interview } = this.resolveToken(params.plainToken);
     if (!interview.userDeclaredComplete) {
@@ -5369,6 +5761,23 @@ export class StorageManager {
     const diagnosticSummary =
       result.diagnosticSummary || result.manuscript?.diagnosticSummary || null;
 
+    // V5.3: keep the delivery authorization and the real audit that justified it on the server.
+    this.registerBookDeliveryAuthorization({
+      interviewId: interview.id,
+      narrativeStyle: selectedStyle,
+      manuscript: result.manuscript,
+      generation: {
+        provider: result.providerUsed,
+        model: result.modelUsed,
+        generatedAt: result.manuscript?.generatedAt,
+        jobId: params.generationJobId,
+        metrics: (result as any).generationMetrics || null,
+        repairSummary: (result as any).repairSummary || null,
+      },
+    });
+    const deliveryDecision: BookDeliveryDecision | undefined =
+      (result as any).deliveryDecision || result.manuscript?.deliveryDecision;
+
     await this.addAuditLog(
       'GENERATE_BOOK_MANUSCRIPT_FROM_COMPILATION_PDF',
       'interview',
@@ -5397,6 +5806,15 @@ export class StorageManager {
           result.manuscript?.documentaryAudit?.semanticAudit?.judgeResolvedUnitIds?.length ?? null,
         approvalEvidenceIssued: Boolean(result.manuscript?.approvalEvidence),
         invalidatedBatches: result.invalidatedBatchIndexes?.length ?? 0,
+        deliveryEligible: deliveryDecision?.eligible ?? null,
+        deliveryStatus: deliveryDecision?.deliveryStatus ?? null,
+        coverageBand: deliveryDecision?.band ?? null,
+        coverageExactPercent: deliveryDecision?.coverageExactPercent ?? null,
+        contradictionsObserved: deliveryDecision?.observations?.contradictions ?? null,
+        judgeCasesSent: (result as any).generationMetrics?.judgeCasesSent ?? null,
+        judgeCasesDeferred: (result as any).generationMetrics?.judgeCasesDeferred ?? null,
+        repairRounds: (result as any).repairSummary?.roundsExecuted ?? null,
+        durationMs: (result as any).generationMetrics?.totalMs ?? null,
       }
     );
 
@@ -5432,6 +5850,10 @@ export class StorageManager {
       invalidatedBatchIndexes: result.invalidatedBatchIndexes,
       batchesCompleted: result.batchesCompleted,
       totalBatches: result.totalBatches,
+      // V5.3: server-side only (stripped by `sanitizeBookResultForParticipant`).
+      deliveryDecision,
+      generationMetrics: (result as any).generationMetrics,
+      repairSummary: (result as any).repairSummary,
     };
   }
 
@@ -5480,6 +5902,7 @@ export class StorageManager {
           initialBatchCheckpoints: hooks.initialBatchCheckpoints,
           onBatchCheckpoint: hooks.onBatchCheckpoint,
           isCancelled: hooks.isCancelled,
+          generationJobId: hooks.jobId,
         });
       },
       onJobSettled: async (job) => {
@@ -5637,9 +6060,42 @@ export class StorageManager {
         );
       }
 
+      // V5.3 — Technical integrity: the document must really be storable and composable, and it
+      // must be the style being saved (a style-A text relabelled as a style-C book is tampering;
+      // since editorial findings no longer block delivery, the label is checked explicitly).
+      const integrityProblems = validateManuscriptTechnicalIntegrity(params.manuscript);
+      if (
+        params.manuscript?.narrativeStyle &&
+        params.narrativeStyle &&
+        params.manuscript.narrativeStyle !== params.narrativeStyle
+      ) {
+        integrityProblems.push('El manuscrito recibido no corresponde al estilo narrativo que se guarda.');
+      }
+      if (integrityProblems.length > 0) {
+        await this.addAuditLog(
+          'SAVE_BOOK_VERSION_BLOCKED',
+          'interview',
+          interview.id,
+          participant.name || interview.title,
+          {
+            narrativeStyle: params.narrativeStyle,
+            failureCategory: 'technical',
+            internalReasonCode: integrityProblems.some((p) => p.includes('estilo narrativo'))
+              ? 'STYLE_MISMATCH'
+              : 'MANUSCRIPT_TECHNICALLY_INVALID',
+            integrityProblems: integrityProblems.slice(0, 5),
+          }
+        );
+        throw new Error(
+          'No pudimos guardar tu libro porque el documento recibido está incompleto o dañado. Vuelve a preparar tu libro e inténtalo de nuevo.'
+        );
+      }
+
       if (
         params.manuscript.generationStatus === 'incomplete_draft' ||
         params.manuscript.status === 'incomplete_draft' ||
+        params.manuscript.generationStatus === 'preview_sample' ||
+        (params.manuscript as any).isPreviewSample === true ||
         params.manuscript.generationStatus === 'failed_ai' ||
         params.manuscript.generationStatus === 'failed_audit' ||
         params.manuscript.generationStatus === 'error' ||
@@ -5676,6 +6132,24 @@ export class StorageManager {
         narrativeStyle: saveStyle,
       };
 
+      // V5.3 — Audit results are never taken from the browser. The participant only holds an
+      // opaque reference to the server's delivery authorization; it is resolved here. Whatever
+      // audit, coverage or status the request carries is discarded.
+      delete (candidateForSave as any).documentaryAudit;
+      delete (candidateForSave as any).auditReport;
+      delete (candidateForSave as any).editorialAudit;
+      delete (candidateForSave as any).deliveryDecision;
+      delete (candidateForSave as any).previewFidelity;
+      const submittedEvidence = params.manuscript.approvalEvidence;
+      const authorization = isBookApprovalEvidenceRef(submittedEvidence)
+        ? this.bookDeliveryAuthorizations.get(submittedEvidence.evidenceRef)
+        : isFullBookApprovalEvidence(submittedEvidence)
+        ? this.bookDeliveryAuthorizations.get(submittedEvidence.signature)
+        : undefined;
+      const evidenceToVerify: BookApprovalEvidence | undefined =
+        authorization?.evidence || (isFullBookApprovalEvidence(submittedEvidence) ? submittedEvidence : undefined);
+      candidateForSave.approvalEvidence = evidenceToVerify;
+
       const evidenceCheck = verifyBookApprovalEvidence({
         manuscript: candidateForSave,
         interviewId: interview.id,
@@ -5685,16 +6159,47 @@ export class StorageManager {
 
       let approvedManuscriptForSave: DemoManuscript;
       let approvalPath: 'signed_evidence' | 'hybrid_reaudit';
+      let reportSource: BookAuditReport['identification']['source'] = 'generated_on_save';
+      let generationInfo: BookDeliveryAuthorizationRecord['generation'] | undefined = authorization?.generation;
 
       if (evidenceCheck.valid) {
         approvalPath = 'signed_evidence';
+        let documentaryAudit = authorization?.documentaryAudit;
+        let editorialAudit = authorization?.editorialAudit;
+        let deliveryDecision = authorization?.deliveryDecision;
+        if (!documentaryAudit) {
+          // Evidence signed before V5.3 (or whose server-side record was lost): the signature
+          // already authorized this exact text. For the admin report only, the audit is
+          // reconstructed with the deterministic rules (no AI call) and labelled as such.
+          const reconstructed = auditAndApproveBookManuscript({
+            manuscript: { ...candidateForSave, approvalEvidence: undefined },
+            answers: auditContext.answers,
+            questions: auditContext.questions,
+          });
+          documentaryAudit = reconstructed.report;
+          editorialAudit = reconstructed.editorialAudit;
+          deliveryDecision = evaluateBookDeliveryEligibility({
+            report: reconstructed.report,
+            editorialAudit: reconstructed.editorialAudit,
+            manuscript: candidateForSave,
+          });
+          reportSource = 'reconstructed_from_saved_version';
+        }
         approvedManuscriptForSave = {
           ...candidateForSave,
+          documentaryAudit,
+          editorialAudit,
+          deliveryDecision,
           generationStatus: 'approved',
           status: 'approved',
         };
       } else {
         approvalPath = 'hybrid_reaudit';
+        generationInfo = {
+          provider: auditContext.configuredProvider,
+          model: auditContext.primaryModel,
+          generatedAt: params.manuscript.generatedAt,
+        };
         const hybridSaveAudit = await auditWithHybridSemantics({
           manuscript: {
             ...candidateForSave,
@@ -5710,8 +6215,14 @@ export class StorageManager {
           alternateModel: auditContext.alternateModel,
           aiJudgeOverride: this.bookAiOverrides?.aiJudge,
         });
+        // V5.3: the SAME delivery policy as generation (>= 60 % and technical safeguards).
+        const saveDecision = evaluateBookDeliveryEligibility({
+          report: hybridSaveAudit.report,
+          editorialAudit: hybridSaveAudit.editorialAudit,
+          manuscript: hybridSaveAudit.manuscript,
+        });
 
-        if (!hybridSaveAudit.report.passed || !hybridSaveAudit.editorialAudit.passed) {
+        if (!saveDecision.eligible) {
           const classified = classifyBookFailureReasonCode({
             report: hybridSaveAudit.report,
             editorialAudit: hybridSaveAudit.editorialAudit,
@@ -5740,10 +6251,16 @@ export class StorageManager {
               internalReasonCode: blockDiag.code,
               diagnosticSummary: blockDiag.summary,
               coveragePercentage: hybridSaveAudit.report.coveragePercentage,
+              coverageExactPercent: saveDecision.coverageExactPercent,
+              coverageBand: saveDecision.band,
+              deliveryBlockers: saveDecision.blockers.map((b) => b.code),
             }
           );
+          const privacyBlocked = saveDecision.blockers.some((b) => b.code === 'PRIVACY_EXCLUSION_LEAK');
           throw new Error(
-            blockDiag.category === 'technical'
+            privacyBlocked
+              ? buildIncompleteDraftUserNotice('privacy')
+              : blockDiag.category === 'technical'
               ? 'No pudimos completar la verificación final de tu libro por un inconveniente técnico temporal. Tu libro no se perdió: vuelve a presionar el botón en unos momentos para guardarlo.'
               : buildIncompleteDraftUserNotice(blockDiag.category)
           );
@@ -5751,6 +6268,7 @@ export class StorageManager {
 
         const reauditedApproved: DemoManuscript = {
           ...hybridSaveAudit.manuscript,
+          deliveryDecision: saveDecision,
           generationStatus: 'approved',
           status: 'approved',
         };
@@ -5762,8 +6280,15 @@ export class StorageManager {
             sourceFingerprint: auditContext.sourceFingerprint,
             report: hybridSaveAudit.report,
             editorialAuditPassed: hybridSaveAudit.editorialAudit.passed,
+            deliveryDecision: saveDecision,
           }),
         };
+        this.registerBookDeliveryAuthorization({
+          interviewId: interview.id,
+          narrativeStyle: saveStyle,
+          manuscript: approvedManuscriptForSave,
+          generation: generationInfo,
+        });
       }
 
       const auditedForSave = { manuscript: approvedManuscriptForSave };
@@ -5817,6 +6342,21 @@ export class StorageManager {
       createdAt: new Date().toISOString(),
     };
 
+    // V5.3 — Administrative audit report of THIS version, built from the real audit results
+    // (server-side; never from the request). Committed atomically with the version below.
+    const auditReport = buildBookAuditReport({
+      versionId,
+      versionNumber,
+      interviewId: interview.id,
+      protagonistName: participant.name,
+      manuscript: auditedForSave.manuscript,
+      savedAt: bookVersion.createdAt,
+      approvalPath,
+      generation: generationInfo || null,
+      source: reportSource,
+    });
+    (bookVersion as any).auditSummary = this.buildVersionAuditSummary(auditReport);
+
     // Update interview quota counters.
     // V5.2: counters are computed on a COPY and committed together with the new version. If the
     // local snapshot cannot be written, both are rolled back, so a failed save never leaves a
@@ -5838,11 +6378,13 @@ export class StorageManager {
     nextInterview.lastActivityAt = new Date().toISOString();
 
     this.participantBookVersions.set(versionId, bookVersion);
+    this.bookAuditReports.set(versionId, auditReport);
     Object.assign(interview, nextInterview);
     this.interviews.set(interview.id, interview);
 
     if (!this.saveStateToDisk()) {
       this.participantBookVersions.delete(versionId);
+      this.bookAuditReports.delete(versionId);
       for (const key of Object.keys(interview) as Array<keyof InterviewRecord>) {
         if (!(key in previousInterviewState)) delete (interview as any)[key];
       }
@@ -5860,8 +6402,20 @@ export class StorageManager {
       );
     }
 
-    await this.persistRemoteDoc('participantBookVersions', versionId, bookVersion);
-    await this.persistRemoteDoc('interviews', interview.id, interview);
+    // Remote replica (best effort in this architecture: the local snapshot above is the copy that
+    // must succeed). V5.3: the outcome is recorded honestly in the admin report instead of being
+    // assumed; a version is never reported as replicated when the remote write did not happen.
+    const remoteOutcomes = [
+      await this.persistRemoteDocWithStatus('participantBookVersions', versionId, bookVersion),
+      await this.persistRemoteDocWithStatus('interviews', interview.id, interview),
+    ];
+    auditReport.durability = {
+      remoteStatus: remoteOutcomes.every((o) => o === 'written') ? 'written' : 'local_only',
+      checkedAt: new Date().toISOString(),
+    };
+    this.markIncidentsCorrectedByVersion(auditReport, bookVersion);
+    this.saveStateToDisk();
+    await this.persistRemoteDocWithStatus('bookAuditReports', versionId, auditReport);
 
     await this.addAuditLog(
       hasExistingBook ? 'MODIFY_PARTICIPANT_BOOK_LAYOUT' : 'CREATE_PARTICIPANT_BOOK',
@@ -5873,9 +6427,18 @@ export class StorageManager {
         versionNumber,
         narrativeStyle: params.narrativeStyle,
         approvalPath,
-        approvalEvidenceIssuedAt: approvedManuscriptForSave.approvalEvidence?.issuedAt || null,
-        manuscriptContentHash:
-          approvedManuscriptForSave.approvalEvidence?.manuscriptContentHash || null,
+        approvalEvidenceIssuedAt: isFullBookApprovalEvidence(approvedManuscriptForSave.approvalEvidence)
+          ? approvedManuscriptForSave.approvalEvidence.issuedAt
+          : null,
+        manuscriptContentHash: isFullBookApprovalEvidence(approvedManuscriptForSave.approvalEvidence)
+          ? approvedManuscriptForSave.approvalEvidence.manuscriptContentHash
+          : null,
+        evidenceStatus: evidenceCheck.reason || 'valid',
+        deliveryStatus: auditReport.delivery.deliveryStatus,
+        coverageBand: auditReport.coverage.band,
+        coverageExactPercent: auditReport.coverage.exactPercent,
+        auditReportSource: auditReport.identification.source,
+        remoteReplica: auditReport.durability?.remoteStatus || 'unknown',
         coverDesignId: params.editorialConfig.coverDesignId,
         interiorStyleId: params.editorialConfig.interiorStyleId,
         bookFormatId: params.editorialConfig.bookFormatId,
