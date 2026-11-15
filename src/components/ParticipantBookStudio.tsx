@@ -46,6 +46,7 @@ import {
   ParticipantBookVersionRecord,
   buildParticipantInitialManuscriptFromAnswers,
   composeBookPages,
+  mergeEditorialFieldsIntoApprovedManuscript,
   hasUpdatedAnswersSinceBookVersion,
 } from '../logic/demoStoryRules.ts';
 import {
@@ -1174,16 +1175,15 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
           );
         }
 
-        fullManuscriptToSave = {
-          ...candidateManu,
-          title: manuscript.title || candidateManu.title,
-          subtitle: manuscript.subtitle || candidateManu.subtitle,
-          introduction: manuscript.introduction || candidateManu.introduction,
+        // V5.2: the approved narrative (introduction, chapters, chapter titles, closing message
+        // and photo placements) is kept EXACTLY as the server approved and signed it. Only
+        // editorial fields outside the audited content are carried over from the studio, so
+        // the approval evidence still matches and saving does not trigger a re-audit.
+        fullManuscriptToSave = mergeEditorialFieldsIntoApprovedManuscript({
+          approved: candidateManu,
+          studio: manuscript,
           narrativeStyle: activeStyle,
-          aiGenerated: candidateManu.aiGenerated ?? true,
-          generationStatus: candidateManu.generationStatus,
-          useOfficialForeverYouLogo: true,
-        };
+        });
       }
 
       // 2. Compose the complete book directly from the canonical manuscript (Pages 1..5 are 100% identical to preview)
@@ -1226,16 +1226,21 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
         throw new Error(data.error || 'No se pudo guardar la versión del libro.');
       }
 
+      // V5.2: the version the SERVER persisted is the canonical one (its manuscript carries the
+      // server's approval evidence and any normalization applied by the audit). It replaces the
+      // local copy everywhere: React state, version history, browser caches, preview and export.
+      const serverVersion = data.data.bookVersion as ParticipantBookVersionRecord;
       const savedVersion: ParticipantBookVersionRecord = {
-        ...(data.data.bookVersion as ParticipantBookVersionRecord),
-        editorialConfig: currentEditorialConfig,
-        narrativeStyle: activeStyle,
-        manuscript: fullManuscriptToSave,
+        ...serverVersion,
+        editorialConfig: serverVersion.editorialConfig || currentEditorialConfig,
+        narrativeStyle: serverVersion.narrativeStyle || activeStyle,
+        manuscript: serverVersion.manuscript || fullManuscriptToSave,
       };
       const updatedInterview = data.data.interview as InterviewRecord;
       const allVersions = (data.data.allVersions as ParticipantBookVersionRecord[]).map((v) =>
         v.id === savedVersion.id ? savedVersion : v
       );
+      setManuscript(savedVersion.manuscript);
 
       // Sync lightweight book version refs to browser localStorage cache so Admin Panel & future sessions preserve versions without bloating storage/payloads
       try {
@@ -1308,8 +1313,22 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
         `¡Tu libro completo en PDF (Versión ${savedVersion.versionNumber}) ha sido generado y guardado en tu Portal del Participante!`
       );
 
-      // Automatically trigger PDF download using the exact fullComposedBook
-      await handleDownloadBookVersionPdf(savedVersion, fullComposedBook);
+      // Automatically trigger PDF download composed from the CANONICAL saved manuscript (V5.2),
+      // so the exported book is exactly the version stored on the server.
+      const canonicalComposedBook =
+        savedVersion.manuscript === fullManuscriptToSave
+          ? fullComposedBook
+          : composeBookPages({
+              manuscript: savedVersion.manuscript,
+              editorialConfig: savedVersion.editorialConfig || currentEditorialConfig,
+              coverPhoto: resolvedCover,
+              chapterPhotos: resolvedChapters,
+              allPhotosById: resolvedAllPhotos,
+              customClosingPageText: closingDedicationText,
+              maxContentPages: 500,
+              previewSampleOnly: false,
+            });
+      await handleDownloadBookVersionPdf(savedVersion, canonicalComposedBook);
       scrollAndFocusActionArea('viewer');
     } catch (err: any) {
       const rawMsg = String(err?.message || '');

@@ -62,6 +62,7 @@ import {
   mergeAnswerRecordNonDestructive,
 } from '../logic/interviewRules.ts';
 import {
+  MiEsenciaArchivedCompilationPdf,
   validateCompilationPdfRecord,
 } from '../logic/miEsenciaRules.ts';
 import {
@@ -119,9 +120,13 @@ import {
   BookGenerationProgressEvent,
   auditWithHybridSemantics,
   classifyBookFailureReasonCode,
+  ParsedAiManuscriptBatchResponse,
+  SemanticJudgeFunction,
 } from './geminiService.ts';
 import {
+  computeBookGenerationFingerprint,
   computeBookSourceFingerprint,
+  computeManuscriptContentHash,
   issueBookApprovalEvidence,
   verifyBookApprovalEvidence,
 } from './bookApproval.ts';
@@ -181,7 +186,72 @@ interface QuestionnaireVersionDoc {
   createdAt: string;
 }
 
-class StorageManager {
+/**
+ * V5.2 — Remote document store behind `persistDoc` / `removeDoc` (Cloud Firestore in production).
+ * The local snapshot on disk remains the primary copy; remote writes stay best-effort.
+ */
+export interface StorageRemoteDocStore {
+  setDoc(collectionName: string, docId: string, data: Record<string, unknown>): Promise<void>;
+  deleteDoc(collectionName: string, docId: string): Promise<void>;
+}
+
+const firestoreRemoteDocStore: StorageRemoteDocStore = {
+  async setDoc(collectionName, docId, data) {
+    await firestoreTelemetry.trackedSetDoc(serverDb, doc(serverDb, collectionName, docId), data, 'storage');
+  },
+  async deleteDoc(collectionName, docId) {
+    await firestoreTelemetry.trackedDeleteDoc(serverDb, doc(serverDb, collectionName, docId), 'storage');
+  },
+};
+
+/**
+ * V5.2 — Optional injection points for the book engine's AI calls. Production never sets them;
+ * automated tests use them to run the REAL generation, audit and save code with simulated
+ * providers (no Gemini/OpenAI calls, no tokens).
+ */
+export interface StorageBookAiOverrides {
+  draftBatch?: (ctx: {
+    batchIdx: number;
+    totalBatches: number;
+    batchChapters: any[];
+    narrativeStyle: DemoNarrativeStyleId;
+  }) => Promise<BookBatchCheckpointPayload>;
+  aiJudge?: SemanticJudgeFunction;
+  repairBatchCaller?: (
+    batchPrompt: string,
+    systemPrompt: string,
+    batchTaskIds: string[]
+  ) => Promise<ParsedAiManuscriptBatchResponse | null>;
+  skipDiskCache?: boolean;
+  /**
+   * Supplies the Compilado Testimonial Fidedigno record instead of Mi Esencia's store, which
+   * reads and writes Cloud Firestore. Only for isolated tests.
+   */
+  compilationPdfProvider?: (interviewId: string) => Promise<MiEsenciaArchivedCompilationPdf>;
+}
+
+export interface StorageManagerOptions {
+  remoteDocStore?: StorageRemoteDocStore;
+  bookAiOverrides?: StorageBookAiOverrides;
+}
+
+export class StorageManager {
+  private remoteDocStore: StorageRemoteDocStore;
+  private bookAiOverrides?: StorageBookAiOverrides;
+
+  /**
+   * V5.2 — Puts this instance in isolated test mode: remote writes go to `remoteDocStore` and the
+   * book engine's AI calls to `bookAiOverrides`. Refused unless the process explicitly opts in with
+   * `YOUFOREVER_ALLOW_TEST_DOUBLES=1`, so production can never be switched to simulated providers.
+   */
+  public configureTestDoubles(options: StorageManagerOptions): void {
+    if (process.env.YOUFOREVER_ALLOW_TEST_DOUBLES !== '1') {
+      throw new Error('configureTestDoubles solo está permitido en pruebas automatizadas.');
+    }
+    if (options.remoteDocStore) this.remoteDocStore = options.remoteDocStore;
+    this.bookAiOverrides = options.bookAiOverrides;
+  }
+
   private config: AppConfig = { ...INITIAL_APP_CONFIG };
   private questions: Map<string, QuestionRecord> = new Map();
   private questionnaireVersions: Map<string, QuestionRecord[]> = new Map();
@@ -275,7 +345,9 @@ class StorageManager {
     return Array.from(this.admins);
   }
 
-  constructor() {
+  constructor(options: StorageManagerOptions = {}) {
+    this.remoteDocStore = options.remoteDocStore || firestoreRemoteDocStore;
+    this.bookAiOverrides = options.bookAiOverrides;
     this.initDefaultDataInMemory();
   }
 
@@ -324,7 +396,12 @@ class StorageManager {
     return path.join(dataDir, 'storage_state.json');
   }
 
-  private saveStateToDisk(): void {
+  /**
+   * Writes the local snapshot. V5.2: written to a temporary file and renamed, so a crash or a
+   * full disk can never leave a half-written (corrupt) snapshot, and returns whether it succeeded
+   * so callers that need an all-or-nothing save can roll back.
+   */
+  private saveStateToDisk(): boolean {
     try {
       const filePath = this.getSnapshotFilePath();
       const snapshot = {
@@ -368,9 +445,22 @@ class StorageManager {
         deletedBookVersionIds: Array.from(this.deletedBookVersionIds),
         syncWatermarks: this.syncWatermarks,
       };
-      fs.writeFileSync(filePath, JSON.stringify(snapshot, null, 2), 'utf-8');
+      const tempPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
+      try {
+        fs.writeFileSync(tempPath, JSON.stringify(snapshot, null, 2), 'utf-8');
+        fs.renameSync(tempPath, filePath);
+      } catch (writeErr) {
+        try {
+          if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+        } catch {
+          // ignore cleanup errors
+        }
+        throw writeErr;
+      }
+      return true;
     } catch (err) {
       console.warn('[StorageManager] Could not save state snapshot to disk:', err);
+      return false;
     }
   }
 
@@ -507,6 +597,11 @@ class StorageManager {
 
   private async persistDoc<T>(collectionName: string, docId: string, data: T): Promise<void> {
     this.saveStateToDisk();
+    await this.persistRemoteDoc(collectionName, docId, data);
+  }
+
+  /** Best-effort remote write (the local snapshot is the primary copy). */
+  private async persistRemoteDoc<T>(collectionName: string, docId: string, data: T): Promise<void> {
     try {
       const sanitized = this.sanitizeDocForFirestore(data);
       (sanitized as Record<string, unknown>)._syncedAt = new Date().toISOString();
@@ -522,11 +617,10 @@ class StorageManager {
         return;
       }
 
-      const setPromise = firestoreTelemetry.trackedSetDoc(
-        serverDb,
-        doc(serverDb, collectionName, docId),
-        sanitized as Record<string, unknown>,
-        'storage'
+      const setPromise = this.remoteDocStore.setDoc(
+        collectionName,
+        docId,
+        sanitized as Record<string, unknown>
       );
       const timeoutPromise = new Promise((_, reject) =>
         setTimeout(() => reject(new Error('Firestore write timed out (retained on disk)')), 2500)
@@ -546,11 +640,7 @@ class StorageManager {
   private async removeDoc(collectionName: string, docId: string): Promise<void> {
     this.saveStateToDisk();
     try {
-      const delPromise = firestoreTelemetry.trackedDeleteDoc(
-        serverDb,
-        doc(serverDb, collectionName, docId),
-        'storage'
-      );
+      const delPromise = this.remoteDocStore.deleteDoc(collectionName, docId);
       const timeoutPromise = new Promise((_, reject) =>
         setTimeout(() => reject(new Error('Firestore delete timed out (removed from disk)')), 2500)
       );
@@ -5094,6 +5184,7 @@ class StorageManager {
     alternateProvider: BookAiProvider;
     alternateModel: string;
     sourceFingerprint: string;
+    generationFingerprint: string;
   } {
     const answers = this.resolveBookSourceAnswers(interview.id, { includePhotoData: false });
     const questions = this.getQuestionsForVersion(interview.questionnaireVersionId);
@@ -5112,6 +5203,14 @@ class StorageManager {
     const geminiModel = this.config.bookAiGeminiModel || 'gemini-3-flash-preview';
     const openaiModel = this.config.bookAiOpenAiModel || 'gpt-4o';
     const alternateProvider: BookAiProvider = configuredProvider === 'openai' ? 'gemini' : 'openai';
+    const sourceFingerprint = computeBookSourceFingerprint({
+      interviewId: interview.id,
+      narrativeStyle,
+      closingDedicationText: closingPageText,
+      answers,
+      questions,
+    });
+    const primaryModel = configuredProvider === 'openai' ? openaiModel : geminiModel;
     return {
       answers,
       questions,
@@ -5119,17 +5218,16 @@ class StorageManager {
       literaryPromptText,
       bookStructureMode,
       configuredProvider,
-      primaryModel: configuredProvider === 'openai' ? openaiModel : geminiModel,
+      primaryModel,
       alternateProvider,
       alternateModel: alternateProvider === 'openai' ? openaiModel : geminiModel,
-      sourceFingerprint: computeBookSourceFingerprint({
-        interviewId: interview.id,
-        narrativeStyle,
+      sourceFingerprint,
+      generationFingerprint: computeBookGenerationFingerprint({
+        sourceFingerprint,
+        provider: configuredProvider,
+        model: primaryModel,
         bookStructureMode,
         literaryPromptText,
-        closingDedicationText: closingPageText,
-        answers,
-        questions,
       }),
     };
   }
@@ -5188,9 +5286,14 @@ class StorageManager {
     const closingPageText = (interview.participantClosingText || '').trim();
 
     // Step 2: Generate or retrieve the updated PDF of the Compilado Testimonial Fidedigno
-    const { miEsenciaStore } = await import('./miEsencia/miEsenciaStore.ts');
-    const compilationBundle = await miEsenciaStore.ensureInterviewCompilationPdf(interview.id);
-    const compilationPdfRecord = compilationBundle.pdfRecord;
+    let compilationPdfRecord: MiEsenciaArchivedCompilationPdf;
+    if (this.bookAiOverrides?.compilationPdfProvider) {
+      compilationPdfRecord = await this.bookAiOverrides.compilationPdfProvider(interview.id);
+    } else {
+      const { miEsenciaStore } = await import('./miEsencia/miEsenciaStore.ts');
+      const compilationBundle = await miEsenciaStore.ensureInterviewCompilationPdf(interview.id);
+      compilationPdfRecord = compilationBundle.pdfRecord;
+    }
 
     // Step 3: Verify that the PDF exists, is valid, and contains all available information
     const pdfValidation = validateCompilationPdfRecord(compilationPdfRecord);
@@ -5251,6 +5354,14 @@ class StorageManager {
       onBatchCheckpoint: params.onBatchCheckpoint,
       isCancelled: params.isCancelled,
       maxRepairPasses: params.maxRepairPasses,
+      pipelineOverrides: this.bookAiOverrides
+        ? {
+            draftBatch: this.bookAiOverrides.draftBatch,
+            aiJudge: this.bookAiOverrides.aiJudge,
+            repairBatchCaller: this.bookAiOverrides.repairBatchCaller,
+            skipDiskCache: this.bookAiOverrides.skipDiskCache,
+          }
+        : undefined,
     });
 
     const reasonCode =
@@ -5344,7 +5455,10 @@ class StorageManager {
 
     // V5.1: the job is bound to the exact testimony and configuration it will work on. A running
     // job or saved batches from different answers, style, prompt or settings are never reused.
-    const { sourceFingerprint } = this.resolveParticipantBookAuditContext(interview, selectedStyle);
+    const { sourceFingerprint, generationFingerprint } = this.resolveParticipantBookAuditContext(
+      interview,
+      selectedStyle
+    );
 
     return bookJobManager.startOrResumeJob({
       interviewId: interview.id,
@@ -5353,6 +5467,7 @@ class StorageManager {
       scope,
       forceRefresh: Boolean(params.forceRefresh),
       sourceFingerprint,
+      generationFingerprint,
       executor: async (hooks) => {
         return this.generateParticipantBookManuscript({
           plainToken: params.plainToken,
@@ -5465,6 +5580,48 @@ class StorageManager {
     this.inFlightBookSaves.add(interview.id);
     try {
       const existingVersions = this.getBookVersionsForInterview(interview.id);
+
+      // V5.2 — Accidental duplicates. A retry after a lost response (or a double click) sends
+      // exactly the same approved text and layout a few seconds later; creating a second version
+      // would consume a layout modification for nothing. When the latest version holds the same
+      // audited content, style, editorial configuration and photos and was saved recently, it is
+      // returned as the result of this request instead of creating another one.
+      const latestVersion = existingVersions[0];
+      if (latestVersion && latestVersion.manuscript && Array.isArray(params.manuscript?.chapters)) {
+        const photoRefId = (p: DemoInMemoryPhoto | null | undefined) => (p ? p.id || '' : '');
+        const chapterPhotoIds = (map?: Record<string, DemoInMemoryPhoto | null>) =>
+          JSON.stringify(
+            Object.entries(map || {})
+              .map(([k, p]) => [k, photoRefId(p)])
+              .sort()
+          );
+        const isRecent =
+          Date.now() - new Date(latestVersion.createdAt).getTime() <= 10 * 60 * 1000;
+        const isSameBook =
+          isRecent &&
+          latestVersion.narrativeStyle === params.narrativeStyle &&
+          computeManuscriptContentHash(latestVersion.manuscript) ===
+            computeManuscriptContentHash(params.manuscript) &&
+          JSON.stringify(latestVersion.editorialConfig || {}) ===
+            JSON.stringify(params.editorialConfig || {}) &&
+          photoRefId(latestVersion.coverPhoto) === photoRefId(params.coverPhoto) &&
+          chapterPhotoIds(latestVersion.chapterPhotos) === chapterPhotoIds(params.chapterPhotos);
+        if (isSameBook) {
+          await this.addAuditLog(
+            'SAVE_BOOK_VERSION_DEDUPLICATED',
+            'participantBookVersion',
+            latestVersion.id,
+            participant.name || interview.title,
+            { interviewId: interview.id, versionNumber: latestVersion.versionNumber }
+          );
+          return {
+            bookVersion: latestVersion,
+            interview,
+            allVersions: existingVersions,
+          };
+        }
+      }
+
       const hasExistingBook = existingVersions.length > 0 || (interview.bookGeneratedCount ?? 0) > 0;
       const quota = computeLayoutEditQuotaStatus(interview);
       const answers = this.getAnswersForInterview(interview.id);
@@ -5511,9 +5668,12 @@ class StorageManager {
       // Nothing the browser declares (status flags, audit reports) is trusted in either door.
       const saveStyle: DemoNarrativeStyleId = params.narrativeStyle || 'first_person_literary';
       const auditContext = this.resolveParticipantBookAuditContext(interview, saveStyle);
+      // V5.2: the style being SAVED is the style audited. Keeping the manuscript's own style here
+      // let a style-A text be re-audited as A and stored as a style-C book; with the declared style
+      // its evidence no longer matches and the hybrid audit judges it against the right rules.
       const candidateForSave: DemoManuscript = {
         ...params.manuscript,
-        narrativeStyle: params.manuscript.narrativeStyle || saveStyle,
+        narrativeStyle: saveStyle,
       };
 
       const evidenceCheck = verifyBookApprovalEvidence({
@@ -5548,6 +5708,7 @@ class StorageManager {
           model: auditContext.primaryModel,
           alternateProvider: auditContext.alternateProvider,
           alternateModel: auditContext.alternateModel,
+          aiJudgeOverride: this.bookAiOverrides?.aiJudge,
         });
 
         if (!hybridSaveAudit.report.passed || !hybridSaveAudit.editorialAudit.passed) {
@@ -5656,23 +5817,51 @@ class StorageManager {
       createdAt: new Date().toISOString(),
     };
 
-    // Update interview quota counters
+    // Update interview quota counters.
+    // V5.2: counters are computed on a COPY and committed together with the new version. If the
+    // local snapshot cannot be written, both are rolled back, so a failed save never leaves a
+    // version without its counters (or counters consumed without a version).
+    const previousInterviewState: InterviewRecord = { ...interview };
+    const nextInterview: InterviewRecord = { ...interview };
     if (!hasExistingBook) {
-      interview.bookGeneratedCount = 1;
-      interview.layoutEditsAllowed = interview.layoutEditsAllowed ?? 1;
-      interview.layoutEditsUsed = interview.layoutEditsUsed ?? 0;
+      nextInterview.bookGeneratedCount = 1;
+      nextInterview.layoutEditsAllowed = nextInterview.layoutEditsAllowed ?? 1;
+      nextInterview.layoutEditsUsed = nextInterview.layoutEditsUsed ?? 0;
     } else {
-      interview.bookGeneratedCount = Math.max(versionNumber, (interview.bookGeneratedCount ?? 1) + 1);
-      interview.layoutEditsUsed = (interview.layoutEditsUsed ?? 0) + 1;
-      interview.layoutEditsAllowed = interview.layoutEditsAllowed ?? 1;
+      nextInterview.bookGeneratedCount = Math.max(
+        versionNumber,
+        (nextInterview.bookGeneratedCount ?? 1) + 1
+      );
+      nextInterview.layoutEditsUsed = (nextInterview.layoutEditsUsed ?? 0) + 1;
+      nextInterview.layoutEditsAllowed = nextInterview.layoutEditsAllowed ?? 1;
     }
-    interview.lastActivityAt = new Date().toISOString();
+    nextInterview.lastActivityAt = new Date().toISOString();
 
     this.participantBookVersions.set(versionId, bookVersion);
+    Object.assign(interview, nextInterview);
     this.interviews.set(interview.id, interview);
 
-    await this.persistDoc('participantBookVersions', versionId, bookVersion);
-    await this.persistDoc('interviews', interview.id, interview);
+    if (!this.saveStateToDisk()) {
+      this.participantBookVersions.delete(versionId);
+      for (const key of Object.keys(interview) as Array<keyof InterviewRecord>) {
+        if (!(key in previousInterviewState)) delete (interview as any)[key];
+      }
+      Object.assign(interview, previousInterviewState);
+      this.interviews.set(interview.id, interview);
+      await this.addAuditLog(
+        'SAVE_BOOK_VERSION_STORAGE_FAILED',
+        'interview',
+        interview.id,
+        participant.name || interview.title,
+        { narrativeStyle: params.narrativeStyle, failureCategory: 'technical' }
+      );
+      throw new Error(
+        'No pudimos guardar tu libro por un inconveniente técnico temporal. No se descontó ninguna modificación y tu libro aprobado sigue disponible: vuelve a intentarlo en unos momentos.'
+      );
+    }
+
+    await this.persistRemoteDoc('participantBookVersions', versionId, bookVersion);
+    await this.persistRemoteDoc('interviews', interview.id, interview);
 
     await this.addAuditLog(
       hasExistingBook ? 'MODIFY_PARTICIPANT_BOOK_LAYOUT' : 'CREATE_PARTICIPANT_BOOK',

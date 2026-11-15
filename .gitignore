@@ -6,3 +6,6 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# V5.2: dedicated book-approval signing key (never commit)
+data/.book_approval_secret

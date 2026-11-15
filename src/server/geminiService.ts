@@ -19,6 +19,8 @@ import {
   MiEsenciaArchivedCompilationPdf,
 } from '../logic/miEsenciaRules.ts';
 import {
+  computeBookBatchSignature,
+  computeBookGenerationFingerprint,
   computeBookSourceFingerprint,
   issueBookApprovalEvidence,
   verifyBookApprovalEvidence,
@@ -27,6 +29,8 @@ import {
   BookFailureCategory,
   BookGenerationReasonCode,
   buildIncompleteDraftUserNotice,
+  createUnitEvidenceRetriever,
+  finalizeGlobalAuditDecision,
   resolveBookFailureCategory,
   BOOK_GENERATION_ENGINE_VERSION,
   CANONICAL_AUDIT_RULES_VERSION,
@@ -104,6 +108,13 @@ export interface BookBatchCheckpointPayload {
    * only reused when it matches the fingerprint of the generation that wants to resume from it.
    */
   sourceFingerprint?: string;
+  /**
+   * V5.2: fingerprint of HOW the batch was drafted (provider, model, engine, structure mode and
+   * literary prompt on top of the sources) and signature of the chapter segments it covered.
+   * Reuse requires both to match: a batch drafted by another model or for another plan is redrafted.
+   */
+  generationFingerprint?: string;
+  batchSignature?: string;
 }
 
 export interface ManuscriptDraftResult {
@@ -1372,7 +1383,7 @@ interface MultimodalBookPhotoInput {
   base64Data: string;
 }
 
-interface ParsedAiManuscriptBatchResponse {
+export interface ParsedAiManuscriptBatchResponse {
   title?: string;
   subtitle?: string;
   introduction?: string;
@@ -1754,17 +1765,7 @@ async function callOpenAiBookModelBatch(params: {
 
 // In-flight deduplication and batch checkpoint caches for book generation
 const inFlightBookGenerations = new Map<string, Promise<any>>();
-const manuscriptBatchCheckpoints = new Map<
-  string,
-  Map<
-    number,
-    {
-      parsed: ParsedAiManuscriptBatchResponse;
-      respondedModel: string;
-      cachedTokens?: number;
-    }
-  >
->();
+const manuscriptBatchCheckpoints = new Map<string, Map<number, BookBatchCheckpointPayload>>();
 
 /** V5.1: the chapter each answer is linked to (first chapter that lists it among its sources). */
 function buildAnswerHomeChapterMap(manuscript: DemoManuscript): Map<string, string> {
@@ -1814,8 +1815,30 @@ function computeManuscriptDefectScore(
   docReport: DocumentaryAuditReport,
   edReport: EditorialQualityAuditReport
 ): number {
+  // V5.2: defects are weighted by severity instead of counted as equal lines. Otherwise a
+  // repair that removes several harmless editorial bridges (each an "unsupported addition"
+  // line) while inventing dates or breaking titles would look like an improvement.
+  const blocking = docReport.blockingDefects || [];
+  const ver = docReport.veracityAudit;
+  const severe = new Set<string>([
+    ...(ver?.inventedDataFlags || []),
+    ...(ver?.semanticContradictionFlags || []),
+    ...(ver?.leakedExcludedContentFlags || []),
+    ...(ver?.coupleAttributionViolations || []),
+  ]);
+  const inventedSet = new Set(ver?.inventedDataFlags || []);
+  const mild = new Set<string>(
+    (ver?.unsupportedAdditionFlags || []).filter((f) => !inventedSet.has(f))
+  );
+  let blockingScore = 0;
+  for (const line of blocking) {
+    if (severe.has(line)) blockingScore += 15;
+    else if (mild.has(line)) blockingScore += 3;
+    else if (/^Fragmentaci[oó]n editorial inv[aá]lida/.test(line)) blockingScore += 15;
+    else blockingScore += 10;
+  }
   return (
-    (docReport.blockingDefects?.length || 0) * 10 +
+    blockingScore +
     (docReport.coverageAudit?.missingUnitIds?.length || 0) * 5 +
     (docReport.semanticAudit?.ambiguousUnitsCount || 0) * 3 +
     (edReport.blockingDefects?.length || 0) * 4
@@ -1829,6 +1852,16 @@ export interface SemanticJudgmentCaseInput {
   ambiguityReason: string;
   /** V5.1: names, places, dates or figures of the testimony that the rules could not locate literally. */
   detailsToConfirm?: string[];
+  /**
+   * V5.2: what the judge is asked.
+   * - testimony_fidelity (default): is this testimony unit faithfully told in the excerpt?
+   * - unsupported_addition: does `sentenceToVerify` add a biographical fact that no testimony
+   *   supports ("supported" = harmless editorial bridge or supported fact; anything else blocks)?
+   */
+  checkKind?: 'testimony_fidelity' | 'unsupported_addition';
+  sentenceToVerify?: string;
+  /** V5.2: protagonists of the book; naming them is never an invented fact. */
+  protagonistNames?: string[];
 }
 
 export interface SemanticJudgmentVerdict {
@@ -1869,6 +1902,8 @@ function buildSemanticVerdictCacheKey(
         c.originalTestimony,
         c.candidateExcerpt,
         (c.detailsToConfirm || []).slice().sort(),
+        c.checkKind || 'testimony_fidelity',
+        c.sentenceToVerify || '',
       ])
     )
     .digest('hex');
@@ -1933,6 +1968,9 @@ Veredicto por unidad (elige exactamente uno):
 - "inconclusive": úsalo solo si de verdad no es posible decidir.
 
 No penalices la limpieza de muletillas orales, repeticiones o titubeos del testimonio. No exijas las mismas palabras.
+El fragmento puede llegar en varias partes etiquetadas con su capítulo y párrafo (incluidos el párrafo anterior y el siguiente o un capítulo relacionado): un recuerdo repartido entre esas partes está "supported".
+
+Casos con "checkKind": "unsupported_addition": "originalTestimony" reúne los testimonios del capítulo y "sentenceToVerify" es una oración del libro que no comparte palabras con ellos. Responde "supported" si la oración es un puente editorial o reflexivo que no afirma hechos nuevos de la vida del protagonista, o si su contenido sí está respaldado por los testimonios; responde "contradicted" si contradice un testimonio y "omitted" si afirma un hecho biográfico (acontecimiento, lugar, persona, fecha, logro) que ningún testimonio respalda. Nombrar a los protagonistas ("protagonistNames") nunca es un dato inventado.
 
 Casos a evaluar:
 ${JSON.stringify(slice, null, 2)}
@@ -2153,7 +2191,10 @@ export async function auditWithHybridSemantics(params: {
       ...(detResult.report.semanticAudit?.ambiguousUnitIds || []),
     ])
   );
-  if (ambiguousIds.length === 0) {
+  if (
+    ambiguousIds.length === 0 &&
+    (detResult.report.veracityAudit?.unsupportedAdditionCandidates || []).length === 0
+  ) {
     detResult.report.auditPolicy = 'hybrid_arbitrated';
     return detResult;
   }
@@ -2178,25 +2219,33 @@ export async function auditWithHybridSemantics(params: {
     return out;
   };
 
-  const MAX_EXCERPT_CHARS = 2400;
+  // V5.2 — Evidence for each case is RETRIEVED from the whole book: the best match, the
+  // paragraphs before and after it (a memory split in two) and related paragraphs from other
+  // chapters, each labeled with its chapter and paragraph. A long paragraph is cut around the
+  // sentences that match, never by keeping a prefix, so the verifiable fact is not left out.
+  const retrieveEvidence = createUnitEvidenceRetriever(detResult.manuscript.chapters);
+  const formatFragments = (
+    fragments: Array<{ chapterTitle: string; paragraphIndex: number; text: string }>
+  ): string =>
+    fragments
+      .map((f) => `[Capítulo «${f.chapterTitle}», párrafo ${f.paragraphIndex + 1}] ${f.text}`)
+      .join('\n');
   const cases: SemanticJudgmentCaseInput[] = [];
   for (const unitId of ambiguousIds) {
     const unit = detResult.inventory.eligibleFactUnits.find((u) => u.unitId === unitId);
     const trace = detResult.report.traceabilityMatrix.find((t) => t.unitId === unitId);
     if (!unit || !trace) continue;
-    const ch = detResult.manuscript.chapters.find((c) => c.id === trace.chapterId);
-    const pIdx = typeof trace.paragraphIndex === 'number' ? trace.paragraphIndex : 0;
-    const paraText = ch?.paragraphs?.[pIdx] || trace.evidenceSnippet || '';
-    const nextPara = ch?.paragraphs?.[pIdx + 1] || '';
+    const evidence = retrieveEvidence({
+      unit,
+      chapterId: trace.chapterId,
+      paragraphIndex: typeof trace.paragraphIndex === 'number' ? trace.paragraphIndex : 0,
+    });
     const detailsToConfirm = describeFacetGaps(trace.missingFacets);
     cases.push({
       unitId,
+      checkKind: 'testimony_fidelity',
       originalTestimony: unit.cleanText,
-      candidateExcerpt: [paraText, nextPara]
-        .filter(Boolean)
-        .join(' ')
-        .trim()
-        .slice(0, MAX_EXCERPT_CHARS),
+      candidateExcerpt: formatFragments(evidence.fragments) || trace.evidenceSnippet || '',
       ambiguityReason:
         trace.semanticReviewReason ||
         trace.ambiguityReason ||
@@ -2204,6 +2253,47 @@ export async function auditWithHybridSemantics(params: {
       ...(detailsToConfirm.length > 0 ? { detailsToConfirm } : {}),
     });
   }
+
+  // V5.2 — Direction-B arbitration: sentences sharing no word with any testimony.
+  const additionCandidates = detResult.report.veracityAudit?.unsupportedAdditionCandidates || [];
+  const protagonistNames = Array.from(
+    new Set(
+      [
+        ...detResult.inventory.eligibleFactUnits.map((u) => u.participantName),
+        ...String(detResult.manuscript.authors || '').split(/\s*(?:,|\by\b|&)\s*/),
+      ]
+        .map((n) => String(n || '').trim())
+        .filter((n) => n.length > 1)
+    )
+  );
+  const additionCaseByFlag = new Map<string, string>();
+  additionCandidates.forEach((cand, idx) => {
+    const ch = detResult.manuscript.chapters.find((c) => c.id === cand.chapterId);
+    const chapterAnswerIds = new Set(ch?.sourceAnswerIds || []);
+    const chapterTestimony = detResult.inventory.eligibleFactUnits
+      .filter((u) => chapterAnswerIds.size === 0 || chapterAnswerIds.has(u.answerId))
+      .map((u) => u.cleanText);
+    const testimonyContext: string[] = [];
+    let used = 0;
+    for (const t of chapterTestimony) {
+      if (used + t.length > 4000) break;
+      testimonyContext.push(t);
+      used += t.length;
+    }
+    const caseId = `addition::${cand.chapterId}::${cand.paragraphIndex}::${idx}`;
+    additionCaseByFlag.set(cand.flag, caseId);
+    cases.push({
+      unitId: caseId,
+      checkKind: 'unsupported_addition',
+      originalTestimony: testimonyContext.join(' '),
+      candidateExcerpt: `[Capítulo «${cand.chapterTitle}», párrafo ${cand.paragraphIndex + 1}] ${
+        ch?.paragraphs?.[cand.paragraphIndex] || cand.sentence
+      }`,
+      sentenceToVerify: cand.sentence,
+      protagonistNames,
+      ambiguityReason: 'Oración sin palabras compartidas con los testimonios: posible dato biográfico inventado.',
+    });
+  });
 
   if (cases.length === 0) {
     detResult.report.auditPolicy = 'hybrid_arbitrated';
@@ -2352,6 +2442,42 @@ export async function auditWithHybridSemantics(params: {
     totalSourceUnits > 0 ? Math.floor((integratedUnits / totalSourceUnits) * 100) : updatedReport.coveragePercentage;
   const remainingMissingIds = Array.from(missingSet);
 
+  // V5.2 — Reconcile Direction-B (unsupported addition) verdicts. Only an explicit "supported"
+  // clears a sentence; an unavailable, inconclusive or adverse verdict keeps it blocking.
+  const inventedFlagSet = new Set(updatedReport.veracityAudit?.inventedDataFlags || []);
+  const remainingAdditionFlags: string[] = [];
+  for (const cand of updatedReport.veracityAudit?.unsupportedAdditionCandidates || []) {
+    if (inventedFlagSet.has(cand.flag)) continue;
+    const caseId = additionCaseByFlag.get(cand.flag);
+    const verdict = caseId ? verdictMap.get(caseId) : undefined;
+    if (verdict?.verdict === 'supported') {
+      judgeResolvedUnitIds.push(caseId!);
+      continue;
+    }
+    if (verdict && !verdict.unavailable && verdict.verdict !== 'inconclusive') {
+      judgeResolvedUnitIds.push(caseId!);
+    } else if (caseId) {
+      judgeUnavailableUnitIds.push(caseId);
+    }
+    remainingAdditionFlags.push(
+      verdict?.verdict === 'omitted' || verdict?.verdict === 'contradicted'
+        ? `${cand.flag} Confirmado por verificación contextual: ${verdict.rationale || 'afirmación sin respaldo.'}`
+        : cand.flag
+    );
+  }
+  if (updatedReport.veracityAudit) {
+    updatedReport.veracityAudit.unsupportedAdditionFlags = [
+      ...(updatedReport.veracityAudit.inventedDataFlags || []),
+      ...remainingAdditionFlags,
+    ];
+    updatedReport.veracityAudit.unsupportedAdditionCandidates = (
+      updatedReport.veracityAudit.unsupportedAdditionCandidates || []
+    ).filter((cand) => {
+      const caseId = additionCaseByFlag.get(cand.flag);
+      return verdictMap.get(caseId || '')?.verdict !== 'supported';
+    });
+  }
+
   // Rebuild blockingDefects coherently
   const nextBlocking: string[] = [];
   if (detResult.manuscript.chapters.length === 0) {
@@ -2408,17 +2534,16 @@ export async function auditWithHybridSemantics(params: {
       `Fotografías sin ubicar en el manuscrito (${updatedReport.totalPlacedPhotos}/${updatedReport.totalUploadedPhotos}).`
     );
   }
+  if (remainingAdditionFlags.length > 0) {
+    nextBlocking.push(...remainingAdditionFlags);
+  }
   if (!detResult.editorialAudit.passed) {
     nextBlocking.push(...detResult.editorialAudit.blockingDefects);
   }
 
-  const nextPassed = nextBlocking.length === 0;
   updatedReport.auditPolicy = 'hybrid_arbitrated';
   updatedReport.integratedUnits = integratedUnits;
   updatedReport.coveragePercentage = updatedCoverage;
-  updatedReport.passed = nextPassed;
-  updatedReport.approved = nextPassed;
-  updatedReport.status = nextPassed ? 'approved' : 'failed_audit';
   updatedReport.blockingDefects = nextBlocking;
   updatedReport.coverageAudit = {
     passed: remainingMissingIds.length === 0 && (answers.length === 0 || totalSourceUnits > 0),
@@ -2442,12 +2567,28 @@ export async function auditWithHybridSemantics(params: {
     updatedReport.semanticAudit.ambiguousUnitIds = remainingAmbiguous;
     updatedReport.semanticAudit.judgeResolvedUnitIds = judgeResolvedUnitIds;
     updatedReport.semanticAudit.judgeUnavailableUnitIds = judgeUnavailableUnitIds;
+    updatedReport.semanticAudit.unsupportedAdditions =
+      updatedReport.veracityAudit?.unsupportedAdditionFlags || [];
     updatedReport.semanticAudit.passed =
       semanticContradictions.length === 0 &&
       (updatedReport.veracityAudit?.inventedDataFlags || []).length === 0 &&
       (updatedReport.veracityAudit?.unsupportedAdditionFlags || []).length === 0 &&
       remainingAmbiguous.length === 0;
   }
+
+  // V5.2 — The SAME global decision as the deterministic audit: every mandatory gate
+  // (coverage, veracity, semantic, structural, photo, editorial) must pass. Resolving a
+  // paraphrase through the judge can clear THAT unit, never an unrelated defect.
+  const globalDecision = finalizeGlobalAuditDecision({
+    report: updatedReport,
+    editorialAudit: detResult.editorialAudit,
+    includeEditorialAudit: true,
+  });
+  const nextPassed = globalDecision.passed;
+  updatedReport.passed = nextPassed;
+  updatedReport.approved = nextPassed;
+  updatedReport.status = nextPassed ? 'approved' : 'failed_audit';
+  updatedReport.blockingDefects = globalDecision.blockingDefects;
 
   const finalManu: DemoManuscript = {
     ...detResult.manuscript,
@@ -3040,6 +3181,8 @@ export async function generateParticipantBookManuscriptWithAI(params: {
   failureCategory?: BookFailureCategory;
   /** V5.1: fingerprint of the sources and configuration this result was generated from. */
   sourceFingerprint?: string;
+  /** V5.2: fingerprint of the generation configuration (batch identity). */
+  generationFingerprint?: string;
   /**
    * V5.1: batch indexes whose drafted chapters still carry confirmed defects. They must be
    * regenerated on the next attempt instead of being replayed from a checkpoint.
@@ -3172,6 +3315,15 @@ export async function generateParticipantBookManuscriptWithAI(params: {
     closingDedicationText,
     answers,
     questions,
+  });
+  // V5.2: separate identity for drafted batches. Changing the model, provider, prompt or
+  // structure invalidates checkpoints (they would yield a different text) but NOT approvals.
+  const generationFingerprint = computeBookGenerationFingerprint({
+    sourceFingerprint,
+    provider: primaryProvider,
+    model: primaryModel,
+    bookStructureMode,
+    literaryPromptText: activeLiteraryPrompt,
   });
   const attachApprovalEvidence = (
     approved: DemoManuscript,
@@ -3520,10 +3672,13 @@ export async function generateParticipantBookManuscriptWithAI(params: {
         // V5.1: a persisted batch is reused only when it was drafted from these exact sources,
         // style, prompt and settings. Checkpoints from an edited interview, another style or an
         // older engine (no fingerprint) are discarded and that batch is drafted again.
+        // V5.2: ...and only when it was drafted with the same provider, model, engine, prompt
+        // and structure (generation fingerprint). The chapter plan is checked per batch below.
         if (
           !Number.isNaN(bIdxNum) &&
           cp?.parsed &&
           cp.sourceFingerprint === sourceFingerprint &&
+          cp.generationFingerprint === generationFingerprint &&
           !batchCheckpointMap.has(bIdxNum)
         ) {
           batchCheckpointMap.set(bIdxNum, cp);
@@ -3605,7 +3760,18 @@ ${JSON.stringify(batchChapters, null, 2)}
 REGLAS OBLIGATORIAS DE SALIDA JSON:
 ${structureInstructions}`;
 
-        let batchResult = batchCheckpointMap.get(batchIdx) || null;
+        // V5.2: a checkpoint (persisted OR held in this process's memory) is replayed only when it
+        // belongs to these sources, this generation configuration and this exact chapter plan.
+        const batchSignature = computeBookBatchSignature(batchChapters);
+        const storedCheckpoint = batchCheckpointMap.get(batchIdx) || null;
+        let batchResult =
+          storedCheckpoint &&
+          storedCheckpoint.sourceFingerprint === sourceFingerprint &&
+          storedCheckpoint.generationFingerprint === generationFingerprint &&
+          storedCheckpoint.batchSignature === batchSignature
+            ? storedCheckpoint
+            : null;
+        if (storedCheckpoint && !batchResult) batchCheckpointMap.delete(batchIdx);
 
         if (!batchResult && pipelineOverrides.draftBatch) {
           batchResult = await pipelineOverrides.draftBatch({
@@ -3618,13 +3784,21 @@ ${structureInstructions}`;
             const stampedOverrideCheckpoint: BookBatchCheckpointPayload = {
               ...batchResult,
               sourceFingerprint,
+              generationFingerprint,
+              batchSignature,
             };
             batchCheckpointMap.set(batchIdx, stampedOverrideCheckpoint);
             onBatchCheckpoint?.(batchIdx, stampedOverrideCheckpoint);
+          } else {
+            // V5.2: an injected drafter never falls back to a real provider; an empty or
+            // malformed response is handled exactly like a provider's invalid JSON.
+            throw new Error(
+              `La respuesta del modelo no produjo capítulos JSON válidos (respuesta vacía o incompleta en el lote ${batchIdx + 1}).`
+            );
           }
         }
 
-        if (!batchResult) {
+        if (!batchResult && !pipelineOverrides.draftBatch) {
           const isReasoningModel = /^gpt-6|^gpt-5|^o1|^o3|^o4/i.test(effectiveModel);
           const timeoutMs = isReasoningModel ? 65000 : 38000;
 
@@ -3695,6 +3869,8 @@ ${structureInstructions}`;
             const stampedCheckpoint: BookBatchCheckpointPayload = {
               ...batchResult,
               sourceFingerprint,
+              generationFingerprint,
+              batchSignature,
             };
             batchCheckpointMap.set(batchIdx, stampedCheckpoint);
             onBatchCheckpoint?.(batchIdx, stampedCheckpoint);
@@ -3731,7 +3907,7 @@ ${structureInstructions}`;
               const incomingParas = Array.isArray(ch.paragraphs) ? ch.paragraphs : [];
               existing.paragraphs = [...existing.paragraphs, ...incomingParas];
               if (Array.isArray(ch.photoPlacements) && ch.photoPlacements.length > 0) {
-                const offsetPlacements = ch.photoPlacements.map((pl) => ({
+                const offsetPlacements = ch.photoPlacements.map((pl: any) => ({
                   ...pl,
                   paragraphIndex: (Number(pl.paragraphIndex) || 0) + paraOffset,
                 }));
@@ -4267,6 +4443,7 @@ ${structureInstructions}`;
         diagnosticSummary: failureDiag?.summary,
         failureCategory: failureDiag?.category,
         sourceFingerprint,
+        generationFingerprint,
         invalidatedBatchIndexes,
         batchesCompleted: completedBatchesCount,
         totalBatches: chapterBatches.length,

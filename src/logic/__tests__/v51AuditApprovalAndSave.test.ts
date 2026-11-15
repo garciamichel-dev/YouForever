@@ -40,6 +40,7 @@ import { BookGenerationJobManager, toParticipantBookJobView } from '../../server
 import { generateRealDemoBookPdf } from '../../utils/demoPdfGenerator.ts';
 import { buildContextualRepairTasks, buildEditorialChapterPlan } from '../demoStoryRules.ts';
 import { DEFAULT_LITERARY_PROMPTS_TEXT } from '../interviewRules.ts';
+import { createScenarioJudge } from './helpers/simulatedBookProviders.ts';
 
 // A stable server secret so approval evidence is reproducible inside this test process.
 process.env.BOOK_APPROVAL_SECRET = 'v51-test-secret-only-for-automated-tests';
@@ -498,8 +499,10 @@ test('V5.1-B1: un manuscrito realmente incompleto sigue rechazándose (omisión 
     'DOCUMENTARY_COVERAGE_FAILURE'
   );
 
-  // Partial omission: the memory is there but the sister's name and the parish are gone.
-  const partial = await auditWithHybridSemantics({
+  // V5.2 — Partial omission whose lost detail is a concrete name ("Lucía"): the name is nowhere
+  // in the book, so absence is DEMONSTRATED and the unit is rejected without spending the judge.
+  const judgedForNamedOmission: string[] = [];
+  const namedOmission = await auditWithHybridSemantics({
     manuscript: singleChapterManuscript({
       style: 'first_person_literary',
       paragraphs: [
@@ -513,11 +516,37 @@ test('V5.1-B1: un manuscrito realmente incompleto sigue rechazándose (omisión 
     answers,
     questions,
     ...PROVIDER_ARGS,
+    aiJudgeOverride: async ({ cases }) => {
+      judgedForNamedOmission.push(...cases.map((c) => c.originalTestimony));
+      return cases.map((c) => ({ unitId: c.unitId, verdict: 'supported' as const, rationale: 'x' }));
+    },
+  });
+  assert.equal(namedOmission.report.passed, false, 'Perder un nombre concreto es una omisión real.');
+  const namedTrace = namedOmission.report.traceabilityMatrix.find((tr) => tr.answerId === 'a_b');
+  assert.match(namedTrace?.evidenceOfAbsenceReason || '', /lucia/);
+  assert.equal(judgedForNamedOmission.some((t) => /Lucía/.test(t)), false);
+
+  // Partial omission of a COMMON detail ("frente a la parroquia"): related evidence exists, so
+  // only the judge can decide; it confirms the omission and the draft is rejected.
+  const partial = await auditWithHybridSemantics({
+    manuscript: singleChapterManuscript({
+      style: 'first_person_literary',
+      paragraphs: [
+        'Nací en Oaxaca en una casa de adobe junto al mercado.',
+        'Con mi hermana Lucía vendíamos tamales los domingos.',
+      ],
+      answerIds: ['a_a', 'a_b'],
+      questionIds: ['q_a', 'q_b'],
+      title: 'La casa de adobe',
+    }),
+    answers,
+    questions,
+    ...PROVIDER_ARGS,
     aiJudgeOverride: async ({ cases }) =>
       cases.map((c) => ({
         unitId: c.unitId,
-        verdict: 'omitted' as const,
-        rationale: 'Falta el nombre de la hermana (Lucía) y el lugar (frente a la parroquia).',
+        verdict: /parroquia/.test(c.candidateExcerpt) ? ('supported' as const) : ('omitted' as const),
+        rationale: 'Falta el lugar (frente a la parroquia).',
       })),
   });
   assert.equal(partial.report.passed, false, 'Una omisión parcial confirmada debe rechazarse.');
@@ -851,13 +880,22 @@ function makeFaithfulDrafter(base: DemoManuscript, transform?: (chapterId: strin
  * excerpt really carries its distinctive content, otherwise it is reported as omitted. It never
  * approves a memory that is not in the text, so it cannot mask real omissions in these tests.
  */
-const supportiveJudge: SemanticJudgeFunction = async ({ cases }) => {
+const scenarioJudgeForAdditions = createScenarioJudge();
+const supportiveJudge: SemanticJudgeFunction = async (params) => {
+  const { cases } = params;
   const fold = (text: string) =>
     text
       .toLowerCase()
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '');
+  // V5.2: Direction-B cases (possible invented facts) are judged by the shared scenario judge.
+  const additionCases = cases.filter((c) => c.checkKind === 'unsupported_addition');
+  const additionVerdicts =
+    additionCases.length > 0 ? await scenarioJudgeForAdditions.judge({ ...params, cases: additionCases }) : [];
   return cases.map((c) => {
+    if (c.checkKind === 'unsupported_addition') {
+      return additionVerdicts.find((v) => v.unitId === c.unitId)!;
+    }
     const distinctive = Array.from(
       new Set(
         fold(c.originalTestimony)

@@ -68,6 +68,11 @@ export interface BookGenerationJobRecord {
    * Checkpoints and results are only reused by a job carrying the same fingerprint.
    */
   sourceFingerprint?: string;
+  /**
+   * V5.2: fingerprint of the generation configuration (provider, model, engine, prompt and
+   * structure on top of the sources). Batch checkpoints are inherited only when it matches.
+   */
+  generationFingerprint?: string;
   failureCategory?: BookFailureCategory;
   internalReasonCode?: BookGenerationReasonCode;
   diagnosticSummary?: string;
@@ -309,6 +314,12 @@ export class BookGenerationJobManager {
      * active job or saved checkpoints are reused ONLY if they carry the same fingerprint.
      */
     sourceFingerprint?: string;
+    /**
+     * V5.2: when provided, inherited checkpoints must also have been drafted with this generation
+     * configuration. A job is still joined/offered by `sourceFingerprint` alone, because a book
+     * drafted by another model is still a faithful book of these sources.
+     */
+    generationFingerprint?: string;
     executor: BookJobExecutor;
     onJobSettled?: (job: BookGenerationJobRecord) => Promise<void> | void;
   }): BookGenerationJobRecord {
@@ -365,11 +376,14 @@ export class BookGenerationJobManager {
         isSameSources(resumable)
       ) {
         for (const [batchKey, checkpoint] of Object.entries(resumable.batchCheckpoints)) {
-          if (
+          const sameSources =
             params.sourceFingerprint === undefined ||
             checkpoint?.sourceFingerprint === undefined ||
-            checkpoint.sourceFingerprint === params.sourceFingerprint
-          ) {
+            checkpoint.sourceFingerprint === params.sourceFingerprint;
+          const sameGeneration =
+            params.generationFingerprint === undefined ||
+            checkpoint?.generationFingerprint === params.generationFingerprint;
+          if (sameSources && sameGeneration) {
             inheritedCheckpoints[batchKey] = checkpoint;
           }
         }
@@ -400,6 +414,7 @@ export class BookGenerationJobManager {
           : 'Reuniendo y ordenando tus recuerdos y fotografías...',
       batchCheckpoints: inheritedCheckpoints,
       sourceFingerprint: params.sourceFingerprint,
+      generationFingerprint: params.generationFingerprint,
       creationOrder: nextJobCreationOrder(),
       createdAt: now,
       updatedAt: now,
