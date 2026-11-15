@@ -10,16 +10,22 @@ import {
 export const miEsenciaRouter: Router = express.Router();
 
 function requireMiEsenciaAdmin(req: Request, res: Response, next: express.NextFunction): void {
-  const admin = getAdminUser(req);
-  if (!admin) {
+  const deny = () =>
     res.status(401).json({
       success: false,
       error: 'Acceso administrativo requerido para gestionar Mi Esencia.',
     });
-    return;
-  }
-  (req as any).adminUser = admin;
-  next();
+  // V5.3.1: verified server-side identity (see ../adminAuth.ts).
+  getAdminUser(req)
+    .then((admin) => {
+      if (!admin) {
+        deny();
+        return;
+      }
+      (req as any).adminUser = admin;
+      next();
+    })
+    .catch(deny);
 }
 
 // ============================================================================

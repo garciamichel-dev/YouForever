@@ -57,6 +57,10 @@ import {
 import { generateRealDemoBookPdf, preloadBookResourcesForPdf } from '../utils/demoPdfGenerator.ts';
 import { ForeverYouLogo } from './ForeverYouLogo';
 
+/** V5.3.1: shown in the preview and before saving the final book. */
+const AI_DOCUMENT_REVIEW_NOTICE =
+  'Este documento se redacta con ayuda de inteligencia artificial y puede contener errores. Siempre será necesaria una revisión exhaustiva por parte del autor de la autobiografía.';
+
 interface ParticipantBookStudioProps {
   token: string;
   interview: InterviewRecord;
@@ -1641,7 +1645,7 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
                         Paso 1: Elige el Estilo Literario de tu Obra
                       </h3>
                       <p className="text-xs text-stone-500">
-                        Haz clic en un estilo literario para generar las primeras 5 páginas de muestra. Para continuar a las siguientes secciones, primero debes elegir una opción.
+                        Haz clic en un estilo literario para generar las primeras 5 páginas de muestra. La muestra sirve para conocer el estilo: el libro completo se redactará después de forma independiente. Para continuar a las siguientes secciones, primero debes elegir una opción.
                       </p>
                     </div>
                     {isGeneratingAI && (
@@ -2249,6 +2253,9 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
                       isEditingLayout ? ' de muestra' : ' totales'
                     }`}
               </h4>
+              <p className="text-[11px] text-amber-100/90 leading-relaxed" data-testid="viewer-ai-review-notice">
+                {AI_DOCUMENT_REVIEW_NOTICE}
+              </p>
               <div className="flex flex-wrap items-center gap-2 text-[11px] text-stone-300">
                 <span className="px-2 py-0.5 rounded bg-white/10">
                   Diseño interior: <strong>{composedBook.interiorStyle.name}</strong>
@@ -2577,8 +2584,11 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
                 </strong>{' '}
                 disponible(s).
               </p>
-              <p className="text-xs text-stone-600">
-                Se conservarán intactas las primeras 5 páginas de tu vista previa y se integrarán todos tus capítulos, respuestas de profundización, diseño interior («{composedBook.interiorStyle.name}») y formato físico («{composedBook.format.name}»).
+              <p className="text-xs text-stone-600" data-testid="save-modal-independent-generation-text">
+                La vista previa es solo una muestra del estilo elegido: el libro completo se redacta de nuevo, de forma independiente, a partir de todas tus respuestas, por lo que sus primeras páginas pueden no coincidir exactamente con la muestra. Se integrarán todos tus capítulos, respuestas de profundización, diseño interior («{composedBook.interiorStyle.name}») y formato físico («{composedBook.format.name}»).
+              </p>
+              <p className="text-xs text-stone-700 font-medium" data-testid="save-modal-ai-review-notice">
+                {AI_DOCUMENT_REVIEW_NOTICE}
               </p>
             </div>
 

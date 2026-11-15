@@ -16,6 +16,7 @@ import { FreeSelfRegisterView } from './components/FreeSelfRegisterView.tsx';
 import { MiEsenciaFamilyPortal } from './modules/mi-esencia/MiEsenciaFamilyPortal.tsx';
 import { auth, googleProvider } from './firebase/config.ts';
 import { onAuthStateChanged, signInWithPopup, signOut } from 'firebase/auth';
+import { clearAdminSession, establishAdminSession } from './firebase/adminSession.ts';
 import { Clock, HelpCircle } from 'lucide-react';
 import { getActiveParticipantSession } from './utils/participantSessionStorage.ts';
 import { ForeverYouLogo } from './components/ForeverYouLogo';
@@ -160,6 +161,8 @@ export default function App() {
           const authorized =
             email === 'garcia.michel@gmail.com' || email === 'youforever.team@gmail.com';
           setIsAuthorizedAdmin(authorized);
+          // V5.3.1: HttpOnly admin session for download links / iframes (server verifies the token).
+          if (authorized) void establishAdminSession();
 
           const urlParams = new URLSearchParams(window.location.search);
           const token = urlParams.get('token') || urlParams.get('code');
@@ -209,6 +212,7 @@ export default function App() {
           email === 'garcia.michel@gmail.com' || email === 'youforever.team@gmail.com';
         setIsAuthorizedAdmin(authorized);
         if (authorized) {
+          void establishAdminSession();
           setCurrentView('admin');
         }
       }
@@ -220,6 +224,7 @@ export default function App() {
 
   const handleLogout = async () => {
     try {
+      await clearAdminSession();
       await signOut(auth);
       setAdminUser(null);
       setIsAuthorizedAdmin(false);

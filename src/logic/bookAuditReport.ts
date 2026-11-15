@@ -140,7 +140,20 @@ export interface BookAuditReport {
   adminNotes: Array<{ note: string; by: string; at: string }>;
   correctionRequests: Array<{ requestId: string; incidentIds: string[]; note: string; by: string; at: string; status: 'requested' }>;
   history: Array<{ event: string; by: string; at: string; detail?: string }>;
-  durability?: { remoteStatus: 'written' | 'local_only' | 'unknown'; checkedAt: string };
+  /**
+   * V5.3.1 — Where this report (and its version) really lives. `durable` is true only when the
+   * version document (which embeds this report) and the interview counters are in Firestore, or
+   * when the local disk is declared persistent. `pending` is what the remote copy itself carries
+   * while it is being written; it is replaced by `written` when the report is loaded back.
+   */
+  durability?: {
+    remoteStatus: 'written' | 'local_only' | 'unknown' | 'pending';
+    checkedAt: string;
+    durable?: boolean;
+    localDisk?: string;
+    versionDocument?: { status: string; bytes: number; chunks: number };
+    interviewDocument?: string;
+  };
 }
 
 const severityOf = (kind: BookAuditIncidentKind): BookAuditIncident['severity'] =>

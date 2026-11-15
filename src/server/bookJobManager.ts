@@ -189,6 +189,8 @@ export function sanitizeBookVersionForParticipant<T extends { manuscript?: DemoM
   const copy: any = { ...version };
   delete copy.auditReport;
   delete copy.auditSummary;
+  delete copy.adminAuditReport;
+  delete copy.restoredFromClientCache;
   if (copy.manuscript) copy.manuscript = sanitizeManuscriptForParticipant(copy.manuscript);
   return copy;
 }

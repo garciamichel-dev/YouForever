@@ -41,6 +41,13 @@ import {
   toParticipantBookJobView,
 } from './bookJobManager.ts';
 import type { BookAuditIncidentStatus } from '../logic/bookAuditReport.ts';
+import {
+  authenticateAdminRequest,
+  buildAdminSessionCookie,
+  issueAdminSessionCookieValue,
+  verifyFirebaseIdToken,
+} from './adminAuth.ts';
+import { toParticipantAuditLogView } from './participantViews.ts';
 
 export const apiRouter: Router = express.Router();
 apiRouter.use(express.json({ limit: '100mb' }));
@@ -140,62 +147,69 @@ apiRouter.get('/health', (_req: Request, res: Response) => {
 });
 
 // --- Helper: Admin verification & Middleware ---
-export function getAdminUser(req: Request): string | null {
-  const queryAdmin = req.query.admin || req.query.adminEmail || req.query.token;
-  if (typeof queryAdmin === 'string' && queryAdmin.trim().length > 0) {
-    const email = queryAdmin.trim().toLowerCase();
-    if (storage.isAdmin(email)) {
-      return email;
-    }
-  }
-
-  const adminHeader = req.headers['x-admin-user'] || req.headers['x-admin-email'];
-  if (typeof adminHeader === 'string' && adminHeader.trim().length > 0) {
-    const email = adminHeader.trim().toLowerCase();
-    if (storage.isAdmin(email)) {
-      return email;
-    }
-  }
-
-  const authHeader = req.headers['authorization'];
-  if (typeof authHeader === 'string' && authHeader.trim().length > 0) {
-    const raw = authHeader.replace(/^Bearer\s+/i, '').trim().toLowerCase();
-    if (storage.isAdmin(raw)) {
-      return raw;
-    }
-  }
-
-  return null;
+// V5.3.1: the administrator is identified ONLY by a verified Firebase ID token (or by the HttpOnly
+// session cookie issued in exchange for one, for safe GET/HEAD requests). E-mails sent by the
+// client in the query string, the `x-admin-user` / `x-admin-email` headers or the body are ignored
+// as proof of identity (they are still sent by older screens and are simply not trusted).
+export async function getAdminUser(req: Request): Promise<string | null> {
+  const identity = await authenticateAdminRequest(req, (email) => storage.isAdmin(email));
+  return identity ? identity.email : null;
 }
+
+const ADMIN_UNAUTHORIZED_MESSAGE =
+  'Acceso no autorizado: Se requiere inicio de sesión administrativo con una cuenta Google autorizada.';
 
 export function requireAdmin(req: Request, res: Response, next: NextFunction): void {
-  const admin = getAdminUser(req);
-  if (!admin) {
-    res.status(401).json({
-      success: false,
-      error:
-        'Acceso no autorizado: Se requiere inicio de sesión administrativo con una cuenta Google autorizada.',
+  getAdminUser(req)
+    .then((admin) => {
+      if (!admin) {
+        res.status(401).json({ success: false, error: ADMIN_UNAUTHORIZED_MESSAGE });
+        return;
+      }
+      (req as any).adminUser = admin;
+      next();
+    })
+    .catch(() => {
+      res.status(401).json({ success: false, error: ADMIN_UNAUTHORIZED_MESSAGE });
     });
-    return;
-  }
-  (req as any).adminUser = admin;
-  next();
 }
 
-// Check admin status for authenticated client
-apiRouter.get('/auth/admin-check', (req: Request, res: Response) => {
-  const emailQuery = ((req.query.email as string) || '').trim().toLowerCase();
-  const detectedAdmin = getAdminUser(req);
-  const isQueryAdmin = emailQuery ? storage.isAdmin(emailQuery) : false;
-  const isAuthorized = !!detectedAdmin || isQueryAdmin;
-  const activeEmail = detectedAdmin || (isQueryAdmin ? emailQuery : null);
+const isSecureRequest = (req: Request): boolean =>
+  req.secure || String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
 
+// Exchange a verified Firebase ID token for an HttpOnly admin session cookie (used by download
+// links, iframes and new windows, which cannot send the token in a header).
+apiRouter.post('/auth/admin-session', async (req: Request, res: Response) => {
+  const authHeader = req.headers['authorization'];
+  const bearer = typeof authHeader === 'string' ? authHeader.replace(/^Bearer\s+/i, '').trim() : '';
+  try {
+    const identity = await verifyFirebaseIdToken(bearer);
+    if (!storage.isAdmin(identity.email)) {
+      res.status(403).json({ success: false, error: 'Esta cuenta no tiene acceso administrativo.' });
+      return;
+    }
+    res.setHeader('Set-Cookie', buildAdminSessionCookie(issueAdminSessionCookieValue(identity), isSecureRequest(req)));
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ success: true, data: { isAdmin: true, adminEmail: identity.email } });
+  } catch {
+    res.status(401).json({ success: false, error: ADMIN_UNAUTHORIZED_MESSAGE });
+  }
+});
+
+apiRouter.delete('/auth/admin-session', (req: Request, res: Response) => {
+  res.setHeader('Set-Cookie', buildAdminSessionCookie('', isSecureRequest(req), 0));
+  res.json({ success: true });
+});
+
+// Check admin status of the VERIFIED caller. V5.3.1: no longer trusts `?email=` and no longer
+// publishes the list of administrator addresses.
+apiRouter.get('/auth/admin-check', async (req: Request, res: Response) => {
+  const detectedAdmin = await getAdminUser(req);
   res.json({
     success: true,
     data: {
-      isAdmin: isAuthorized,
-      adminEmail: activeEmail,
-      authorizedAdmins: storage.getAdmins(),
+      isAdmin: Boolean(detectedAdmin),
+      adminEmail: detectedAdmin,
     },
   });
 });
@@ -1057,7 +1071,7 @@ apiRouter.get('/interviews/:id/backup/qa-html', requireAdmin, (req: Request, res
     const photos = storage.getPhotosForInterview(req.params.id);
     const audios = storage.getAudiosForInterview(req.params.id);
 
-    const adminUser = ((req as any).adminUser as string | undefined) || (req.query.admin as string | undefined);
+    const adminUser = (req as any).adminUser as string | undefined; // verified by requireAdmin
     const html = generateQACompilationHtml({
       interview,
       participants,
@@ -1971,7 +1985,12 @@ apiRouter.post('/participant/admin/profile', async (req: Request, res: Response)
     const scheduledDeliveries = storage.getScheduledDeliveries(interview.id, participant.id);
     const secondaryAccessList = storage.getSecondaryAccess(interview.id, participant.id);
     const postMortemInstructions = storage.getPostMortemInstructions(interview.id, participant.id);
-    const auditLogs = storage.getParticipantAuditLogs(interview.id, participant.id);
+    // V5.3.1: participants see WHICH events happened on their account, never their internal
+    // details (coverage, colour band, delivery status, diagnostics, administrator identities).
+    const auditLogs = storage
+      .getParticipantAuditLogs(interview.id, participant.id)
+      .map(toParticipantAuditLogView)
+      .filter((log): log is NonNullable<typeof log> => log !== null);
     const manuscripts = storage.getManuscriptsForInterview(interview.id);
     const hasGeneratedBook = manuscripts && manuscripts.length > 0;
     const latestManuscript = hasGeneratedBook ? manuscripts[manuscripts.length - 1] : null;

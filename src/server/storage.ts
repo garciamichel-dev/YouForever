@@ -98,6 +98,14 @@ import {
   refreshBookAuditReportCounters,
 } from '../logic/bookAuditReport.ts';
 import {
+  FIRESTORE_SAFE_DOC_BYTES,
+  LocalDiskDurability,
+  chunkDocId,
+  planChunkedDoc,
+  reassembleChunkedDocs,
+  resolveLocalDiskDurability,
+} from './durableDocs.ts';
+import {
   PrivacyConsentRecord,
   BookShareRecord,
   ScheduledDeliveryRecord,
@@ -254,6 +262,8 @@ export interface StorageBookAiOverrides {
 export interface StorageManagerOptions {
   remoteDocStore?: StorageRemoteDocStore;
   bookAiOverrides?: StorageBookAiOverrides;
+  /** V5.3.1 (tests only): declares whether the local snapshot disk survives restarts. */
+  localDiskDurable?: boolean;
 }
 
 /**
@@ -311,7 +321,20 @@ export class StorageManager {
       throw new Error('configureTestDoubles solo está permitido en pruebas automatizadas.');
     }
     if (options.remoteDocStore) this.remoteDocStore = options.remoteDocStore;
-    this.bookAiOverrides = options.bookAiOverrides;
+    if ('bookAiOverrides' in options) this.bookAiOverrides = options.bookAiOverrides;
+    if (typeof options.localDiskDurable === 'boolean') {
+      this.localDiskDurability = { durable: options.localDiskDurable, reason: 'test_override' };
+    }
+  }
+
+  /**
+   * V5.3.1 — Whether the local snapshot survives restarts. On Cloud Run (this app's deployment) it
+   * does not, so a book version is durable only once Firestore holds it (see durableDocs.ts).
+   */
+  private localDiskDurability: LocalDiskDurability = resolveLocalDiskDurability();
+
+  public getPersistenceStatus(): LocalDiskDurability {
+    return { ...this.localDiskDurability };
   }
 
   private config: AppConfig = { ...INITIAL_APP_CONFIG };
@@ -713,32 +736,113 @@ export class StorageManager {
   }
 
   /**
-   * V5.3 — Same remote write as `persistRemoteDoc`, but reports what really happened, so callers
-   * never claim a replica that was skipped (size guard, quota) or failed.
+   * V5.3.1 — DURABLE remote write. Unlike the best-effort writers it never skips a large document:
+   * above the preventive 800 KB limit the document is split into chunk documents (same collection,
+   * so the existing security rules apply) written BEFORE their manifest, so a reader never sees a
+   * manifest without its chunks. Each write is retried once. The result says what really happened.
    */
-  private async persistRemoteDocWithStatus<T>(
+  private async persistRemoteDocDurable<T>(
     collectionName: string,
     docId: string,
-    data: T
-  ): Promise<'written' | 'skipped' | 'failed'> {
-    try {
-      const sanitized = this.sanitizeDocForFirestore(data);
-      (sanitized as Record<string, unknown>)._syncedAt = new Date().toISOString();
-      if (Buffer.byteLength(JSON.stringify(sanitized), 'utf8') > 800_000) {
-        console.warn(
-          `[Firestore Size Guard] ${collectionName}/${docId} exceeds the safe size; kept in the local snapshot only.`
-        );
-        return 'skipped';
-      }
-      await Promise.race([
-        this.remoteDocStore.setDoc(collectionName, docId, sanitized as Record<string, unknown>),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Firestore write timed out')), 2500)),
+    data: T,
+    carryFields: string[] = ['interviewId', 'title']
+  ): Promise<{ status: 'written' | 'failed'; chunked: boolean; bytes: number; chunkCount: number; error?: string }> {
+    const sanitized = this.sanitizeDocForFirestore(data) as Record<string, unknown>;
+    sanitized._syncedAt = new Date().toISOString();
+    const json = JSON.stringify(sanitized);
+    const bytes = Buffer.byteLength(json, 'utf8');
+    const writeOnce = (id: string, payload: Record<string, unknown>) =>
+      Promise.race([
+        this.remoteDocStore.setDoc(collectionName, id, payload),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Firestore write timed out')), 8000)),
       ]);
-      return 'written';
+    const writeWithRetry = async (id: string, payload: Record<string, unknown>) => {
+      try {
+        await writeOnce(id, payload);
+      } catch {
+        await writeOnce(id, payload);
+      }
+    };
+    try {
+      if (bytes <= FIRESTORE_SAFE_DOC_BYTES) {
+        await writeWithRetry(docId, sanitized);
+        return { status: 'written', chunked: false, bytes, chunkCount: 0 };
+      }
+      const carry: Record<string, unknown> = {};
+      for (const field of carryFields) if (sanitized[field] !== undefined) carry[field] = sanitized[field];
+      const plan = planChunkedDoc(docId, json, carry);
+      for (const chunk of plan.chunks) await writeWithRetry(chunk.id, chunk.data);
+      await writeWithRetry(docId, plan.manifest);
+      return { status: 'written', chunked: true, bytes, chunkCount: plan.chunks.length };
     } catch (err: any) {
-      console.warn(`[Firestore Persistence Note] ${collectionName}/${docId} kept locally:`, err?.message || err);
-      return 'failed';
+      console.warn(`[Firestore Durable Write] ${collectionName}/${docId} NOT written:`, err?.message || err);
+      return { status: 'failed', chunked: bytes > FIRESTORE_SAFE_DOC_BYTES, bytes, chunkCount: 0, error: String(err?.message || err) };
     }
+  }
+
+  /** V5.3.1 — Remote copy of a book version: the version WITH its administrative audit report. */
+  private persistBookVersionDurable(versionId: string) {
+    const version = this.participantBookVersions.get(versionId);
+    if (!version) {
+      return Promise.resolve({ status: 'failed' as const, chunked: false, bytes: 0, chunkCount: 0, error: 'version_not_found' });
+    }
+    const report = this.bookAuditReports.get(versionId);
+    return this.persistRemoteDocDurable('participantBookVersions', versionId, {
+      ...version,
+      ...(report ? { adminAuditReport: report } : {}),
+    });
+  }
+
+  /**
+   * V5.3.1 — Single entry point for book-version documents loaded from Firestore: reassembles chunked
+   * documents, moves the embedded administrative report into the server-side map (it never stays on
+   * the version record) and skips incomplete documents instead of loading half a book.
+   */
+  private ingestRemoteBookVersionDocs(rawDocs: any[]): void {
+    const { docs, incomplete } = reassembleChunkedDocs<any>(rawDocs);
+    if (incomplete.length > 0) {
+      console.warn(`[StorageManager] Incomplete chunked book versions skipped (kept local copies): ${incomplete.join(', ')}`);
+    }
+    for (const raw of docs) {
+      if (
+        !raw?.id ||
+        this.deletedBookVersionIds.has(raw.id) ||
+        this.deletedBookVersionIds.has(`pbv_${raw.interviewId}_v${raw.versionNumber}`)
+      ) {
+        continue;
+      }
+      const { adminAuditReport, _syncedAt: _s, ...bv } = raw;
+      this.participantBookVersions.set(bv.id, bv as ParticipantBookVersionRecord);
+      if (adminAuditReport?.identification?.versionId === bv.id) {
+        const local = this.bookAuditReports.get(bv.id);
+        // Admin changes only ever append history: the longer history is the newer report.
+        if (!local || (adminAuditReport.history?.length || 0) > (local.history?.length || 0)) {
+          this.bookAuditReports.set(bv.id, {
+            ...adminAuditReport,
+            durability: {
+              ...(adminAuditReport.durability || {}),
+              remoteStatus: 'written',
+              checkedAt: new Date().toISOString(),
+            },
+          });
+        }
+      }
+    }
+  }
+
+  /**
+   * V5.3.1 — A book version coming from a BROWSER cache (recovery path) is never trusted for audit
+   * data: administrative fields are dropped, so its report is rebuilt server-side and labelled.
+   */
+  private sanitizeClientRestoredBookVersion(bv: any): ParticipantBookVersionRecord {
+    const { auditSummary: _a, auditReport: _r, adminAuditReport: _ar, ...rest } = bv || {};
+    const manuscript = rest.manuscript ? { ...rest.manuscript } : rest.manuscript;
+    if (manuscript) {
+      for (const field of ['documentaryAudit', 'editorialAudit', 'deliveryDecision', 'internalReasonCode', 'diagnosticSummary', 'previewFidelity']) {
+        delete manuscript[field];
+      }
+    }
+    return { ...rest, manuscript, restoredFromClientCache: true } as ParticipantBookVersionRecord;
   }
 
   /**
@@ -826,7 +930,9 @@ export class StorageManager {
       if (changed) {
         refreshBookAuditReportCounters(report);
         report.history.push({ event: 'incidents_corrected_by_later_version', by: 'sistema', at: now, detail: newVersion.id });
-        void this.persistRemoteDocWithStatus('bookAuditReports', versionId, report);
+        // The older version's remote copy carries its report: refresh it (the change can be
+        // derived again from the new version if this write fails).
+        void this.persistBookVersionDurable(versionId);
       }
     }
   }
@@ -866,25 +972,15 @@ export class StorageManager {
   }
 
   /**
-   * Admin-only audit report of one version: memory, then the remote replica, then (for versions
-   * saved before V5.3) a reconstruction from the audit stored with the version or, if none was
-   * stored, from the deterministic rules. Reconstructions are labelled as such.
+   * Admin-only audit report of one version: memory (which includes reports loaded from Firestore,
+   * where V5.3.1 stores each report inside its version document), then — for versions saved before
+   * V5.3 or restored from a browser cache — a reconstruction from the audit stored with the version
+   * or, if none was stored, from the deterministic rules. Reconstructions are labelled as such.
    */
   public async getBookAuditReport(versionId: string): Promise<BookAuditReport | null> {
     const version = this.participantBookVersions.get(versionId);
     const inMemory = this.bookAuditReports.get(versionId);
     if (inMemory) return inMemory;
-    if (this.remoteDocStore.getDoc) {
-      try {
-        const remote = await this.remoteDocStore.getDoc('bookAuditReports', versionId);
-        if (remote && (remote as any).identification?.versionId === versionId) {
-          this.bookAuditReports.set(versionId, remote as unknown as BookAuditReport);
-          return remote as unknown as BookAuditReport;
-        }
-      } catch (err: any) {
-        console.warn('[BookAudit] Remote report read failed:', err?.message || err);
-      }
-    }
     if (!version) return null;
     let manuscript = version.manuscript;
     let source: BookAuditReport['identification']['source'] = 'reconstructed_from_saved_version';
@@ -922,15 +1018,44 @@ export class StorageManager {
     });
     this.bookAuditReports.set(versionId, report);
     this.saveStateToDisk();
-    void this.persistRemoteDocWithStatus('bookAuditReports', versionId, report);
+    // Best effort: a reconstruction can always be rebuilt from the saved version.
+    void this.persistBookVersionDurable(versionId);
     return report;
   }
 
+  /** V5.3.1: admin actions work on a copy, committed only once it is durably stored. */
+  private async loadBookAuditReportForChange(versionId: string): Promise<BookAuditReport> {
+    const report = await this.getBookAuditReport(versionId);
+    if (!report) throw new Error('Informe de auditoría no encontrado.');
+    return JSON.parse(JSON.stringify(report)) as BookAuditReport;
+  }
+
+  /**
+   * V5.3.1 — Commits an administrative change to a report. The report travels inside its version
+   * document; if Firestore cannot store it and the local disk is not durable, the change is NOT
+   * applied (the previous report stays in place) and the administrator is asked to retry. History
+   * entries are only ever appended, never removed.
+   */
   private async saveAdminBookAuditChange(versionId: string, report: BookAuditReport): Promise<BookAuditReport> {
     refreshBookAuditReportCounters(report);
+    const previous = this.bookAuditReports.get(versionId);
     this.bookAuditReports.set(versionId, report);
+    const remote = await this.persistBookVersionDurable(versionId);
+    if (remote.status !== 'written' && !this.localDiskDurability.durable) {
+      if (previous) this.bookAuditReports.set(versionId, previous);
+      else this.bookAuditReports.delete(versionId);
+      throw new Error(
+        'No se pudo guardar el cambio de forma duradera (almacenamiento remoto no disponible). No se aplicó ningún cambio: inténtalo de nuevo.'
+      );
+    }
+    report.durability = {
+      ...(report.durability || {}),
+      remoteStatus: remote.status === 'written' ? 'written' : 'local_only',
+      checkedAt: new Date().toISOString(),
+      durable: true,
+      localDisk: this.localDiskDurability.reason,
+    };
     this.saveStateToDisk();
-    await this.persistRemoteDocWithStatus('bookAuditReports', versionId, report);
     return report;
   }
 
@@ -941,8 +1066,7 @@ export class StorageManager {
     performedBy: string;
     incidentId?: string;
   }): Promise<BookAuditReport> {
-    const report = await this.getBookAuditReport(params.versionId);
-    if (!report) throw new Error('Informe de auditoría no encontrado.');
+    const report = await this.loadBookAuditReportForChange(params.versionId);
     const note = String(params.note || '').trim().slice(0, 4000);
     if (!note) throw new Error('La observación no puede estar vacía.');
     const entry = { note, by: params.performedBy, at: new Date().toISOString() };
@@ -954,10 +1078,11 @@ export class StorageManager {
       report.adminNotes.push(entry);
     }
     report.history.push({ event: 'admin_note', by: params.performedBy, at: entry.at, detail: params.incidentId });
+    const saved = await this.saveAdminBookAuditChange(params.versionId, report);
     await this.addAuditLog('BOOK_AUDIT_NOTE', 'participantBookVersion', params.versionId, params.performedBy, {
       incidentId: params.incidentId || null,
     });
-    return this.saveAdminBookAuditChange(params.versionId, report);
+    return saved;
   }
 
   /** Admin status change of an incident; the previous status stays in its history. */
@@ -977,19 +1102,19 @@ export class StorageManager {
       'corrected_in_later_version',
     ];
     if (!allowed.includes(params.status)) throw new Error('Estado administrativo no válido.');
-    const report = await this.getBookAuditReport(params.versionId);
-    if (!report) throw new Error('Informe de auditoría no encontrado.');
+    const report = await this.loadBookAuditReportForChange(params.versionId);
     const incident = report.incidents.find((i) => i.incidentId === params.incidentId);
     if (!incident) throw new Error('Incidencia no encontrada.');
     const at = new Date().toISOString();
     incident.adminStatus = params.status;
     incident.statusHistory.push({ status: params.status, by: params.performedBy, at, note: params.note });
     report.history.push({ event: 'incident_status', by: params.performedBy, at, detail: `${params.incidentId}:${params.status}` });
+    const saved = await this.saveAdminBookAuditChange(params.versionId, report);
     await this.addAuditLog('BOOK_AUDIT_INCIDENT_STATUS', 'participantBookVersion', params.versionId, params.performedBy, {
       incidentId: params.incidentId,
       status: params.status,
     });
-    return this.saveAdminBookAuditChange(params.versionId, report);
+    return saved;
   }
 
   /**
@@ -1002,8 +1127,7 @@ export class StorageManager {
     note: string;
     performedBy: string;
   }): Promise<BookAuditReport> {
-    const report = await this.getBookAuditReport(params.versionId);
-    if (!report) throw new Error('Informe de auditoría no encontrado.');
+    const report = await this.loadBookAuditReportForChange(params.versionId);
     const known = new Set(report.incidents.map((i) => i.incidentId));
     const incidentIds = (params.incidentIds || []).filter((id) => known.has(id));
     if (incidentIds.length === 0) throw new Error('Selecciona al menos una incidencia del informe.');
@@ -1017,10 +1141,11 @@ export class StorageManager {
       status: 'requested',
     });
     report.history.push({ event: 'correction_requested', by: params.performedBy, at, detail: incidentIds.join(',') });
+    const saved = await this.saveAdminBookAuditChange(params.versionId, report);
     await this.addAuditLog('BOOK_AUDIT_CORRECTION_REQUESTED', 'participantBookVersion', params.versionId, params.performedBy, {
       incidents: incidentIds.length,
     });
-    return this.saveAdminBookAuditChange(params.versionId, report);
+    return saved;
   }
 
   private async removeDoc(collectionName: string, docId: string): Promise<void> {
@@ -1574,7 +1699,7 @@ export class StorageManager {
               !this.deletedBookVersionIds.has(bv.id) &&
               !this.deletedBookVersionIds.has(`pbv_${bv.interviewId}_v${bv.versionNumber}`)
             ) {
-              this.participantBookVersions.set(bv.id, bv as ParticipantBookVersionRecord);
+              this.participantBookVersions.set(bv.id, this.sanitizeClientRestoredBookVersion(bv));
               restoredCount++;
             }
           }
@@ -1652,7 +1777,7 @@ export class StorageManager {
           !this.deletedBookVersionIds.has(bv.id) &&
           !this.deletedBookVersionIds.has(`pbv_${bv.interviewId}_v${bv.versionNumber}`)
         ) {
-          this.participantBookVersions.set(bv.id, bv);
+          this.participantBookVersions.set(bv.id, this.sanitizeClientRestoredBookVersion(bv));
           const inv = this.interviews.get(bv.interviewId);
           if (inv) {
             inv.bookGeneratedCount = Math.max(inv.bookGeneratedCount ?? 0, bv.versionNumber || 1);
@@ -1843,17 +1968,9 @@ export class StorageManager {
     }
 
     if (bookVersionsSnap) {
-      bookVersionsSnap.forEach((docSnap: any) => {
-        const bv = docSnap.data() as ParticipantBookVersionRecord;
-        if (
-          bv &&
-          bv.id &&
-          !this.deletedBookVersionIds.has(bv.id) &&
-          !this.deletedBookVersionIds.has(`pbv_${bv.interviewId}_v${bv.versionNumber}`)
-        ) {
-          this.participantBookVersions.set(bv.id, bv);
-        }
-      });
+      const rawVersions: any[] = [];
+      bookVersionsSnap.forEach((docSnap: any) => rawVersions.push(docSnap.data()));
+      this.ingestRemoteBookVersionDocs(rawVersions);
     }
   }
 
@@ -2034,16 +2151,11 @@ export class StorageManager {
         const m = d.data() as ManuscriptRecord;
         if (m?.id) this.manuscripts.set(m.id, m);
       });
-      unwrap(4)?.forEach((d: any) => {
-        const bv = d.data() as ParticipantBookVersionRecord;
-        if (
-          bv?.id &&
-          !this.deletedBookVersionIds.has(bv.id) &&
-          !this.deletedBookVersionIds.has(`pbv_${bv.interviewId}_v${bv.versionNumber}`)
-        ) {
-          this.participantBookVersions.set(bv.id, bv);
-        }
-      });
+      {
+        const rawVersions: any[] = [];
+        unwrap(4)?.forEach((d: any) => rawVersions.push(d.data()));
+        this.ingestRemoteBookVersionDocs(rawVersions);
+      }
       unwrap(5)?.forEach((d: any) => {
         const ph = d.data() as InterviewPhotoRecord;
         if (ph?.id) {
@@ -2156,16 +2268,11 @@ export class StorageManager {
         const m = d.data() as ManuscriptRecord;
         if (m?.id) this.manuscripts.set(m.id, m);
       });
-      unwrap(4)?.forEach((d: any) => {
-        const bv = d.data() as ParticipantBookVersionRecord;
-        if (
-          bv?.id &&
-          !this.deletedBookVersionIds.has(bv.id) &&
-          !this.deletedBookVersionIds.has(`pbv_${bv.interviewId}_v${bv.versionNumber}`)
-        ) {
-          this.participantBookVersions.set(bv.id, bv);
-        }
-      });
+      {
+        const rawVersions: any[] = [];
+        unwrap(4)?.forEach((d: any) => rawVersions.push(d.data()));
+        this.ingestRemoteBookVersionDocs(rawVersions);
+      }
       unwrap(5)?.forEach((d: any) => {
         const ph = d.data() as InterviewPhotoRecord;
         if (ph?.id) {
@@ -2380,16 +2487,9 @@ export class StorageManager {
       const allBvSnap = await firestoreTelemetry
         .trackedGetDocs(serverDb, collection(serverDb, 'participantBookVersions'), 'storage')
         .catch(() => null);
-      allBvSnap?.forEach((docSnap: any) => {
-        const bv = docSnap.data() as ParticipantBookVersionRecord;
-        if (
-          bv?.id &&
-          !this.deletedBookVersionIds.has(bv.id) &&
-          !this.deletedBookVersionIds.has(`pbv_${bv.interviewId}_v${bv.versionNumber}`)
-        ) {
-          this.participantBookVersions.set(bv.id, bv);
-        }
-      });
+      const rawVersions: any[] = [];
+      allBvSnap?.forEach((docSnap: any) => rawVersions.push(docSnap.data()));
+      this.ingestRemoteBookVersionDocs(rawVersions);
     }
 
     if (logsSnap) {
@@ -6402,20 +6502,77 @@ export class StorageManager {
       );
     }
 
-    // Remote replica (best effort in this architecture: the local snapshot above is the copy that
-    // must succeed). V5.3: the outcome is recorded honestly in the admin report instead of being
-    // assumed; a version is never reported as replicated when the remote write did not happen.
-    const remoteOutcomes = [
-      await this.persistRemoteDocWithStatus('participantBookVersions', versionId, bookVersion),
-      await this.persistRemoteDocWithStatus('interviews', interview.id, interview),
-    ];
+    // V5.3.1 — DURABILITY. In this deployment (Cloud Run) the local snapshot is ephemeral, so the
+    // save is accepted only once Firestore holds the version WITH its audit report (one document,
+    // chunked when large) and the interview with its quota counters. If that cannot be achieved and
+    // the local disk is not declared durable, everything is rolled back (memory, snapshot and any
+    // remote document already written): no version, no quota consumed, no report, and the
+    // participant is asked to retry. Nothing is ever reported as durable when it is not.
+    auditReport.durability = { remoteStatus: 'pending', checkedAt: new Date().toISOString() };
+    const versionRemote = await this.persistBookVersionDurable(versionId);
+    const interviewRemote =
+      versionRemote.status === 'written'
+        ? await this.persistRemoteDocDurable('interviews', interview.id, interview)
+        : { status: 'failed' as const, chunked: false, bytes: 0, chunkCount: 0, error: 'not_attempted' };
+    const remoteDurable = versionRemote.status === 'written' && interviewRemote.status === 'written';
+    if (!remoteDurable && !this.localDiskDurability.durable) {
+      this.participantBookVersions.delete(versionId);
+      this.bookAuditReports.delete(versionId);
+      for (const key of Object.keys(interview) as Array<keyof InterviewRecord>) {
+        if (!(key in previousInterviewState)) delete (interview as any)[key];
+      }
+      Object.assign(interview, previousInterviewState);
+      this.interviews.set(interview.id, interview);
+      this.saveStateToDisk();
+      let remoteVersionRollback: 'not_needed' | 'done' | 'failed' = 'not_needed';
+      let remoteInterviewRestore: 'not_needed' | 'done' | 'failed' = 'not_needed';
+      if (versionRemote.status === 'written') {
+        try {
+          await this.remoteDocStore.deleteDoc('participantBookVersions', versionId);
+          for (let i = 0; i < versionRemote.chunkCount; i++) {
+            await this.remoteDocStore.deleteDoc('participantBookVersions', chunkDocId(versionId, i));
+          }
+          remoteVersionRollback = 'done';
+        } catch {
+          remoteVersionRollback = 'failed';
+        }
+        // The interview write may have landed despite reporting a failure: restore the previous
+        // counters (if Firestore still refuses it, the remote counters were never changed).
+        try {
+          await this.remoteDocStore.setDoc(
+            'interviews',
+            interview.id,
+            this.sanitizeDocForFirestore(interview) as Record<string, unknown>
+          );
+          remoteInterviewRestore = 'done';
+        } catch {
+          remoteInterviewRestore = 'failed';
+        }
+      }
+      await this.addAuditLog('SAVE_BOOK_VERSION_NOT_DURABLE', 'interview', interview.id, participant.name || interview.title, {
+        narrativeStyle: params.narrativeStyle,
+        failureCategory: 'technical',
+        versionRemote: versionRemote.status,
+        interviewRemote: interviewRemote.status,
+        versionBytes: versionRemote.bytes,
+        localDisk: this.localDiskDurability.reason,
+        remoteVersionRollback,
+        remoteInterviewRestore,
+      });
+      throw new Error(
+        'No pudimos guardar tu libro de forma segura en este momento. No se descontó ninguna modificación y tu libro sigue disponible: vuelve a intentarlo en unos minutos.'
+      );
+    }
     auditReport.durability = {
-      remoteStatus: remoteOutcomes.every((o) => o === 'written') ? 'written' : 'local_only',
+      remoteStatus: remoteDurable ? 'written' : 'local_only',
       checkedAt: new Date().toISOString(),
+      durable: true,
+      localDisk: this.localDiskDurability.reason,
+      versionDocument: { status: versionRemote.status, bytes: versionRemote.bytes, chunks: versionRemote.chunkCount },
+      interviewDocument: interviewRemote.status,
     };
     this.markIncidentsCorrectedByVersion(auditReport, bookVersion);
     this.saveStateToDisk();
-    await this.persistRemoteDocWithStatus('bookAuditReports', versionId, auditReport);
 
     await this.addAuditLog(
       hasExistingBook ? 'MODIFY_PARTICIPANT_BOOK_LAYOUT' : 'CREATE_PARTICIPANT_BOOK',
@@ -6487,6 +6644,12 @@ export class StorageManager {
     await this.removeDoc('participantBookVersions', versionId);
     if (synthVersionId !== versionId) {
       await this.removeDoc('participantBookVersions', synthVersionId);
+    }
+    // V5.3.1: chunk documents of a large version (orphan chunks are ignored on load anyway). The
+    // administrative report stays in the server snapshot: history is never deleted with the book.
+    const remoteChunks = this.bookAuditReports.get(versionId)?.durability?.versionDocument?.chunks || 0;
+    for (let i = 0; i < remoteChunks; i++) {
+      await this.removeDoc('participantBookVersions', chunkDocId(versionId, i));
     }
 
     // Also remove any matching manuscript with the same version number so ensureSynthesizedBookVersionsForInterview
