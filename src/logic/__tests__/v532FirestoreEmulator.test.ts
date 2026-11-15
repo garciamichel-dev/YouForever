@@ -291,6 +291,38 @@ test('V5.3.2-E1: el servidor usa el Admin SDK sobre el proyecto y la base de dat
   // Errors keep the browser-SDK codes the existing checks rely on.
   assert.equal(fsAdmin.normalizeFirestoreError({ code: 8, message: 'x' }).code, 'resource-exhausted');
   assert.equal(fsAdmin.normalizeFirestoreError({ code: 7, message: 'x' }).code, 'permission-denied');
+  // Automatic mode: the Admin SDK probe succeeded → admin mode.
+  const status = fsAdmin.getFirestoreModeStatus();
+  assert.equal(status.mode, 'admin');
+  assert.equal(status.requested, 'auto');
+  assert.equal(status.privateRulesSafeToDeploy, true);
+});
+
+test('V5.3.2-S1: clasificación de la sonda: credenciales o permisos → compatibilidad; cuota o caída → Admin SDK', () => {
+  const auth = [
+    new Error('Could not load the default credentials. Browse to https://cloud.google.com/docs/authentication'),
+    Object.assign(new Error('7 PERMISSION_DENIED: Missing or insufficient permissions.'), { code: 7 }),
+    Object.assign(new Error('16 UNAUTHENTICATED'), { code: 16 }),
+    { code: 'permission-denied', message: 'x' },
+  ];
+  for (const e of auth) assert.equal(fsAdmin.isFirestoreAuthorizationError(e), true, String((e as any).message));
+  const notAuth = [
+    Object.assign(new Error('8 RESOURCE_EXHAUSTED: Quota exceeded.'), { code: 8 }),
+    Object.assign(new Error('14 UNAVAILABLE'), { code: 14 }),
+    new Error('probe timeout'),
+  ];
+  for (const e of notAuth) assert.equal(fsAdmin.isFirestoreAuthorizationError(e), false, String(e.message));
+});
+
+test('V5.3.2-S2: ruta de estado solo para administradores verificados', async () => {
+  const anon = await fetch(`${baseUrl}/admin/firestore-status`, { headers: { 'x-admin-user': ADMIN_EMAIL } });
+  assert.equal(anon.status, 401);
+  const res = await fetch(`${baseUrl}/admin/firestore-status`, { headers: { Authorization: `Bearer ${adminToken()}` } });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.data.mode, 'admin');
+  assert.equal(body.data.privateRulesSafeToDeploy, true);
+  assert.equal(body.data.databaseId, 'ai-studio-24473850-0d4d-4247-8313-c0172221b6cb');
 });
 
 test('V5.3.2-E2: guardar un libro escribe versión, informe y cuota en UNA transacción y se recupera tras un reinicio', async () => {
@@ -543,4 +575,36 @@ test('V5.3.2-M1: fotografías y audios: solo el participante de esa historia (o 
   // A verified administrator can see every file.
   const asAdmin = await fetch(`${baseUrl}/photos/${otherPhotoId}`, { headers: { Authorization: `Bearer ${adminToken()}` } });
   assert.equal(asAdmin.status, 200);
+});
+
+test('V5.3.2-C1: modo de compatibilidad (SDK de cliente, como en AI Studio sin permisos IAM): la app sigue funcionando igual', async () => {
+  fsAdmin.configureFirestoreModeForTests('client');
+  try {
+    const status = fsAdmin.getFirestoreModeStatus();
+    assert.equal(status.mode, 'client');
+    assert.equal(status.privateRulesSafeToDeploy, false, 'En este modo no deben publicarse las reglas privadas.');
+    // Same flows as in admin mode: interview, answers, generation, atomic save, quota, report.
+    const { interview, token, style, manuscript } = await generateBook();
+    const saved = await save(storage, token, style, manuscript);
+    const versions = (await remoteVersions(interview.id)).filter((d: any) => !d._chunkOf);
+    assert.equal(versions.length, 1);
+    assert.equal(versions[0].adminAuditReport.identification.versionId, saved.bookVersion.id);
+    const iv = await remoteInterview(interview.id);
+    assert.equal(iv.bookGeneratedCount, 1);
+    assert.equal(iv.quotaRevision, 1);
+    assert.equal((await storage.getBookAuditReport(saved.bookVersion.id)).durability.commit, 'atomic_committed');
+    // Concurrency protection also works with the client SDK transactions.
+    const b = await newInstance();
+    const again = await Promise.allSettled([
+      save(storage, token, style, manuscript, 'portada_a'),
+      save(b, token, style, manuscript, 'portada_b'),
+    ]);
+    assert.equal(again.filter((r) => r.status === 'fulfilled').length, 1, JSON.stringify(again.map((r) => r.status)));
+    assert.equal((await remoteInterview(interview.id)).quotaRevision, 2);
+    // Telemetry increments and counts go through the same adapter.
+    const count = await fsAdmin.getCountFromServer(fsAdmin.query(fsAdmin.collection(fsAdmin.getServerFirestore(), 'answers'), fsAdmin.where('interviewId', '==', interview.id)));
+    assert.ok(count.data().count >= 5);
+  } finally {
+    fsAdmin.configureFirestoreModeForTests('admin');
+  }
 });

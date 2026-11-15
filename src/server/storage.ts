@@ -296,7 +296,7 @@ const firestoreRemoteDocStore: StorageRemoteDocStore = {
       // V5.3.2: an interview written by an instance with an older quota view must never roll back
       // the quota counters committed by another instance (lost update). Fields other than the quota
       // keep last-writer-wins semantics, exactly as before.
-      const ref: FirebaseFirestore.DocumentReference = doc(serverDb, collectionName, docId);
+      const ref = doc(serverDb, collectionName, docId);
       await runTransaction(serverDb, async (tx) => {
         const remote = (await tx.get(ref)).data() as Record<string, any> | undefined;
         const payload: Record<string, any> = { ...data };
@@ -314,25 +314,25 @@ const firestoreRemoteDocStore: StorageRemoteDocStore = {
     await firestoreTelemetry.trackedSetDoc(serverDb, doc(serverDb, collectionName, docId), data, 'storage');
   },
   async commitBookVersion(request) {
-    const versionsRef = (id: string): FirebaseFirestore.DocumentReference => doc(serverDb, 'participantBookVersions', id);
+    const versionsRef = (id: string) => doc(serverDb, 'participantBookVersions', id);
     for (const chunk of request.chunkDocs) {
       await firestoreTelemetry.trackedSetDoc(serverDb, versionsRef(chunk.id), chunk.data, 'storage');
     }
-    const interviewRef: FirebaseFirestore.DocumentReference = doc(serverDb, 'interviews', request.interviewId);
+    const interviewRef = doc(serverDb, 'interviews', request.interviewId);
     const result = await runTransaction<BookVersionCommitResult>(serverDb, async (tx) => {
       const remoteSnap = await tx.get(interviewRef);
-      const remote = remoteSnap.exists ? (remoteSnap.data() as Record<string, any>) : null;
+      const remote = remoteSnap.exists() ? (remoteSnap.data() as Record<string, any>) : null;
       const decision = evaluateBookCommitPrecondition(remote, request);
       if (decision === 'already_committed') {
         const committedId = String(remote!.lastBookSaveVersionId || request.versionId);
         const manifest = await tx.get(versionsRef(committedId));
         const versionDocs: Record<string, unknown>[] = [];
-        if (manifest.exists) {
+        if (manifest.exists()) {
           const data = manifest.data() as Record<string, any>;
           versionDocs.push(data);
           for (let i = 0; i < (Number(data._chunkCount) || 0); i++) {
             const part = await tx.get(versionsRef(chunkDocId(committedId, i)));
-            if (part.exists) versionDocs.push(part.data() as Record<string, unknown>);
+            if (part.exists()) versionDocs.push(part.data() as Record<string, unknown>);
           }
         }
         return { status: 'already_committed', versionId: committedId, versionDocs, interviewDoc: remote! };

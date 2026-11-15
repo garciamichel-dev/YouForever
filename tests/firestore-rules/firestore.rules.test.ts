@@ -4,7 +4,7 @@
  * Run with:  npm run test:rules
  * (= firebase emulators:exec --only firestore … ; needs Java and the Firestore emulator download).
  *
- * These tests evaluate `firestore.rules` exactly as Cloud Firestore would. The "server" case uses
+ * These tests evaluate the private rules (`firestore.private.rules`) exactly as Cloud Firestore would. The "server" case uses
  * `withSecurityRulesDisabled`, which is how the Firebase Admin SDK (service identity) behaves: it is
  * authorized by IAM, not by rules.
  */
@@ -73,7 +73,7 @@ before(async () => {
   env = await initializeTestEnvironment({
     projectId: PROJECT_ID,
     firestore: {
-      rules: fs.readFileSync(path.join(REPO_ROOT, 'firestore.rules'), 'utf8'),
+      rules: fs.readFileSync(path.join(REPO_ROOT, 'firestore.private.rules'), 'utf8'),
       host,
       port: Number(port),
     },

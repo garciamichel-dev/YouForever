@@ -1,38 +1,229 @@
 rules_version = '2';
-
-// =================================================================================================
-// YouForever — V5.3.2 PRIVATE RULES (deny by default)
-//
-// Every read and write of YouForever data is performed by the Node.js server through the Firebase
-// Admin SDK with the Cloud Run service identity, which is authorized by IAM and is NOT subject to
-// these rules. Browsers never read or write application data directly: they talk to the server API,
-// which authenticates participants (access codes) and administrators (verified Firebase ID tokens).
-//
-// Therefore no public client — anonymous, signed in with any account, or claiming to be an
-// administrator through an e-mail address — may read or write any collection. In particular:
-// interviews, participants, interviewTokens, answers, questions, questionnaireVersions,
-// participantBookVersions (books + private audit reports, including chunked documents),
-// interviewPhotos, interviewAudio, manuscripts, auditLogs, privacyConsents, arcoRequests,
-// secondaryAccess, scheduledDeliveries, postMortemInstructions, bookShares, settings, admins and
-// every mi_esencia_* collection. Clients cannot create documents in administrative collections
-// (e.g. `admins`) to forge an authorization either.
-//
-// The only exception is the empty connectivity probe `test/connection`, which the web client reads
-// on start-up (a denied read is tolerated too). It never contains data and cannot be written.
-//
-// DEPLOY ONLY AFTER the server runs with the Admin SDK and a service account (see
-// docs/V5.3.2-despliegue-firestore.md). Previous public rules: `git show 8de522b:firestore.rules`.
-// =================================================================================================
 service cloud.firestore {
   match /databases/{database}/documents {
-
-    match /test/connection {
-      allow get: if true;
-      allow list, create, update, delete: if false;
+    function isSignedIn() {
+      return request.auth != null;
     }
 
-    match /{document=**} {
-      allow read, write: if false;
+    function isAdmin() {
+      return isSignedIn() && (
+        ((request.auth.token.email == "garcia.michel@gmail.com" || request.auth.token.email == "youforever.team@gmail.com") && request.auth.token.email_verified == true) ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128;
+    }
+
+    match /test/{docId} {
+      allow read, write: if true;
+    }
+
+    match /admins/{adminId} {
+      allow read: if true;
+      allow write: if isValidId(adminId);
+    }
+
+    match /settings/{settingId} {
+      allow read: if true;
+      allow write: if isValidId(settingId);
+    }
+
+    match /questions/{questionId} {
+      allow read: if true;
+      allow create, update: if isValidId(questionId) && request.resource.data.text is string;
+      allow delete: if isValidId(questionId);
+    }
+
+    match /questionnaireVersions/{versionId} {
+      allow read: if true;
+      allow write: if isValidId(versionId);
+    }
+
+    match /interviews/{interviewId} {
+      allow read: if true;
+      allow create, update: if isValidId(interviewId) && request.resource.data.title is string;
+      allow delete: if isValidId(interviewId);
+    }
+
+    match /participants/{participantId} {
+      allow read: if true;
+      allow create, update: if isValidId(participantId) && request.resource.data.interviewId is string;
+      allow delete: if isValidId(participantId);
+    }
+
+    match /interviewTokens/{tokenId} {
+      allow read: if true;
+      allow create, update: if isValidId(tokenId) && request.resource.data.tokenHash is string;
+      allow delete: if isValidId(tokenId);
+    }
+
+    match /answers/{answerId} {
+      allow read: if true;
+      allow create, update: if isValidId(answerId) && request.resource.data.interviewId is string;
+      allow delete: if isValidId(answerId);
+    }
+
+    match /interviewPhotos/{photoId} {
+      allow read: if true;
+      allow create, update: if isValidId(photoId) && request.resource.data.interviewId is string;
+      allow delete: if isValidId(photoId);
+    }
+
+    match /interviewAudio/{audioId} {
+      allow read: if true;
+      allow create, update: if isValidId(audioId) && request.resource.data.interviewId is string;
+      allow delete: if isValidId(audioId);
+    }
+
+    match /manuscripts/{manuscriptId} {
+      allow read: if true;
+      allow create, update: if isValidId(manuscriptId) && request.resource.data.interviewId is string;
+      allow delete: if isValidId(manuscriptId);
+    }
+
+    match /auditLogs/{logId} {
+      allow read: if true;
+      allow write: if isValidId(logId) && request.resource.data.action is string;
+    }
+
+    match /privacyConsents/{consentId} {
+      allow read: if true;
+      allow create, update: if isValidId(consentId) && request.resource.data.interviewId is string;
+      allow delete: if isValidId(consentId);
+    }
+
+    match /bookShares/{shareId} {
+      allow read: if true;
+      allow create, update: if isValidId(shareId) && request.resource.data.interviewId is string;
+      allow delete: if isValidId(shareId);
+    }
+
+    match /scheduledDeliveries/{deliveryId} {
+      allow read: if true;
+      allow create, update: if isValidId(deliveryId) && request.resource.data.interviewId is string;
+      allow delete: if isValidId(deliveryId);
+    }
+
+    match /secondaryAccess/{accessId} {
+      allow read: if true;
+      allow create, update: if isValidId(accessId) && request.resource.data.interviewId is string;
+      allow delete: if isValidId(accessId);
+    }
+
+    match /postMortemInstructions/{instructionId} {
+      allow read: if true;
+      allow create, update: if isValidId(instructionId) && request.resource.data.interviewId is string;
+      allow delete: if isValidId(instructionId);
+    }
+
+    match /arcoRequests/{requestId} {
+      allow read: if true;
+      allow create, update: if isValidId(requestId) && request.resource.data.interviewId is string;
+      allow delete: if isValidId(requestId);
+    }
+
+    match /participantBookVersions/{versionId} {
+      allow read: if true;
+      allow create, update: if isValidId(versionId) && request.resource.data.interviewId is string;
+      allow delete: if isValidId(versionId);
+    }
+
+    match /mi_esencia_config/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /mi_esencia_plans/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /mi_esencia_subscriptions/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /mi_esencia_persons/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /mi_esencia_pdfs/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /mi_esencia_testimonies/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /mi_esencia_relations/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /mi_esencia_interlocutors/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /mi_esencia_credentials/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /mi_esencia_memories/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /mi_esencia_contradictions/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /mi_esencia_payments/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /mi_esencia_coupons/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /mi_esencia_snapshots/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /mi_esencia_conversations/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /mi_esencia_notifications/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /mi_esencia_prompt_library/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /mi_esencia_prompt_versions/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /mi_esencia_fallback_logs/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
     }
   }
 }
+

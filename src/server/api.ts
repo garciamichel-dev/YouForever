@@ -53,6 +53,7 @@ import {
   verifyFirebaseIdToken,
 } from './adminAuth.ts';
 import { toParticipantAuditLogView } from './participantViews.ts';
+import { ensureFirestoreMode } from './firestoreAdmin.ts';
 
 export const apiRouter: Router = express.Router();
 apiRouter.use(express.json({ limit: '100mb' }));
@@ -198,6 +199,27 @@ apiRouter.post('/auth/admin-session', async (req: Request, res: Response) => {
     res.json({ success: true, data: { isAdmin: true, adminEmail: identity.email } });
   } catch {
     res.status(401).json({ success: false, error: ADMIN_UNAUTHORIZED_MESSAGE });
+  }
+});
+
+// V5.3.2: which SDK the server uses to reach Firestore. `privateRulesSafeToDeploy` must be true
+// before publishing the private firestore.rules (see docs/V5.3.2-despliegue-firestore.md).
+apiRouter.get('/admin/firestore-status', requireAdmin, async (_req: Request, res: Response) => {
+  try {
+    const status = await ensureFirestoreMode();
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({
+      success: true,
+      data: {
+        ...status,
+        guidance:
+          status.mode === 'admin'
+            ? 'El servidor usa su identidad de servicio (Admin SDK). Se pueden publicar las reglas privadas siguiendo el procedimiento por etapas.'
+            : 'El servidor usa el modo de compatibilidad (SDK de cliente). NO publiques las reglas privadas: primero concede a la identidad de servicio el rol roles/datastore.user sobre la base de datos y reinicia el servicio.',
+      },
+    });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: (err as Error).message });
   }
 });
 
