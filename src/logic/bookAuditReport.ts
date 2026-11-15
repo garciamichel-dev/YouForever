@@ -153,6 +153,8 @@ export interface BookAuditReport {
     localDisk?: string;
     versionDocument?: { status: string; bytes: number; chunks: number };
     interviewDocument?: string;
+    /** V5.3.2: `atomic_committed` = version, report and quota written in one Firestore transaction. */
+    commit?: string;
   };
 }
 

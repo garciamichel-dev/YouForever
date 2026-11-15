@@ -250,6 +250,62 @@ export function buildAdminSessionCookie(value: string, secure: boolean, maxAgeSe
 }
 
 // ------------------------------------------------------------------------------------------------
+// V5.3.2 — Participant media access cookie
+// ------------------------------------------------------------------------------------------------
+/**
+ * Photos and voice recordings are referenced by URL (`/api/photos/<id>`, `/api/audio/<id>`) inside
+ * answers, manuscripts and books, and are loaded by `<img>`, `<audio>` and the PDF composer, which
+ * cannot send custom headers. When a participant (or a relative using the participant's code)
+ * opens a session with a valid access code, the server issues this HttpOnly cookie listing the
+ * interviews that browser may see. It is signed (HMAC-SHA256, separate from the admin session) and
+ * expires; it grants READ access to that interview's media only.
+ */
+export const MEDIA_ACCESS_COOKIE = 'yf_media_access';
+export const MEDIA_ACCESS_TTL_SECONDS = 12 * 60 * 60;
+const MEDIA_ACCESS_MAX_INTERVIEWS = 10;
+
+const mediaMac = (body: string) =>
+  b64urlEncode(crypto.createHmac('sha256', sessionSecret()).update(`media:${body}`).digest());
+
+export function verifyMediaAccessCookieValue(value: string | null | undefined): string[] {
+  const [body, mac, extra] = String(value || '').split('.');
+  if (!body || !mac || extra !== undefined) return [];
+  const expected = b64urlDecode(mediaMac(body));
+  const given = b64urlDecode(mac);
+  if (given.length !== expected.length || !crypto.timingSafeEqual(given, expected)) return [];
+  try {
+    const payload = JSON.parse(b64urlDecode(body).toString('utf8'));
+    if (payload?.v !== 1 || !Array.isArray(payload.interviews)) return [];
+    if (typeof payload.exp !== 'number' || payload.exp <= nowSeconds()) return [];
+    return payload.interviews.filter((id: unknown): id is string => typeof id === 'string' && id.length > 0);
+  } catch {
+    return [];
+  }
+}
+
+/** New cookie value granting `interviewId`, keeping the (still valid) interviews already granted. */
+export function issueMediaAccessCookieValue(interviewId: string, existingValue?: string | null): string {
+  const previous = verifyMediaAccessCookieValue(existingValue).filter((id) => id !== interviewId);
+  const interviews = [interviewId, ...previous].slice(0, MEDIA_ACCESS_MAX_INTERVIEWS);
+  const body = b64urlEncode(
+    Buffer.from(JSON.stringify({ v: 1, interviews, exp: nowSeconds() + MEDIA_ACCESS_TTL_SECONDS }), 'utf8')
+  );
+  return `${body}.${mediaMac(body)}`;
+}
+
+export function buildMediaAccessCookie(value: string, secure: boolean, maxAgeSeconds = MEDIA_ACCESS_TTL_SECONDS): string {
+  const base = `${MEDIA_ACCESS_COOKIE}=${encodeURIComponent(value)}; Path=/api; HttpOnly; Max-Age=${maxAgeSeconds}`;
+  return secure ? `${base}; Secure; SameSite=None; Partitioned` : `${base}; SameSite=Lax`;
+}
+
+export function mediaAccessInterviewsFromRequest(req: AdminAuthRequestLike): string[] {
+  const cookieHeader = req.headers['cookie'];
+  return verifyMediaAccessCookieValue(
+    readCookie(typeof cookieHeader === 'string' ? cookieHeader : undefined, MEDIA_ACCESS_COOKIE)
+  );
+}
+
+// ------------------------------------------------------------------------------------------------
 // Request authentication
 // ------------------------------------------------------------------------------------------------
 export interface AdminAuthRequestLike {

@@ -2,13 +2,8 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { GoogleGenAI } from '@google/genai';
-import { initializeApp, getApps, getApp } from 'firebase/app';
-import {
-  getFirestore,
-  collection,
-  doc,
-} from 'firebase/firestore';
-import firebaseConfig from '../../../firebase-applet-config.json';
+// V5.3.2: server access through the Firebase Admin SDK (service identity, see firestoreAdmin.ts).
+import { getServerFirestore, collection, doc } from '../firestoreAdmin.ts';
 import { storage } from '../storage.ts';
 import { firestoreTelemetry } from '../firestoreTelemetry.ts';
 import { generateQACompilationMarkdown } from '../backupService.ts';
@@ -89,8 +84,7 @@ import {
   testLiveProviderConnection,
 } from './miEsenciaAiOrchestrator.ts';
 
-const firebaseApp = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
-const serverDb = getFirestore(firebaseApp, firebaseConfig.firestoreDatabaseId);
+const serverDb = getServerFirestore();
 
 function getGeminiClient(): GoogleGenAI | null {
   const apiKey = process.env.GEMINI_API_KEY;

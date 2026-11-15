@@ -1,17 +1,19 @@
 import fs from 'fs';
 import path from 'path';
 import zlib from 'zlib';
-import { initializeApp, getApps, getApp } from 'firebase/app';
+// V5.3.2: the server reaches Firestore only through the Firebase Admin SDK with its service
+// identity (Application Default Credentials). See firestoreAdmin.ts.
 import {
-  getFirestore,
+  getServerFirestore,
   collection,
   doc,
   getDocs,
   query,
   where,
   setLogLevel,
-} from 'firebase/firestore';
-import firebaseConfig from '../../firebase-applet-config.json';
+  runTransaction,
+} from './firestoreAdmin.ts';
+import { createHash as sha256Hash } from 'node:crypto';
 import { firestoreTelemetry } from './firestoreTelemetry.ts';
 import {
   detectChangedInterviewIds,
@@ -164,8 +166,7 @@ try {
   // Ignore in case setLogLevel is not supported in current environment
 }
 
-const firebaseApp = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
-export const serverDb = getFirestore(firebaseApp, firebaseConfig.firestoreDatabaseId);
+export const serverDb = getServerFirestore();
 
 function sanitizeForFirestore<T>(obj: T): T {
   return JSON.parse(JSON.stringify(obj));
@@ -218,11 +219,138 @@ export interface StorageRemoteDocStore {
   deleteDoc(collectionName: string, docId: string): Promise<void>;
   /** V5.3: single-document read (used to recover an audit report not held in memory). */
   getDoc?(collectionName: string, docId: string): Promise<Record<string, unknown> | null>;
+  /**
+   * V5.3.2 — Atomic commit of a book version with the interview quota counters (one Firestore
+   * transaction). Optimistic concurrency on `quotaRevision` / counters prevents duplicate versions
+   * and double quota consumption across instances; `saveKey` makes a retry idempotent.
+   */
+  commitBookVersion?(request: BookVersionCommitRequest): Promise<BookVersionCommitResult>;
 }
+
+/** V5.3.2 — Quota fields guarded across instances. */
+export type QuotaTrackedInterview = InterviewRecord & {
+  quotaRevision?: number;
+  lastBookSaveKey?: string;
+  lastBookSaveVersionId?: string;
+  /** Highest version number ever committed for this interview (never reused, even after deletes). */
+  lastBookVersionNumber?: number;
+};
+
+export interface BookVersionCommitRequest {
+  interviewId: string;
+  versionId: string;
+  saveKey: string;
+  /** Quota state this save was computed from (local view before the save). */
+  expected: { quotaRevision: number; bookGeneratedCount: number; layoutEditsUsed: number };
+  interviewDoc: Record<string, unknown>;
+  /** Single version document, or the manifest of a chunked one. */
+  versionDoc: Record<string, unknown>;
+  /** Chunk documents (written BEFORE the transaction: inert until their manifest exists). */
+  chunkDocs: Array<{ id: string; data: Record<string, unknown> }>;
+}
+
+export type BookVersionCommitResult =
+  | { status: 'committed' }
+  | {
+      status: 'already_committed';
+      versionId: string;
+      versionDocs: Record<string, unknown>[];
+      interviewDoc: Record<string, unknown>;
+    }
+  | { status: 'conflict'; interviewDoc: Record<string, unknown> | null };
+
+/**
+ * V5.3.2 — Decides, from the REMOTE interview document, whether a book commit may proceed.
+ * Exported for tests. Remote ahead of the local view (another instance saved or an administrator
+ * restored quota in between) → conflict. Remote behind (an earlier best-effort write was lost) →
+ * proceed: this commit writes the newer state.
+ */
+export function evaluateBookCommitPrecondition(
+  remote: Record<string, any> | null,
+  request: Pick<BookVersionCommitRequest, 'saveKey' | 'expected'>
+): 'already_committed' | 'conflict' | 'proceed' {
+  if (!remote) return 'proceed';
+  if (remote.lastBookSaveKey && remote.lastBookSaveKey === request.saveKey) return 'already_committed';
+  const remoteRevision = Number(remote.quotaRevision ?? 0) || 0;
+  if (remoteRevision > request.expected.quotaRevision) return 'conflict';
+  if (remoteRevision === request.expected.quotaRevision) {
+    if ((Number(remote.bookGeneratedCount ?? 0) || 0) > request.expected.bookGeneratedCount) return 'conflict';
+    if ((Number(remote.layoutEditsUsed ?? 0) || 0) > request.expected.layoutEditsUsed) return 'conflict';
+  }
+  return 'proceed';
+}
+
+/** Quota fields only the book commit / admin quota actions may change (see quotaRevision). */
+const GUARDED_QUOTA_FIELDS = [
+  'bookGeneratedCount',
+  'layoutEditsUsed',
+  'quotaRevision',
+  'lastBookSaveKey',
+  'lastBookSaveVersionId',
+  'lastBookVersionNumber',
+];
 
 const firestoreRemoteDocStore: StorageRemoteDocStore = {
   async setDoc(collectionName, docId, data) {
+    if (collectionName === 'interviews') {
+      // V5.3.2: an interview written by an instance with an older quota view must never roll back
+      // the quota counters committed by another instance (lost update). Fields other than the quota
+      // keep last-writer-wins semantics, exactly as before.
+      const ref: FirebaseFirestore.DocumentReference = doc(serverDb, collectionName, docId);
+      await runTransaction(serverDb, async (tx) => {
+        const remote = (await tx.get(ref)).data() as Record<string, any> | undefined;
+        const payload: Record<string, any> = { ...data };
+        if (remote && (Number(remote.quotaRevision ?? 0) || 0) > (Number(payload.quotaRevision ?? 0) || 0)) {
+          for (const field of GUARDED_QUOTA_FIELDS) {
+            if (remote[field] === undefined) delete payload[field];
+            else payload[field] = remote[field];
+          }
+        }
+        tx.set(ref, payload);
+      });
+      firestoreTelemetry.recordWrites('storage', 1, serverDb);
+      return;
+    }
     await firestoreTelemetry.trackedSetDoc(serverDb, doc(serverDb, collectionName, docId), data, 'storage');
+  },
+  async commitBookVersion(request) {
+    const versionsRef = (id: string): FirebaseFirestore.DocumentReference => doc(serverDb, 'participantBookVersions', id);
+    for (const chunk of request.chunkDocs) {
+      await firestoreTelemetry.trackedSetDoc(serverDb, versionsRef(chunk.id), chunk.data, 'storage');
+    }
+    const interviewRef: FirebaseFirestore.DocumentReference = doc(serverDb, 'interviews', request.interviewId);
+    const result = await runTransaction<BookVersionCommitResult>(serverDb, async (tx) => {
+      const remoteSnap = await tx.get(interviewRef);
+      const remote = remoteSnap.exists ? (remoteSnap.data() as Record<string, any>) : null;
+      const decision = evaluateBookCommitPrecondition(remote, request);
+      if (decision === 'already_committed') {
+        const committedId = String(remote!.lastBookSaveVersionId || request.versionId);
+        const manifest = await tx.get(versionsRef(committedId));
+        const versionDocs: Record<string, unknown>[] = [];
+        if (manifest.exists) {
+          const data = manifest.data() as Record<string, any>;
+          versionDocs.push(data);
+          for (let i = 0; i < (Number(data._chunkCount) || 0); i++) {
+            const part = await tx.get(versionsRef(chunkDocId(committedId, i)));
+            if (part.exists) versionDocs.push(part.data() as Record<string, unknown>);
+          }
+        }
+        return { status: 'already_committed', versionId: committedId, versionDocs, interviewDoc: remote! };
+      }
+      if (decision === 'conflict') return { status: 'conflict', interviewDoc: remote };
+      tx.set(versionsRef(request.versionId), request.versionDoc);
+      tx.set(interviewRef, request.interviewDoc);
+      return { status: 'committed' };
+    });
+    if (result.status !== 'committed') {
+      // Chunks written for a commit that did not happen are inert; remove them (best effort).
+      for (const chunk of request.chunkDocs) {
+        await firestoreTelemetry.trackedDeleteDoc(serverDb, versionsRef(chunk.id), 'storage').catch(() => undefined);
+      }
+    } else {
+      firestoreTelemetry.recordWrites('storage', 2, serverDb);
+    }
+    return result;
   },
   async getDoc(collectionName, docId) {
     const snap = await firestoreTelemetry.trackedGetDoc(serverDb, doc(serverDb, collectionName, docId), 'storage');
@@ -791,6 +919,29 @@ export class StorageManager {
       ...version,
       ...(report ? { adminAuditReport: report } : {}),
     });
+  }
+
+  /**
+   * V5.3.2 — Remote documents of a book version (with its embedded report) as written by the atomic
+   * commit: one document, or a manifest plus chunk documents above the preventive 800 KB limit.
+   */
+  private planBookVersionRemoteDocs(versionId: string): {
+    versionDoc: Record<string, unknown>;
+    chunkDocs: Array<{ id: string; data: Record<string, unknown> }>;
+    bytes: number;
+  } {
+    const version = this.participantBookVersions.get(versionId);
+    const report = this.bookAuditReports.get(versionId);
+    const sanitized = this.sanitizeDocForFirestore({
+      ...version,
+      ...(report ? { adminAuditReport: report } : {}),
+    }) as Record<string, unknown>;
+    sanitized._syncedAt = new Date().toISOString();
+    const json = JSON.stringify(sanitized);
+    const bytes = Buffer.byteLength(json, 'utf8');
+    if (bytes <= FIRESTORE_SAFE_DOC_BYTES) return { versionDoc: sanitized, chunkDocs: [], bytes };
+    const plan = planChunkedDoc(versionId, json, { interviewId: sanitized.interviewId });
+    return { versionDoc: plan.manifest, chunkDocs: plan.chunks, bytes };
   }
 
   /**
@@ -4460,6 +4611,37 @@ export class StorageManager {
     return undefined;
   }
 
+  /**
+   * V5.3.2 — Interview that owns a photo or a voice recording (used to authorize `/api/photos/:id`
+   * and `/api/audio/:id`). Looks at the media records, then at the answers that embed them, then at
+   * Firestore. Unknown owner → null (access is then restricted to administrators).
+   */
+  public async resolveMediaInterviewId(kind: 'photo' | 'audio', mediaId: string): Promise<string | null> {
+    if (!mediaId) return null;
+    if (kind === 'photo') {
+      const photo = this.photos.get(mediaId);
+      if (photo?.interviewId) return photo.interviewId;
+      for (const answer of this.answers.values()) {
+        if ((answer.photos || []).some((p) => p?.id === mediaId)) return answer.interviewId;
+      }
+      for (const version of this.participantBookVersions.values()) {
+        const refs = [version.coverPhoto, ...Object.values(version.chapterPhotos || {})] as Array<{ id?: string } | null>;
+        if (refs.some((p) => p?.id === mediaId)) return version.interviewId;
+      }
+      const remote = await this.getPhotoByIdAsync(mediaId).catch(() => undefined);
+      return remote?.interviewId || null;
+    }
+    const audio = this.audios.get(mediaId);
+    if (audio?.interviewId) return audio.interviewId;
+    for (const answer of this.answers.values()) {
+      if (answer.audio?.id === mediaId || (answer.audioRecordings || []).some((a) => a?.id === mediaId)) {
+        return answer.interviewId;
+      }
+    }
+    const remote = await this.getAudioByIdAsync(mediaId).catch(() => undefined);
+    return remote?.interviewId || null;
+  }
+
   public getAudiosForInterview(interviewId: string): InterviewAudioRecord[] {
     return Array.from(this.audios.values())
       .filter((a) => a.interviewId === interviewId)
@@ -6397,7 +6579,13 @@ export class StorageManager {
         (max, v) => (v.versionNumber > max ? v.versionNumber : max),
         0
       );
-      const versionNumber = maxExistingVersion + 1;
+      // V5.3.2: right after a restart the versions may still be loading in the background, but the
+      // interview (core phase) carries the last committed version number → never a duplicate number.
+      const versionNumber =
+        Math.max(
+          maxExistingVersion,
+          Number((interview as QuotaTrackedInterview).lastBookVersionNumber ?? 0) || 0
+        ) + 1;
       const versionId = `pbv_${interview.id}_v${versionNumber}_${Date.now()}`;
     const baseFilename = buildSafeDemoPdfFilename(
       {
@@ -6477,6 +6665,34 @@ export class StorageManager {
     }
     nextInterview.lastActivityAt = new Date().toISOString();
 
+    // V5.3.2 — Cross-instance consistency. Every quota-affecting change bumps `quotaRevision`; the
+    // remote commit only succeeds if no other instance changed the quota since this view was taken.
+    // `saveKey` identifies THIS save request, so a retry after a timeout (whose commit may have
+    // landed late) returns the committed version instead of creating a duplicate.
+    const previousQuota = previousInterviewState as QuotaTrackedInterview;
+    const expectedQuota = {
+      quotaRevision: Number(previousQuota.quotaRevision ?? 0) || 0,
+      bookGeneratedCount: Number(previousInterviewState.bookGeneratedCount ?? 0) || 0,
+      layoutEditsUsed: Number(previousInterviewState.layoutEditsUsed ?? 0) || 0,
+    };
+    const saveKey = sha256Hash('sha256')
+      .update(
+        JSON.stringify([
+          interview.id,
+          params.narrativeStyle,
+          computeManuscriptContentHash(auditedForSave.manuscript),
+          params.editorialConfig,
+          normalizedCoverPhoto?.id || null,
+          Object.entries(normalizedChapterPhotos).map(([chapterId, photo]) => [chapterId, photo?.id || null]),
+        ])
+      )
+      .digest('hex');
+    const trackedNext = nextInterview as QuotaTrackedInterview;
+    trackedNext.quotaRevision = expectedQuota.quotaRevision + 1;
+    trackedNext.lastBookSaveKey = saveKey;
+    trackedNext.lastBookSaveVersionId = versionId;
+    trackedNext.lastBookVersionNumber = versionNumber;
+
     this.participantBookVersions.set(versionId, bookVersion);
     this.bookAuditReports.set(versionId, auditReport);
     Object.assign(interview, nextInterview);
@@ -6509,11 +6725,104 @@ export class StorageManager {
     // remote document already written): no version, no quota consumed, no report, and the
     // participant is asked to retry. Nothing is ever reported as durable when it is not.
     auditReport.durability = { remoteStatus: 'pending', checkedAt: new Date().toISOString() };
-    const versionRemote = await this.persistBookVersionDurable(versionId);
-    const interviewRemote =
-      versionRemote.status === 'written'
-        ? await this.persistRemoteDocDurable('interviews', interview.id, interview)
-        : { status: 'failed' as const, chunked: false, bytes: 0, chunkCount: 0, error: 'not_attempted' };
+    let versionRemote: { status: 'written' | 'failed'; chunked: boolean; bytes: number; chunkCount: number; error?: string };
+    let interviewRemote: { status: 'written' | 'failed'; error?: string };
+    let commitOutcome: 'atomic_committed' | 'sequential' | 'conflict' | 'failed' = 'sequential';
+    if (this.remoteDocStore.commitBookVersion) {
+      // V5.3.2 — ONE Firestore transaction: version (+ report) and interview counters together.
+      const plan = this.planBookVersionRemoteDocs(versionId);
+      const request: BookVersionCommitRequest = {
+        interviewId: interview.id,
+        versionId,
+        saveKey,
+        expected: expectedQuota,
+        interviewDoc: this.sanitizeDocForFirestore(interview) as Record<string, unknown>,
+        versionDoc: plan.versionDoc,
+        chunkDocs: plan.chunkDocs,
+      };
+      let commit: BookVersionCommitResult | null = null;
+      let commitError = '';
+      for (let attempt = 0; attempt < 2 && !commit; attempt++) {
+        try {
+          // A retry after an uncertain failure (timeout, unavailable) is safe: if the first attempt
+          // committed late, the retry sees `saveKey` and reports `already_committed`.
+          commit = await Promise.race([
+            this.remoteDocStore.commitBookVersion(request),
+            new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Firestore commit timed out')), 15000)),
+          ]);
+        } catch (err: any) {
+          commitError = String(err?.message || err);
+        }
+      }
+      const rollbackLocal = () => {
+        this.participantBookVersions.delete(versionId);
+        this.bookAuditReports.delete(versionId);
+        for (const key of Object.keys(interview) as Array<keyof InterviewRecord>) {
+          if (!(key in previousInterviewState)) delete (interview as any)[key];
+        }
+        Object.assign(interview, previousInterviewState);
+        this.interviews.set(interview.id, interview);
+      };
+      if (commit?.status === 'already_committed') {
+        // The same save had already been committed (late write or concurrent duplicate request):
+        // adopt the committed version and counters; nothing new is created or charged.
+        rollbackLocal();
+        this.ingestRemoteBookVersionDocs(commit.versionDocs);
+        for (const field of GUARDED_QUOTA_FIELDS) {
+          if ((commit.interviewDoc as any)[field] !== undefined) (interview as any)[field] = (commit.interviewDoc as any)[field];
+        }
+        this.interviews.set(interview.id, interview);
+        this.saveStateToDisk();
+        const committed = this.participantBookVersions.get(commit.versionId);
+        await this.addAuditLog('SAVE_BOOK_VERSION_IDEMPOTENT_REPLAY', 'participantBookVersion', commit.versionId, participant.name, {
+          interviewId: interview.id,
+        });
+        if (!committed) {
+          throw new Error('Tu libro ya se había guardado. Actualiza la página para verlo.');
+        }
+        return {
+          bookVersion: this.hydrateBookVersionPhotos(committed),
+          interview,
+          allVersions: this.getBookVersionsForInterview(interview.id),
+        };
+      }
+      if (commit?.status === 'conflict') {
+        rollbackLocal();
+        // Adopt the newer remote quota so the next attempt is evaluated against it.
+        if (commit.interviewDoc) {
+          for (const field of GUARDED_QUOTA_FIELDS) {
+            if ((commit.interviewDoc as any)[field] !== undefined) (interview as any)[field] = (commit.interviewDoc as any)[field];
+          }
+          this.interviews.set(interview.id, interview);
+        }
+        this.saveStateToDisk();
+        void this.syncFromFirestore(true).catch(() => undefined);
+        await this.addAuditLog('SAVE_BOOK_VERSION_CONCURRENT_CONFLICT', 'interview', interview.id, participant.name || interview.title, {
+          narrativeStyle: params.narrativeStyle,
+          failureCategory: 'technical',
+          expectedQuotaRevision: expectedQuota.quotaRevision,
+          remoteQuotaRevision: (commit.interviewDoc as any)?.quotaRevision ?? null,
+        });
+        throw new Error(
+          'Tu libro se estaba guardando al mismo tiempo desde otra sesión. No se descontó ninguna modificación adicional: actualiza la página y revisa tus versiones antes de volver a intentarlo.'
+        );
+      }
+      commitOutcome = commit?.status === 'committed' ? 'atomic_committed' : 'failed';
+      versionRemote = {
+        status: commit?.status === 'committed' ? 'written' : 'failed',
+        chunked: plan.chunkDocs.length > 0,
+        bytes: plan.bytes,
+        chunkCount: plan.chunkDocs.length,
+        error: commit ? undefined : commitError,
+      };
+      interviewRemote = { status: versionRemote.status, error: versionRemote.error };
+    } else {
+      versionRemote = await this.persistBookVersionDurable(versionId);
+      interviewRemote =
+        versionRemote.status === 'written'
+          ? await this.persistRemoteDocDurable('interviews', interview.id, interview)
+          : { status: 'failed' as const, error: 'not_attempted' };
+    }
     const remoteDurable = versionRemote.status === 'written' && interviewRemote.status === 'written';
     if (!remoteDurable && !this.localDiskDurability.durable) {
       this.participantBookVersions.delete(versionId);
@@ -6558,6 +6867,8 @@ export class StorageManager {
         localDisk: this.localDiskDurability.reason,
         remoteVersionRollback,
         remoteInterviewRestore,
+        commitOutcome,
+        commitError: versionRemote.error || null,
       });
       throw new Error(
         'No pudimos guardar tu libro de forma segura en este momento. No se descontó ninguna modificación y tu libro sigue disponible: vuelve a intentarlo en unos minutos.'
@@ -6570,6 +6881,7 @@ export class StorageManager {
       localDisk: this.localDiskDurability.reason,
       versionDocument: { status: versionRemote.status, bytes: versionRemote.bytes, chunks: versionRemote.chunkCount },
       interviewDocument: interviewRemote.status,
+      commit: commitOutcome,
     };
     this.markIncidentsCorrectedByVersion(auditReport, bookVersion);
     this.saveStateToDisk();
@@ -6672,6 +6984,14 @@ export class StorageManager {
       } else {
         interview.layoutEditsAllowed = (interview.layoutEditsAllowed ?? 1) + 1;
       }
+    }
+    // V5.3.2: quota-affecting administrative change → new quota revision (other instances' older
+    // views can no longer overwrite it), and the deleted version is no longer a replay target.
+    const trackedInterview = interview as QuotaTrackedInterview;
+    trackedInterview.quotaRevision = (Number(trackedInterview.quotaRevision ?? 0) || 0) + 1;
+    if (trackedInterview.lastBookSaveVersionId === versionId) {
+      delete trackedInterview.lastBookSaveKey;
+      delete trackedInterview.lastBookSaveVersionId;
     }
     interview.lastActivityAt = new Date().toISOString();
     this.interviews.set(interviewId, interview);

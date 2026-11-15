@@ -42,9 +42,14 @@ import {
 } from './bookJobManager.ts';
 import type { BookAuditIncidentStatus } from '../logic/bookAuditReport.ts';
 import {
+  MEDIA_ACCESS_COOKIE,
   authenticateAdminRequest,
   buildAdminSessionCookie,
+  buildMediaAccessCookie,
   issueAdminSessionCookieValue,
+  issueMediaAccessCookieValue,
+  mediaAccessInterviewsFromRequest,
+  readCookie,
   verifyFirebaseIdToken,
 } from './adminAuth.ts';
 import { toParticipantAuditLogView } from './participantViews.ts';
@@ -1244,6 +1249,15 @@ apiRouter.post('/participant/session', async (req: Request, res: Response) => {
     resetAccessCodeFailures(req);
 
     const { token: resolvedTokenDoc, interview, participant } = resolvedResult;
+    // V5.3.2: a valid access code grants this browser READ access to THIS interview's photos and
+    // voice recordings (HttpOnly signed cookie; see adminAuth.ts → media access).
+    res.append(
+      'Set-Cookie',
+      buildMediaAccessCookie(
+        issueMediaAccessCookieValue(interview.id, readCookie(req.headers.cookie, MEDIA_ACCESS_COOKIE)),
+        isSecureRequest(req)
+      )
+    );
     const questions = storage.getQuestionsForVersion(interview.questionnaireVersionId);
     const answers = storage.getAnswersForInterview(interview.id);
     const otherParticipants = storage.getParticipantsForInterview(interview.id);
@@ -1431,9 +1445,39 @@ apiRouter.post('/participant/audio/:audioId/delete', async (req: Request, res: R
   }
 });
 
+/**
+ * V5.3.2 — Authorization of personal media. Before, any photo or recording could be downloaded by
+ * anyone who knew (or guessed) its identifier. Now a request needs either a verified administrator
+ * (ID token or admin session cookie) or the participant media cookie for the interview that owns the
+ * file (issued when a valid access code opens a session, so participants and the relatives who use
+ * their code keep seeing their photos, hearing their recordings and composing their PDF).
+ */
+async function authorizeMediaRequest(req: Request, res: Response, kind: 'photo' | 'audio', mediaId: string): Promise<boolean> {
+  const granted = mediaAccessInterviewsFromRequest(req);
+  if (granted.length > 0) {
+    const owner = await storage.resolveMediaInterviewId(kind, mediaId);
+    if (owner && granted.includes(owner)) return true;
+  }
+  if (await getAdminUser(req)) return true;
+  res.setHeader('Cache-Control', 'no-store');
+  res.status(granted.length > 0 ? 403 : 401).json({
+    success: false,
+    error:
+      kind === 'photo'
+        ? 'No tienes autorización para ver esta fotografía. Vuelve a abrir tu historia con tu código de acceso.'
+        : 'No tienes autorización para escuchar esta grabación. Vuelve a abrir tu historia con tu código de acceso.',
+  });
+  return false;
+}
+
+/** Private, per-user caching only (never shared caches or CDNs). */
+const PRIVATE_MEDIA_CACHE = 'private, max-age=3600';
+
 // Serve stored voice audio recording by ID with HTTP 206 Range streaming support
 apiRouter.get('/audio/:audioId', async (req: Request, res: Response) => {
   try {
+    if (!(await authorizeMediaRequest(req, res, 'audio', req.params.audioId))) return;
+    res.setHeader('Vary', 'Cookie, Authorization');
     const audioPayload = storage.getAudioBuffer(req.params.audioId);
     if (!audioPayload) {
       // Fallback try loading from Firestore
@@ -1473,7 +1517,7 @@ apiRouter.get('/audio/:audioId', async (req: Request, res: Response) => {
         'Accept-Ranges': 'bytes',
         'Content-Length': chunksize,
         'Content-Type': cleanMime,
-        'Cache-Control': 'public, max-age=86400',
+        'Cache-Control': PRIVATE_MEDIA_CACHE,
       });
       res.end(chunk);
       return;
@@ -1483,7 +1527,7 @@ apiRouter.get('/audio/:audioId', async (req: Request, res: Response) => {
       'Content-Length': total,
       'Content-Type': cleanMime,
       'Accept-Ranges': 'bytes',
-      'Cache-Control': 'public, max-age=86400',
+      'Cache-Control': PRIVATE_MEDIA_CACHE,
     });
     res.end(audioBuffer);
   } catch (err: unknown) {
@@ -1507,24 +1551,22 @@ apiRouter.post('/participant/photos/:photoId/delete', async (req: Request, res: 
   }
 });
 
-// Serve stored interview photograph by ID with full CORS support for canvas & PDF rasterization
+// Serve stored interview photograph by ID (same-origin: the app's own <img>, canvas and PDF composer).
+// V5.3.2: private resource — no wildcard CORS; authorization required (see authorizeMediaRequest).
 apiRouter.options('/photos/:photoId', (_req: Request, res: Response) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', '*');
+  res.setHeader('Allow', 'GET, OPTIONS');
   res.sendStatus(204);
 });
 
 apiRouter.get('/photos/:photoId', async (req: Request, res: Response) => {
   try {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', '*');
+    if (!(await authorizeMediaRequest(req, res, 'photo', req.params.photoId))) return;
+    res.setHeader('Vary', 'Cookie, Authorization');
 
     const photoBuffer = storage.getPhotoBuffer(req.params.photoId);
     if (photoBuffer) {
       res.setHeader('Content-Type', photoBuffer.mimeType);
-      res.setHeader('Cache-Control', 'public, max-age=86400');
+      res.setHeader('Cache-Control', PRIVATE_MEDIA_CACHE);
       res.send(photoBuffer.buffer);
       return;
     }
@@ -1544,7 +1586,7 @@ apiRouter.get('/photos/:photoId', async (req: Request, res: Response) => {
     const mimeType = match[1] || photo.mimeType || 'image/jpeg';
     const imgBuffer = Buffer.from(match[2], 'base64');
     res.setHeader('Content-Type', mimeType);
-    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.setHeader('Cache-Control', PRIVATE_MEDIA_CACHE);
     res.send(imgBuffer);
   } catch (err: unknown) {
     res.status(500).json({ success: false, error: (err as Error).message });
