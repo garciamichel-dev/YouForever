@@ -6,6 +6,7 @@
 import React, { useState, useEffect } from 'react';
 import { Navbar } from './components/Navbar.tsx';
 import { AdminDashboard } from './components/AdminDashboard.tsx';
+import { AdminVersionBadge } from './components/AdminVersionBadge.tsx';
 import { ParticipantPortal } from './components/ParticipantPortal.tsx';
 import { AdminLoginView } from './components/AdminLoginView.tsx';
 import { FAQModal } from './components/FAQModal.tsx';
@@ -270,6 +271,8 @@ export default function App() {
 
   return (
     <ThemeProvider>
+      {/* V5.3.4: running code version, on every screen, for the administrator only. */}
+      <AdminVersionBadge isAuthorizedAdmin={isAuthorizedAdmin} />
       {currentView === 'mi_esencia' ? (
         <MiEsenciaFamilyPortal initialCode={miEsenciaCode} />
       ) : (

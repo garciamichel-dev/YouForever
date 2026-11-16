@@ -54,6 +54,10 @@ import {
 } from './adminAuth.ts';
 import { toParticipantAuditLogView } from './participantViews.ts';
 import { ensureFirestoreMode } from './firestoreAdmin.ts';
+import { APP_RELEASE_DATE, APP_RELEASE_SUMMARY, APP_VERSION, APP_VERSION_LABEL } from '../version.ts';
+
+// V5.3.4: moment this server process started (a new deployment always restarts it).
+const SERVER_STARTED_AT = new Date().toISOString();
 
 export const apiRouter: Router = express.Router();
 apiRouter.use(express.json({ limit: '100mb' }));
@@ -221,6 +225,22 @@ apiRouter.get('/admin/firestore-status', requireAdmin, async (_req: Request, res
   } catch (err: unknown) {
     res.status(500).json({ success: false, error: (err as Error).message });
   }
+});
+
+// V5.3.4 (admin only): version of the code the SERVER is running, shown in the administrator's
+// version label next to the version of the frontend bundle.
+apiRouter.get('/admin/version', requireAdmin, (_req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({
+    success: true,
+    data: {
+      version: APP_VERSION,
+      label: APP_VERSION_LABEL,
+      releaseDate: APP_RELEASE_DATE,
+      summary: APP_RELEASE_SUMMARY,
+      serverStartedAt: SERVER_STARTED_AT,
+    },
+  });
 });
 
 apiRouter.delete('/auth/admin-session', (req: Request, res: Response) => {

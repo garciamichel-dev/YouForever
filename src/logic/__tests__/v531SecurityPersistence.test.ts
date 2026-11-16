@@ -684,3 +684,16 @@ test('V5.3.1-T1: la vista previa ya no promete conservar intactas las primeras p
   assert.match(source, /data-testid="viewer-ai-review-notice"/);
   assert.match(source, /data-testid="save-modal-ai-review-notice"/);
 });
+
+test('V5.3.4-V1: la versión del servidor solo la ve un administrador verificado', async () => {
+  const { APP_VERSION } = await import('../../version.ts');
+  const anon = await http('GET', '/admin/version');
+  assert.equal(anon.status, 401);
+  const forged = await http('GET', '/admin/version', { headers: { 'x-admin-user': ADMIN_EMAIL } });
+  assert.equal(forged.status, 401);
+  const ok = await http('GET', '/admin/version', { headers: { Authorization: `Bearer ${mintIdToken()}` } });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.json.data.version, APP_VERSION);
+  assert.equal(ok.json.data.label, `V${APP_VERSION}`);
+  assert.ok(!Number.isNaN(Date.parse(ok.json.data.serverStartedAt)));
+});
