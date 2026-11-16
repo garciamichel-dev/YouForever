@@ -25,6 +25,7 @@ import {
   BookOpen,
   MessageSquare,
   ShieldCheck,
+  Loader2,
 } from 'lucide-react';
 import {
   InterviewRecord,
@@ -51,6 +52,8 @@ import { PrivacyConsentScreen } from './PrivacyConsentScreen.tsx';
 import { ParticipantAdminPanel } from './ParticipantAdminPanel.tsx';
 import { ParticipantBookStudio } from './ParticipantBookStudio.tsx';
 import { ParticipantBookVersionRecord } from '../logic/demoStoryRules.ts';
+import { AutoSaveAnswerEditor, AutosaveStatusLabel, useDebouncedAutosave } from './AutoSaveAnswerEditor.tsx';
+import { isPendingAutosavedAnswer } from '../logic/answerAutosave.ts';
 import { ForeverYouLogo } from './ForeverYouLogo';
 import {
   getActiveParticipantSession,
@@ -207,6 +210,10 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
   // Tab view within participant portal: 'interview' | 'history' | 'book'
   const [activeTab, setActiveTab] = useState<'interview' | 'history' | 'book'>('interview');
   const [editingAnswerId, setEditingAnswerId] = useState<string | null>(null);
+  // V5.3.6: saved books are loaded on demand (the session only lists the versions).
+  const [fullBookVersions, setFullBookVersions] = useState<Record<string, ParticipantBookVersionRecord>>({});
+  const [bookVersionLoadPending, setBookVersionLoadPending] = useState<boolean>(false);
+  const fullBookVersionRequestsRef = useRef<Record<string, Promise<ParticipantBookVersionRecord | null>>>({});
   const [editMemoryText, setEditMemoryText] = useState('');
   const [editPhotos, setEditPhotos] = useState<DraftPhotoItem[]>([]);
 
@@ -266,7 +273,8 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
   const answeredQuestionIds = useMemo(() => {
     return new Set(
       myAnswers
-        .filter((a) => !a.isFollowUp && !a.isAdditionalMemory)
+        // V5.3.6: an autosaved answer not yet confirmed does not count as answered.
+        .filter((a) => !a.isFollowUp && !a.isAdditionalMemory && !isPendingAutosavedAnswer(a))
         .map((a) => a.questionId)
     );
   }, [myAnswers]);
@@ -279,7 +287,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
 
   const allFlowCompleted = useMemo(() => {
     if (!sessionData) return false;
-    return isQuestionnaireFlowComplete(flowSequence, myAnswers);
+    return isQuestionnaireFlowComplete(flowSequence, myAnswers.filter((a) => !isPendingAutosavedAnswer(a)));
   }, [sessionData, flowSequence, myAnswers]);
 
   const progressPercent = useMemo(() => {
@@ -312,60 +320,12 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
       setLoading(true);
       setErrorMsg(null);
 
-      const stripCachedPhotoRef = (photo: any) => {
-        if (!photo || typeof photo !== 'object') return photo;
-        const pid = typeof photo.id === 'string' ? photo.id : '';
-        if (pid.startsWith('photo_')) {
-          const apiUrl = `/api/photos/${pid}`;
-          return { ...photo, objectUrl: apiUrl, dataUrl: apiUrl };
-        }
-        return photo;
-      };
-      const sanitizeCachedBookVersion = (bv: any) => {
-        if (!bv || typeof bv !== 'object') return bv;
-        const { allPhotosById: _dropAll, coverPhoto, chapterPhotos, ...rest } = bv;
-        const cleanChapterPhotos =
-          chapterPhotos && typeof chapterPhotos === 'object'
-            ? Object.fromEntries(
-                Object.entries(chapterPhotos).map(([k, v]) => [k, stripCachedPhotoRef(v)])
-              )
-            : chapterPhotos;
-        return {
-          ...rest,
-          coverPhoto: stripCachedPhotoRef(coverPhoto),
-          chapterPhotos: cleanChapterPhotos,
-        };
-      };
-
-      let cachedInterviews: unknown[] | undefined = undefined;
-      let cachedBookVersions: unknown[] | undefined = undefined;
-      try {
-        const rawCache = localStorage.getItem('foreveryou_interviews_cache');
-        if (rawCache) {
-          const parsedCache = JSON.parse(rawCache);
-          if (Array.isArray(parsedCache) && parsedCache.length > 0) {
-            cachedInterviews = parsedCache.map((inv: any) =>
-              inv && typeof inv === 'object' && Array.isArray(inv.bookVersions)
-                ? { ...inv, bookVersions: inv.bookVersions.map(sanitizeCachedBookVersion) }
-                : inv
-            );
-          }
-        }
-        const rawBvCache = localStorage.getItem('foreveryou_book_versions_cache');
-        if (rawBvCache) {
-          const parsedBvCache = JSON.parse(rawBvCache);
-          if (Array.isArray(parsedBvCache) && parsedBvCache.length > 0) {
-            cachedBookVersions = parsedBvCache.map(sanitizeCachedBookVersion);
-          }
-        }
-      } catch (_e) {
-        // ignore localStorage read errors
-      }
-
+      // V5.3.6: the browser's local copy of interviews and books is no longer uploaded on every
+      // sign-in (it could weigh several MB); the server synchronizes with Firestore instead.
       const res = await fetch('/api/participant/session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: cleanToken, cachedInterviews, cachedBookVersions }),
+        body: JSON.stringify({ token: cleanToken }),
       });
 
       const rawText = await res.text();
@@ -379,6 +339,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
       }
       if (res.ok && data?.success && data?.data) {
         setSessionData(data.data);
+        setFullBookVersions({});
 
         const participantId: string = data.data.participant.id;
         const resolvedTokenToSave: string = data.data.resolvedToken || cleanToken;
@@ -439,7 +400,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
         } else {
           const answeredIds = new Set(
             participantAnswers
-              .filter((a) => !a.isFollowUp && !a.isAdditionalMemory)
+              .filter((a) => !a.isFollowUp && !a.isAdditionalMemory && !isPendingAutosavedAnswer(a))
               .map((a) => a.questionId)
           );
           const firstUnanswered = seq.find((item) => !answeredIds.has(item.question.id));
@@ -787,6 +748,192 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
     activeTokenRef.current = activeToken;
   }, [activeToken]);
 
+  // V5.3.6 — Loads one saved book (manuscript and photos) only when it is needed.
+  const loadFullBookVersion = async (versionId: string): Promise<ParticipantBookVersionRecord | null> => {
+    const known = fullBookVersions[versionId];
+    if (known) return known;
+    const inFlight = fullBookVersionRequestsRef.current[versionId];
+    if (inFlight) return inFlight;
+    const request = (async () => {
+      try {
+        const res = await fetch('/api/participant/book/version', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: activeTokenRef.current, versionId }),
+        });
+        const data = await res.json().catch(() => null);
+        const version = data?.success ? (data.data?.bookVersion as ParticipantBookVersionRecord) : null;
+        if (version && version.manuscript) {
+          setFullBookVersions((prev) => ({ ...prev, [versionId]: version }));
+          return version;
+        }
+        return null;
+      } catch (_err) {
+        return null;
+      } finally {
+        delete fullBookVersionRequestsRef.current[versionId];
+      }
+    })();
+    fullBookVersionRequestsRef.current[versionId] = request;
+    return request;
+  };
+
+  // The book studio opens with the latest saved version already loaded.
+  const latestBookVersionId = sessionData?.bookVersions?.[0]?.id || null;
+  const latestBookVersionHasContent = Boolean(
+    latestBookVersionId &&
+      (fullBookVersions[latestBookVersionId] || sessionData?.bookVersions?.[0]?.manuscript)
+  );
+  const isBookStudioVisible = Boolean(
+    sessionData && (sessionData.interview.userDeclaredComplete || activeTab === 'book')
+  );
+  useEffect(() => {
+    if (!isBookStudioVisible || !latestBookVersionId || latestBookVersionHasContent) return;
+    let cancelled = false;
+    setBookVersionLoadPending(true);
+    void loadFullBookVersion(latestBookVersionId).finally(() => {
+      if (!cancelled) setBookVersionLoadPending(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isBookStudioVisible, latestBookVersionId, latestBookVersionHasContent]);
+
+  // V5.3.6 — Automatic saving of every edit (no need to press «Guardar y Continuar»).
+  const upsertAnswerInSession = (saved: AnswerRecord) =>
+    setSessionData((prev) => {
+      if (!prev) return prev;
+      const idx = prev.answers.findIndex((a) => a.id === saved.id);
+      const answers = [...prev.answers];
+      if (idx >= 0) answers[idx] = saved;
+      else answers.push(saved);
+      return { ...prev, answers };
+    });
+
+  const autosaveAnswer = async (payload: {
+    questionId: string;
+    questionText?: string;
+    answerText: string;
+    isFollowUp?: boolean;
+    parentQuestionId?: string | null;
+    isAdditionalMemory?: boolean;
+    branchChoice?: 'yes' | 'no' | null;
+    deepeningReason?: string;
+  }): Promise<AnswerRecord | null> => {
+    const sess = sessionDataRef.current;
+    const token = activeTokenRef.current;
+    if (!sess || !token || !payload.answerText.trim()) return null;
+    try {
+      const res = await fetch('/api/participant/answer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          token,
+          ...payload,
+          answerText: payload.answerText.trim(),
+          notRecalled: false,
+          autosave: true,
+          idempotencyKey: `autosave_${sess.participant.id}_${payload.questionId}_${Date.now()}`,
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!data?.success || !data.data?.answer) return null;
+      const saved = data.data.answer as AnswerRecord;
+      upsertAnswerInSession(saved);
+      if (data.data.interview) {
+        setSessionData((prev) => (prev ? { ...prev, interview: data.data.interview } : prev));
+      }
+      return saved;
+    } catch (_err) {
+      return null;
+    }
+  };
+
+  /** Saves an edit of an already saved answer (main, follow-up or additional information). */
+  const autosaveExistingAnswer = async (answer: AnswerRecord, text: string): Promise<boolean> => {
+    const saved = await autosaveAnswer({
+      questionId: answer.questionId,
+      questionText: answer.questionText,
+      answerText: text,
+      isFollowUp: answer.isFollowUp,
+      parentQuestionId: answer.parentQuestionId,
+      isAdditionalMemory: answer.isAdditionalMemory,
+      branchChoice: answer.branchChoice,
+    });
+    return Boolean(saved);
+  };
+
+  const isInterviewOpenForAutosave = Boolean(
+    sessionData && sessionData.interview.status === 'open' && !sessionData.interview.userDeclaredComplete
+  );
+  const currentSavedBaseAnswer = useMemo(() => {
+    if (!sessionData || !currentQuestion) return undefined;
+    return sessionData.answers.find(
+      (a) =>
+        a.questionId === currentQuestion.id &&
+        a.participantId === sessionData.participant.id &&
+        !a.isFollowUp &&
+        !a.isAdditionalMemory
+    );
+  }, [sessionData?.answers, currentQuestion?.id]);
+
+  const mainAutosave = useDebouncedAutosave({
+    key: currentQuestion?.id || 'none',
+    value: currentAnswerText,
+    lastSavedValue:
+      currentSavedBaseAnswer && !currentSavedBaseAnswer.notRecalled ? currentSavedBaseAnswer.answerText : '',
+    enabled: Boolean(
+      currentQuestion && isInterviewOpenForAutosave && !adaptiveQuestion && !savingAnswer && branchChoice !== 'no'
+    ),
+    save: async (text) => {
+      const q = currentQuestion;
+      if (!q) return false;
+      // Never interfere with a voice recording in progress: try again a few seconds later.
+      if (voiceRecorderRef.current?.isRecordingOrActive?.()) return false;
+      const saved = await autosaveAnswer({
+        questionId: q.id,
+        questionText: q.text,
+        answerText: text,
+        branchChoice: branchChoiceRef.current,
+      });
+      return Boolean(saved);
+    },
+  });
+
+  // Stable id of the follow-up question on screen, so its autosaves and its final save are one answer.
+  const adaptiveQuestionStableId = useMemo(
+    () => (adaptiveQuestion ? `adapt_${adaptiveQuestion.parentQuestionId}_${Date.now()}` : null),
+    [adaptiveQuestion?.text, adaptiveQuestion?.parentQuestionId, adaptiveQuestion?.followUpIndex]
+  );
+  const savedAdaptiveAnswer = useMemo(
+    () =>
+      adaptiveQuestionStableId && sessionData
+        ? sessionData.answers.find((a) => a.questionId === adaptiveQuestionStableId)
+        : undefined,
+    [sessionData?.answers, adaptiveQuestionStableId]
+  );
+  const adaptiveAutosave = useDebouncedAutosave({
+    key: adaptiveQuestionStableId || 'none',
+    value: adaptiveAnswerText,
+    lastSavedValue: savedAdaptiveAnswer?.answerText || '',
+    enabled: Boolean(adaptiveQuestion && adaptiveQuestionStableId && isInterviewOpenForAutosave && !savingAnswer),
+    save: async (text) => {
+      const aq = adaptiveQuestion;
+      const qid = adaptiveQuestionStableId;
+      if (!aq || !qid) return false;
+      if (adaptiveVoiceRecorderRef.current?.isRecordingOrActive?.()) return false;
+      const saved = await autosaveAnswer({
+        questionId: qid,
+        questionText: aq.text,
+        answerText: text,
+        isFollowUp: true,
+        parentQuestionId: aq.parentQuestionId,
+        deepeningReason: aq.reason,
+      });
+      return Boolean(saved);
+    },
+  });
+
   // Non-interfering 10-minute background autosave (runs silently, never blocks, pauses or cancels)
   useEffect(() => {
     const AUTOSAVE_INTERVAL_MS = 10 * 60 * 1000;
@@ -841,6 +988,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                 ? lightweightAudios[lightweightAudios.length - 1]
                 : undefined,
             audioRecordings: lightweightAudios,
+            autosave: true,
             idempotencyKey: `autosave_${sess.participant.id}_${q.id}_${Date.now()}`,
           }),
         });
@@ -983,6 +1131,9 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
     }
   ) => {
     if (!sessionData || !currentQuestion) return;
+    // V5.3.6: the explicit save confirms the same answer the autosave may have created.
+    mainAutosave.cancel();
+    await mainAutosave.waitIdle();
 
     let activeAudios = overrides?.audiosOverride
       ? [...overrides.audiosOverride]
@@ -1111,9 +1262,11 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
             : [];
         setCurrentAudios(returnedAudios);
 
-        const updatedAnswers = [...sessionData.answers];
+        const latestAnswers = sessionDataRef.current?.answers || sessionData.answers;
+        const updatedAnswers = [...latestAnswers];
         const existingIdx = updatedAnswers.findIndex(
           (a) =>
+            a.id === savedAns.id ||
             a.questionId === currentQuestion.id &&
             a.participantId === sessionData.participant.id &&
             !a.isFollowUp &&
@@ -1194,6 +1347,8 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
     skipFinalizeVoice?: boolean;
   }) => {
     if (!sessionData || !adaptiveQuestion) return;
+    adaptiveAutosave.cancel();
+    await adaptiveAutosave.waitIdle();
 
     let currentAdaptAudio =
       overrides?.audioOverride !== undefined ? overrides.audioOverride : adaptiveAudio;
@@ -1272,7 +1427,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           token: activeToken,
-          questionId: `adapt_${parentId}_${Date.now()}`,
+          questionId: adaptiveQuestionStableId || `adapt_${parentId}_${Date.now()}`,
           questionText: adaptiveQuestion.text,
           answerText: trimmedAdaptive,
           notRecalled: false,
@@ -1287,7 +1442,10 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
 
       const data = await res.json();
       if (data.success) {
-        const updatedAnswers = [...sessionData.answers, data.data.answer];
+        const latestAnswers = sessionDataRef.current?.answers || sessionData.answers;
+        const updatedAnswers = latestAnswers.some((a) => a.id === data.data.answer.id)
+          ? latestAnswers.map((a) => (a.id === data.data.answer.id ? data.data.answer : a))
+          : [...latestAnswers, data.data.answer];
         setSessionData({
           ...sessionData,
           interview: data.data.interview || sessionData.interview,
@@ -1495,8 +1653,12 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
           token: activeToken,
           questionId: answer.questionId,
           questionText: answer.questionText,
-          answerText: editMemoryText.trim(),
-          notRecalled: false,
+          // V5.3.6: the text is autosaved separately; this action only updates the photos.
+          answerText: (answer.answerText || '').trim(),
+          notRecalled: Boolean(answer.notRecalled && !(answer.answerText || '').trim()),
+          isFollowUp: answer.isFollowUp,
+          parentQuestionId: answer.parentQuestionId,
+          isAdditionalMemory: answer.isAdditionalMemory,
           photos: editPhotos,
           idempotencyKey: `edit_${answer.id}_${Date.now()}`,
         }),
@@ -1507,7 +1669,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
         setEditingAnswerId(null);
         const updated = sessionData.answers.map((a) => (a.id === answerId ? data.data.answer : a));
         setSessionData({ ...sessionData, answers: updated });
-        setSaveSuccessNotice('Edición y fotografías actualizadas con éxito.');
+        setSaveSuccessNotice('Fotografías actualizadas con éxito.');
         setTimeout(() => setSaveSuccessNotice(null), 3000);
       } else {
         setValidationNotice(data.error || 'No se pudo guardar la edición.');
@@ -1940,6 +2102,33 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
         <div className="flex-1 flex flex-col">
           {interview.userDeclaredComplete || activeTab === 'book' ? (
             <div className="max-w-6xl mx-auto w-full px-4 pt-4 pb-12">
+              {latestBookVersionId && !latestBookVersionHasContent ? (
+                <div
+                  className="py-16 text-center text-sm text-stone-600 flex flex-col items-center gap-3"
+                  data-testid="book-version-loading"
+                >
+                  <Loader2 className="w-6 h-6 animate-spin text-amber-700" />
+                  <span>
+                    {bookVersionLoadPending
+                      ? 'Abriendo tu libro...'
+                      : 'Tu libro se está preparando para mostrarse. Vuelve a intentarlo en unos momentos.'}
+                  </span>
+                  {!bookVersionLoadPending && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setBookVersionLoadPending(true);
+                        void loadFullBookVersion(latestBookVersionId).finally(() =>
+                          setBookVersionLoadPending(false)
+                        );
+                      }}
+                      className="px-3.5 py-2 rounded-xl bg-amber-800 hover:bg-amber-900 text-white text-xs font-semibold"
+                    >
+                      Abrir mi libro
+                    </button>
+                  )}
+                </div>
+              ) : (
               <ParticipantBookStudio
                 token={activeToken}
                 interview={interview}
@@ -1947,7 +2136,8 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                 otherParticipants={sessionData.otherParticipants}
                 answers={answers}
                 questions={questions}
-                bookVersions={sessionData.bookVersions || []}
+                bookVersions={(sessionData.bookVersions || []).map((v) => fullBookVersions[v.id] || v)}
+                onRequestFullBookVersion={loadFullBookVersion}
                 onBookVersionSaved={({ interview: updatedInterview, allVersions }) => {
                   setSessionData((prev) =>
                     prev
@@ -1961,6 +2151,7 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                 }}
                 onViewReadOnlyAnswers={() => setActiveTab('history')}
               />
+              )}
             </div>
           ) : showCompletionScreen ? (
             /* END OF INSTRUMENT COMPLETION VIEW (BEFORE VOLUNTARY CLOSURE) */
@@ -2257,8 +2448,12 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                     }
                     value={currentAnswerText}
                     onChange={(e) => setCurrentAnswerText(e.target.value)}
+                    onBlur={() => mainAutosave.flush()}
                     className="w-full p-3 border border-stone-300 rounded-xl text-stone-900 text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-amber-200 focus:border-amber-600 leading-relaxed font-sans disabled:bg-stone-50"
                   />
+                  <div className="flex justify-end">
+                    <AutosaveStatusLabel state={mainAutosave.state} savedAt={mainAutosave.savedAt} />
+                  </div>
                 </div>
               )}
 
@@ -2338,11 +2533,20 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                     </span>
                   </div>
                   {followUpsForCurrent.map((fu) => (
-                    <div key={fu.id} className="text-xs bg-white p-2.5 rounded-lg border border-stone-200">
+                    <div key={fu.id} className="text-xs bg-white p-2.5 rounded-lg border border-stone-200 space-y-1.5">
                       <div className="font-serif font-semibold text-amber-900">
                         {fu.questionText || 'Pregunta de profundización'}
                       </div>
-                      <p className="text-stone-700 italic mt-0.5">«{fu.answerText}»</p>
+                      {isInterviewOpen && sessionData.allowAnswerEditing ? (
+                        <AutoSaveAnswerEditor
+                          answerId={fu.id}
+                          initialText={fu.notRecalled ? '' : fu.answerText}
+                          placeholder="Escribe aquí tu recuerdo; se guarda automáticamente."
+                          onSave={(text) => autosaveExistingAnswer(fu, text)}
+                        />
+                      ) : (
+                        <p className="text-stone-700 italic mt-0.5">«{fu.answerText}»</p>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -2550,8 +2754,12 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                         placeholder="Profundiza en este recuerdo con los detalles, emociones o anécdotas que desees compartir..."
                         value={adaptiveAnswerText}
                         onChange={(e) => setAdaptiveAnswerText(e.target.value)}
+                        onBlur={() => adaptiveAutosave.flush()}
                         className="w-full p-3 border border-amber-300 bg-white rounded-xl text-sm text-stone-900 focus:outline-none focus:ring-2 focus:ring-amber-300"
                       />
+                      <div className="flex justify-end">
+                        <AutosaveStatusLabel state={adaptiveAutosave.state} savedAt={adaptiveAutosave.savedAt} />
+                      </div>
                     </div>
                   )}
 
@@ -2707,12 +2915,6 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
 
                   {isEditing ? (
                     <div className="space-y-3">
-                      <textarea
-                        rows={4}
-                        value={editMemoryText}
-                        onChange={(e) => setEditMemoryText(e.target.value)}
-                        className="w-full p-3 border border-amber-300 rounded-lg text-xs text-stone-900"
-                      />
                       <QuestionPhotoUploader
                         photos={editPhotos}
                         onChange={(updated) => {
@@ -2742,17 +2944,32 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                           onClick={() => handleSaveEdit(ans.id)}
                           className="px-3 py-1.5 bg-amber-700 hover:bg-amber-800 text-white rounded-lg text-xs font-semibold"
                         >
-                          Guardar Edición
+                          Guardar fotografías
                         </button>
                       </div>
                     </div>
                   ) : (
                     <div className="space-y-3">
-                      <p className="text-xs text-stone-800 leading-relaxed italic">
-                        {ans.notRecalled
-                          ? '«El participante indicó: Omitir y continuar»'
-                          : ans.answerText}
-                      </p>
+                      {sessionData.allowAnswerEditing && isInterviewOpen ? (
+                        // V5.3.6: every answer (main, follow-up, additional information) is
+                        // editable here and each edit is saved automatically.
+                        <AutoSaveAnswerEditor
+                          answerId={ans.id}
+                          initialText={ans.notRecalled ? '' : ans.answerText}
+                          placeholder={
+                            ans.notRecalled
+                              ? 'Omitiste esta pregunta. Si lo deseas, escribe aquí tu recuerdo; se guarda automáticamente.'
+                              : 'Escribe aquí tu recuerdo; se guarda automáticamente.'
+                          }
+                          onSave={(text) => autosaveExistingAnswer(ans, text)}
+                        />
+                      ) : (
+                        <p className="text-xs text-stone-800 leading-relaxed italic">
+                          {ans.notRecalled
+                            ? '«El participante indicó: Omitir y continuar»'
+                            : ans.answerText}
+                        </p>
+                      )}
 
                       {/* Display attached voice recording if present */}
                       {ans.audio && (
@@ -2843,8 +3060,8 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                               }}
                               className="inline-flex items-center space-x-1 px-3 py-1.5 text-xs text-stone-600 hover:text-stone-900 hover:bg-stone-100 rounded-lg transition"
                             >
-                              <Edit3 className="w-3 h-3 text-stone-400" />
-                              <span>Edición rápida aquí</span>
+                              <Camera className="w-3 h-3 text-stone-400" />
+                              <span>Editar fotografías</span>
                             </button>
                           )}
                         </div>

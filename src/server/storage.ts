@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import zlib from 'zlib';
+import { isPendingAutosavedAnswer, type AutosavableAnswerRecord } from '../logic/answerAutosave.ts';
 // V5.3.2: the server reaches Firestore only through the Firebase Admin SDK with its service
 // identity (Application Default Credentials). See firestoreAdmin.ts.
 import {
@@ -4892,6 +4893,8 @@ export class StorageManager {
     audioRecordings?: Array<IncomingAudioInput | AnswerVoiceAttachment>;
     audios?: Array<IncomingAudioInput | AnswerVoiceAttachment>;
     idempotencyKey: string;
+    /** V5.3.6: automatic save while the participant writes (no counter, no follow-up question). */
+    autosave?: boolean;
   }): Promise<{
     answer: AnswerRecord;
     interview: InterviewRecord;
@@ -5154,13 +5157,37 @@ export class StorageManager {
         ? resolvedAudioRecordings[resolvedAudioRecordings.length - 1]
         : undefined;
 
+    // V5.3.6 — Autosave. An answer created by autosave stays "pending" (it does not count as
+    // answered and does not trigger the follow-up question) until the participant confirms it with
+    // «Guardar y Continuar», which then behaves exactly like a first submission.
+    const isAutosave = Boolean(params.autosave);
+    const completesPendingSubmission = Boolean(
+      evalResult.isEdit && isPendingAutosavedAnswer(evalResult.existingAnswer) && !isAutosave
+    );
+    const isFirstSubmission = (!evalResult.isEdit && !isAutosave) || completesPendingSubmission;
+
     if (evalResult.isEdit && evalResult.existingAnswer) {
-      const existing = evalResult.existingAnswer;
+      const existing = evalResult.existingAnswer as AutosavableAnswerRecord;
       const history = existing.editHistory || [];
-      history.push({
-        text: existing.answerText,
-        editedAt: existing.updatedAt || existing.createdAt,
-      });
+      // Consecutive autosaves of the same text session share one history entry (10 min window).
+      const lastAutosaveMs = existing.lastAutosavedAt ? new Date(existing.lastAutosavedAt).getTime() : 0;
+      const isContinuingAutosave =
+        isAutosave && !Number.isNaN(lastAutosaveMs) && now.getTime() - lastAutosaveMs < 10 * 60 * 1000;
+      if (!isContinuingAutosave && !existing.pendingSubmission) {
+        history.push({
+          text: existing.answerText,
+          editedAt: existing.updatedAt || existing.createdAt,
+        });
+      }
+      if (isAutosave) {
+        existing.lastAutosavedAt = now.toISOString();
+      } else {
+        delete existing.lastAutosavedAt;
+      }
+      if (completesPendingSubmission) {
+        delete existing.pendingSubmission;
+        interview.completedQuestionCount += 1;
+      }
 
       existing.answerText = params.notRecalled ? '' : params.answerText.trim();
       existing.notRecalled = params.notRecalled;
@@ -5223,10 +5250,11 @@ export class StorageManager {
         idempotencyKey: params.idempotencyKey,
         createdAt: now.toISOString(),
         updatedAt: now.toISOString(),
+        ...(isAutosave ? { pendingSubmission: true, lastAutosavedAt: now.toISOString() } : {}),
       };
       this.answers.set(answerId, savedAnswer);
 
-      if (evalResult.shouldIncrementCounter) {
+      if (evalResult.shouldIncrementCounter && !isAutosave) {
         interview.completedQuestionCount += 1;
       }
       interview.lastActivityAt = now.toISOString();
@@ -5241,8 +5269,8 @@ export class StorageManager {
     // 3. Check sufficiency evaluation trigger (only for newly incremented answers)
     let sufficiencyEvaluated = false;
     if (
-      !evalResult.isEdit &&
-      evalResult.shouldIncrementCounter &&
+      isFirstSubmission &&
+      (evalResult.shouldIncrementCounter || completesPendingSubmission) &&
       isSufficiencyThresholdMet(interview.completedQuestionCount, interview.sufficiencyThreshold)
     ) {
       try {
@@ -5275,7 +5303,7 @@ export class StorageManager {
       | undefined;
 
     if (
-      !evalResult.isEdit &&
+      isFirstSubmission &&
       !params.notRecalled &&
       !params.isAdditionalMemory &&
       params.branchChoice !== 'no' &&
@@ -5341,7 +5369,7 @@ export class StorageManager {
     return {
       answer: savedAnswer,
       interview,
-      counterIncremented: evalResult.shouldIncrementCounter,
+      counterIncremented: (evalResult.shouldIncrementCounter && !isAutosave) || completesPendingSubmission,
       sufficiencyEvaluated,
       adaptiveQuestion,
     };

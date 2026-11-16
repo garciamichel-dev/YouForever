@@ -4465,6 +4465,11 @@ export interface ParticipantBookVersionRecord {
   pageCount: number;
   fileName: string;
   createdAt: string;
+  /**
+   * V5.3.6: true in the participant's session list, where the book itself (manuscript and photos)
+   * is not sent; it is loaded on demand when the version is opened or downloaded.
+   */
+  contentOmitted?: boolean;
 }
 
 /**

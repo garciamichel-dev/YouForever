@@ -2137,7 +2137,12 @@ test('V5.3-T8: seguridad: toda ruta del informe exige administrador en el servid
   const participantSave = blocks.find((b) => b.includes("'/participant/book/save-version'"));
   assert.ok(participantSave && /sanitizeBookVersionForParticipant/.test(participantSave));
   const participantSession = blocks.find((b) => b.includes("'/participant/session'"));
-  assert.ok(participantSession && /sanitizeBookVersionForParticipant/.test(participantSession));
+  // V5.3.6: the session lists the versions with the summary view (sanitized, without the book).
+  assert.ok(
+    participantSession && /sanitizeBookVersionForParticipant|toParticipantBookVersionSummary/.test(participantSession)
+  );
+  const participantVersion = blocks.find((b) => b.includes("'/participant/book/version'"));
+  assert.ok(participantVersion && /sanitizeBookVersionForParticipant/.test(participantVersion));
 });
 
 // =============================================================================================

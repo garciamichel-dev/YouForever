@@ -216,6 +216,22 @@ export function sanitizeBookVersionForParticipant<T extends { manuscript?: DemoM
   return copy;
 }
 
+/**
+ * V5.3.6 — Light entry of a book version for the participant's session: everything the portal
+ * needs to list the versions, WITHOUT the book itself (manuscript, photos), which is loaded on
+ * demand with POST /api/participant/book/version when a version is opened or downloaded.
+ */
+export function toParticipantBookVersionSummary<T extends { manuscript?: DemoManuscript }>(version: T): T {
+  if (!version || typeof version !== 'object') return version;
+  const copy: any = sanitizeBookVersionForParticipant({ ...version });
+  delete copy.manuscript;
+  delete copy.chapterPhotos;
+  delete copy.allPhotosById;
+  delete copy.coverPhoto;
+  copy.contentOmitted = true;
+  return copy;
+}
+
 export function toParticipantBookJobView(job: BookGenerationJobRecord): ParticipantBookJobView {
   return {
     jobId: job.jobId,

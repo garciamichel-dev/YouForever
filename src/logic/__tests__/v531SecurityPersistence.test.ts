@@ -697,3 +697,103 @@ test('V5.3.4-V1: la versión del servidor solo la ve un administrador verificado
   assert.equal(ok.json.data.label, `V${APP_VERSION}`);
   assert.ok(!Number.isNaN(Date.parse(ok.json.data.serverStartedAt)));
 });
+
+// =============================================================================================
+// V5.3.6 — Light participant session, books loaded on demand, and answer autosave.
+// =============================================================================================
+
+test('V5.3.6-S1: la sesión del participante lista sus versiones SIN el texto del libro; el libro se carga al abrirlo y solo para su dueño', async () => {
+  const { interview, token, manuscript } = await generateBookWithObservations();
+  const saved = await saveViaHttp(token, 'first_person_simple', manuscript);
+  assert.equal(saved.status, 200, saved.text.slice(0, 300));
+  const versionId = saved.json.data.bookVersion.id;
+
+  const session = await http('POST', '/participant/session', { body: { token } });
+  assert.equal(session.status, 200, session.text.slice(0, 300));
+  const listed = session.json.data.bookVersions.find((v: any) => v.id === versionId);
+  assert.ok(listed, 'La versión aparece en la lista.');
+  assert.equal(listed.manuscript, undefined, 'La lista no incluye el libro.');
+  assert.equal(listed.chapterPhotos, undefined);
+  assert.equal(listed.contentOmitted, true);
+  assert.ok(listed.versionNumber >= 1 && listed.editorialConfig);
+  assertNoAdminData('session', session.json);
+
+  const full = await http('POST', '/participant/book/version', { body: { token, versionId } });
+  assert.equal(full.status, 200, full.text.slice(0, 300));
+  assert.ok(full.json.data.bookVersion.manuscript.chapters.length > 0, 'El libro completo llega al abrirlo.');
+  assertNoAdminData('version', full.json);
+
+  // Another participant cannot open it; and an unknown id is not found.
+  const other = await createInterview();
+  const foreign = await http('POST', '/participant/book/version', { body: { token: other.token, versionId } });
+  assert.equal(foreign.status, 404);
+  const anon = await http('POST', '/participant/book/version', { body: { token: 'YF-NOEXISTE', versionId } });
+  assert.equal(anon.status, 403);
+  void interview;
+});
+
+test('V5.3.6-S2: el inicio de sesión ya no sube la copia local del navegador, pero sí sincroniza con Firestore', () => {
+  const apiSource = fs.readFileSync(path.join(REPO_ROOT, 'src/server/api.ts'), 'utf-8');
+  const block = apiSource.split(/\napiRouter\./).find((b) => b.includes("'/participant/session'")) || '';
+  assert.doesNotMatch(block, /restoreFromClientCache/);
+  assert.match(block, /syncFromFirestore/);
+  const portal = fs.readFileSync(path.join(REPO_ROOT, 'src/components/ParticipantPortal.tsx'), 'utf-8');
+  assert.doesNotMatch(portal, /cachedInterviews|cachedBookVersions/);
+});
+
+test('V5.3.6-A1: el autoguardado no cuenta la respuesta ni genera profundización hasta que el participante la confirma', async () => {
+  const created = await storage.createInterview({
+    title: 'Autoguardado V5.3.6',
+    storyMode: 'individual',
+    storyType: 'biografia_personal',
+    participants: [{ name: 'Elena Robles', relationship: 'Titular', role: 'primary' }],
+    customSufficiencyThreshold: 100000,
+    performedBy: 'admin_pruebas',
+  });
+  const token = created.participantTokens[0].plainToken;
+  const interviewId = created.interview.id;
+  const q = storage.getQuestionsForVersion(created.interview.questionnaireVersionId)[0];
+  const count = () => storage.getInterviewById(interviewId).completedQuestionCount;
+  const before = count();
+  assert.ok(created.interview.maxFollowUpsAtCreation > 0, 'Entrevista con profundizaciones activas.');
+  const callsBefore = externalCalls.length;
+
+  const first = await storage.submitAnswer({ plainToken: token, questionId: q.id, answerText: 'Nací en una casa junto al', notRecalled: false, autosave: true, idempotencyKey: 'as_1' });
+  assert.equal(first.answer.pendingSubmission, true);
+  assert.equal(first.adaptiveQuestion, undefined);
+  assert.equal(count(), before, 'Un autoguardado no cuenta como respuesta.');
+
+  const second = await storage.submitAnswer({ plainToken: token, questionId: q.id, answerText: 'Nací en una casa junto al mar, en Acapulco.', notRecalled: false, autosave: true, idempotencyKey: 'as_2' });
+  assert.equal(second.answer.id, first.answer.id, 'Los autoguardados actualizan la misma respuesta.');
+  assert.equal(count(), before);
+  assert.equal((second.answer.editHistory || []).length, 0, 'Autoguardados seguidos no llenan el historial.');
+  assert.equal(externalCalls.length, callsBefore, 'Un autoguardado nunca pide una pregunta de profundización.');
+
+  const confirmed = await storage.submitAnswer({ plainToken: token, questionId: q.id, answerText: 'Nací en una casa junto al mar, en Acapulco.', notRecalled: false, idempotencyKey: 'confirm_1' });
+  assert.equal(confirmed.answer.id, first.answer.id);
+  assert.equal(confirmed.answer.pendingSubmission, undefined);
+  assert.equal(confirmed.counterIncremented, true);
+  assert.equal(count(), before + 1, 'Al confirmar («Guardar y Continuar») cuenta una sola vez.');
+  // Confirming DOES ask for the follow-up question (the network stub refused the provider call, so
+  // no question comes back here). Those refused calls are expected and removed from the guard list.
+  assert.ok(externalCalls.length > callsBefore, 'Al confirmar se solicita la pregunta de profundización.');
+  externalCalls.splice(callsBefore);
+
+  // Later autosaved edits of a confirmed answer never count again and keep one history entry.
+  await storage.submitAnswer({ plainToken: token, questionId: q.id, answerText: 'Nací en una casa blanca junto al mar.', notRecalled: false, autosave: true, idempotencyKey: 'as_3' });
+  const edited = await storage.submitAnswer({ plainToken: token, questionId: q.id, answerText: 'Nací en una casa blanca junto al mar, en Acapulco.', notRecalled: false, autosave: true, idempotencyKey: 'as_4' });
+  assert.equal(count(), before + 1);
+  assert.equal((edited.answer.editHistory || []).length, 1);
+  assert.equal(edited.answer.answerText, 'Nací en una casa blanca junto al mar, en Acapulco.');
+
+  // Follow-up answers are edited the same way (their own id, flag preserved).
+  const fu = await storage.submitAnswer({ plainToken: token, questionId: `adapt_${q.id}_1`, questionText: '¿Cómo era el mar?', answerText: 'Azul.', notRecalled: false, isFollowUp: true, parentQuestionId: q.id, idempotencyKey: 'fu_1' });
+  const fuEdit = await storage.submitAnswer({ plainToken: token, questionId: `adapt_${q.id}_1`, answerText: 'Azul y tranquilo por las mañanas.', notRecalled: false, autosave: true, idempotencyKey: 'fu_as_1' });
+  assert.equal(fuEdit.answer.id, fu.answer.id);
+  assert.equal(fuEdit.answer.isFollowUp, true);
+  assert.equal(fuEdit.answer.answerText, 'Azul y tranquilo por las mañanas.');
+  const base = storage.getAnswersForInterview(interviewId).find((a: any) => a.id === first.answer.id);
+  assert.equal(base.answerText, 'Nací en una casa blanca junto al mar, en Acapulco.', 'Editar una profundización no toca la respuesta principal.');
+  // The new follow-up above is a first submission too (it asked for the next follow-up; refused by the stub).
+  externalCalls.splice(callsBefore);
+});

@@ -38,6 +38,7 @@ import {
   bookJobManager,
   sanitizeBookResultForParticipant,
   sanitizeBookVersionForParticipant,
+  toParticipantBookVersionSummary,
   toParticipantBookJobView,
 } from './bookJobManager.ts';
 import type { BookAuditIncidentStatus } from '../logic/bookAuditReport.ts';
@@ -1257,17 +1258,13 @@ apiRouter.post('/participant/session', async (req: Request, res: Response) => {
       return;
     }
 
-    const { token, cachedInterviews, cachedBookVersions } = req.body;
+    // V5.3.6: the browser no longer uploads its local copy of interviews and books on every
+    // sign-in (it could weigh several MB). The server's source of truth is Firestore, which is
+    // still synchronized before answering.
+    const { token } = req.body;
     if (!token) {
       res.status(400).json({ success: false, error: 'Token de invitación requerido.' });
       return;
-    }
-
-    if (
-      (Array.isArray(cachedInterviews) && cachedInterviews.length > 0) ||
-      (Array.isArray(cachedBookVersions) && cachedBookVersions.length > 0)
-    ) {
-      storage.restoreFromClientCache(cachedInterviews, cachedBookVersions);
     }
 
     await storage.syncFromFirestore(false, 'incremental');
@@ -1304,9 +1301,10 @@ apiRouter.post('/participant/session', async (req: Request, res: Response) => {
     const answers = storage.getAnswersForInterview(interview.id);
     const otherParticipants = storage.getParticipantsForInterview(interview.id);
     // V5.3: participants never receive audit information (coverage, contradictions, reports).
+    // V5.3.6: only the LIST of versions (no book text): each book is loaded when it is opened.
     const bookVersions = storage
       .getBookVersionsForInterview(interview.id)
-      .map((v) => sanitizeBookVersionForParticipant(v));
+      .map((v) => toParticipantBookVersionSummary(v));
 
     // Verify existing informed consent on record for this specific participant
     const consent = storage.getActiveConsent(interview.id, participant.id) || storage.getConsentForParticipant(participant.id, PRIVACY_NOTICE_VERSION);
@@ -1345,6 +1343,29 @@ apiRouter.post('/participant/session', async (req: Request, res: Response) => {
   }
 });
 
+// V5.3.6 — One saved book version (full content), loaded when the participant opens or downloads it.
+apiRouter.post('/participant/book/version', async (req: Request, res: Response) => {
+  try {
+    const { token, versionId } = req.body || {};
+    if (!token || !versionId) {
+      res.status(400).json({ success: false, error: 'Faltan datos para abrir el libro.' });
+      return;
+    }
+    const { interview } = storage.resolveToken(String(token));
+    const version = storage
+      .getBookVersionsForInterview(interview.id)
+      .find((v) => v.id === String(versionId));
+    if (!version) {
+      res.status(404).json({ success: false, error: 'No encontramos esta versión de tu libro.' });
+      return;
+    }
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ success: true, data: { bookVersion: sanitizeBookVersionForParticipant(version) } });
+  } catch (err: unknown) {
+    res.status(403).json({ success: false, error: (err as Error).message });
+  }
+});
+
 apiRouter.post('/participant/answer', async (req: Request, res: Response) => {
   try {
     const {
@@ -1363,6 +1384,7 @@ apiRouter.post('/participant/answer', async (req: Request, res: Response) => {
       audioRecordings,
       audios,
       idempotencyKey,
+      autosave,
     } = req.body;
 
     if (!token) {
@@ -1395,6 +1417,8 @@ apiRouter.post('/participant/answer', async (req: Request, res: Response) => {
       audio,
       audioRecordings: audioRecordings || audios,
       idempotencyKey: idempotencyKey || `idem_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      // V5.3.6: automatic save while the participant writes.
+      autosave: autosave === true,
     });
 
     const sanitizedResult =

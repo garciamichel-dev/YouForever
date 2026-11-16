@@ -83,6 +83,8 @@ interface ParticipantBookStudioProps {
     allVersions: ParticipantBookVersionRecord[];
   }) => void;
   onViewReadOnlyAnswers?: () => void;
+  /** V5.3.6: loads a saved version's full book (the session only lists the versions). */
+  onRequestFullBookVersion?: (versionId: string) => Promise<ParticipantBookVersionRecord | null>;
 }
 
 export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
@@ -95,6 +97,7 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
   bookVersions,
   onBookVersionSaved,
   onViewReadOnlyAnswers,
+  onRequestFullBookVersion,
 }) => {
   const participantNames = useMemo(() => {
     const names = [participant.name];
@@ -134,6 +137,14 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
     if (!hasSavedVersions) return null;
     return bookVersions.find((v) => v.id === selectedVersionId) || bookVersions[0];
   }, [hasSavedVersions, bookVersions, selectedVersionId]);
+
+  // V5.3.6: a version opened from the list is loaded on demand.
+  const activeSavedVersionNeedsContent = Boolean(activeSavedVersion && !activeSavedVersion.manuscript);
+  useEffect(() => {
+    if (activeSavedVersion && !activeSavedVersion.manuscript && onRequestFullBookVersion) {
+      void onRequestFullBookVersion(activeSavedVersion.id);
+    }
+  }, [activeSavedVersion?.id, activeSavedVersionNeedsContent]);
 
   const hasUpdatedAnswers = useMemo(() => {
     return hasUpdatedAnswersSinceBookVersion({
@@ -1042,6 +1053,11 @@ BOOK_IN_PROGRESS_MESSAGE
     }
     try {
       let composedForVersion = preComposedBook;
+      if (!composedForVersion && !version.manuscript && onRequestFullBookVersion) {
+        const loaded = await onRequestFullBookVersion(version.id);
+        if (!loaded) throw new Error(BOOK_IN_PROGRESS_MESSAGE);
+        version = loaded;
+      }
       if (!composedForVersion) {
         const resolvedCover = await ensureDataUrlForPdf(version.coverPhoto);
         const resolvedChapterPhotos: Record<string, DemoInMemoryPhoto | null> = {};
@@ -2398,6 +2414,14 @@ BOOK_IN_PROGRESS_MESSAGE
               <p className="text-sm font-serif font-semibold text-white max-w-xs mx-auto">
                 Selecciona un Estilo Literario a la izquierda para generar tu primer borrador editorial de 6 páginas.
               </p>
+            </div>
+          ) : !isEditingLayout && activeSavedVersionNeedsContent ? (
+            <div
+              data-testid="viewer-loading-saved-version"
+              className="py-16 px-6 rounded-2xl border border-amber-400/30 bg-amber-500/10 text-center space-y-3 my-4"
+            >
+              <Loader2 className="w-6 h-6 animate-spin text-amber-300 mx-auto" />
+              <p className="text-sm font-serif font-semibold text-white">Abriendo esta versión de tu libro...</p>
             </div>
           ) : isEditingLayout && (isGeneratingAI || !hasAiDraftLoadedForSession) ? (
             <div
