@@ -170,9 +170,19 @@ export interface MiEsenciaInterlocutor {
   messagesSentThisMonth: number;
   lastActiveDate?: string;
   consentAcceptedAt?: string;
+  /**
+   * V5.4.2: general access code (created by default with every avatar). It is not linked to any
+   * relative: the avatar does not know who is talking, never assumes it, and the code is never
+   * renamed after a visitor introduces themselves (the identity lives only in that conversation).
+   */
+  isGeneralAccess?: boolean;
   createdAt: string;
   updatedAt: string;
 }
+
+/** V5.4.2: name and relationship of the default general access code. */
+export const MI_ESENCIA_GENERAL_ACCESS_NAME = 'Visitante';
+export const MI_ESENCIA_GENERAL_ACCESS_RELATIONSHIP = 'Sin identificar';
 
 /**
  * Entidad E.1 — Memoria Conversacional Selectiva (mi_esencia_memories)

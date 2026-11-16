@@ -756,16 +756,11 @@ miEsenciaRouter.post('/family/verify-code', async (req: Request, res: Response) 
       });
     }
 
-    const overview = miEsenciaStore.getAdminOverviewData();
-    const sessions = overview.conversations
-      .filter(
-        (s) =>
-          s.avatarId === check.subscription!.avatarId &&
-          s.interlocutorId === check.interlocutor!.interlocutorId
-      )
-      .sort((a, b) => a.startedAt.localeCompare(b.startedAt));
-    const openContradictions = overview.contradictions.filter(
-      (c) => c.avatarId === check.subscription!.avatarId && c.status === 'abierta'
+    // V5.4.2: only this family member's data (before, the whole admin overview of EVERY avatar was
+    // built — re-syncing all of them — just to filter these conversations).
+    const { sessions, openContradictions } = miEsenciaStore.getFamilyPortalData(
+      check.subscription.avatarId,
+      check.interlocutor.interlocutorId
     );
 
     res.json({

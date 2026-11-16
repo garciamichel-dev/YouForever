@@ -2974,6 +2974,14 @@ export const MiEsenciaAdminSection: React.FC<MiEsenciaAdminSectionProps> = ({ ad
                                             <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 font-medium">
                                               {cred.relationshipToPerson}
                                             </span>
+                                            {linkedInter?.isGeneralAccess && (
+                                              <span
+                                                className="px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-900 font-semibold"
+                                                title="Código general: no está relacionado con ningún familiar; el avatar no sabe con quién conversa. Es compartido: no guarda memorias privadas."
+                                              >
+                                                Código general (sin identificar)
+                                              </span>
+                                            )}
                                             {linkedInter?.affectionateCallName && (
                                               <span className="px-2 py-0.5 rounded-full bg-stone-100 text-stone-700">
                                                 Apodo: «{linkedInter.affectionateCallName}»

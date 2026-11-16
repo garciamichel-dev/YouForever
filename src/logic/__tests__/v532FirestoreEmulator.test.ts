@@ -680,7 +680,8 @@ test('V5.4.0-F1: el avatar muestra la fotografía real que se le pide y solo la 
   externalCalls.splice(callsBefore); // the reply model is unreachable here (refused by the stub)
 
   assert.equal(reply.photoAttachments?.length, 1, JSON.stringify(reply.photoAttachments));
-  assert.equal(reply.photoAttachments[0].caption, 'La casa de mi abuelita Irene en Acapulco');
+  // V5.4.2: without an AI engine available, the caption is the original one cleaned (never literal).
+  assert.equal(reply.photoAttachments[0].caption, 'La casa de mi abuelita Irene en Acapulco.');
   assert.match(reply.replyText, /fotograf/i, 'El texto acompaña a la foto.');
   assert.doesNotMatch(reply.replyText, /no puedo (mostrar|enseñar|compartir)/i);
   const lastAvatarMsg = reply.session.messages[reply.session.messages.length - 1];
@@ -707,7 +708,195 @@ test('V5.4.0-F1: el avatar muestra la fotografía real que se le pide y solo la 
   }
   const legacy = await store.converseWithAvatar({ personalCode: code, messageText: 'Muéstrame la foto de tu culebrina en la playa', acceptConsent: true });
   externalCalls.splice(callsBefore);
-  assert.equal(legacy.photoAttachments?.[0]?.caption, 'Volando mi culebrina en la playa');
+  assert.equal(legacy.photoAttachments?.[0]?.caption, 'Volando mi culebrina en la playa.');
   const legacyImage = await store.getFamilyChatPhoto({ personalCode: code, photoId: legacy.photoAttachments[0].photoId });
   assert.ok(legacyImage && legacyImage.buffer.equals(png));
+});
+
+// =============================================================================================
+// V5.4.2 — Mi Esencia: código general, prompt con ChatGPT, descripción de fotos por IA y rendimiento.
+// =============================================================================================
+
+const PNG_1PX = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+  'base64'
+);
+
+async function interviewWithPhotos(title: string, items: Array<{ text: string; caption?: string }>) {
+  const created = await storage.createInterview({
+    title,
+    storyMode: 'individual',
+    storyType: 'biografia_personal',
+    participants: [{ name: 'Elena Robles', relationship: 'Titular', role: 'primary' }],
+    customSufficiencyThreshold: 100000,
+    performedBy: 'admin_pruebas',
+  });
+  created.interview.maxFollowUpsAtCreation = 0;
+  const token = created.participantTokens[0].plainToken;
+  const questions = storage.getQuestionsForVersion(created.interview.questionnaireVersionId);
+  for (const [i, it] of items.entries()) {
+    await storage.submitAnswer({
+      plainToken: token,
+      questionId: questions[i].id,
+      answerText: it.text,
+      notRecalled: false,
+      photos: it.caption
+        ? [{ dataUrl: `data:image/png;base64,${PNG_1PX.toString('base64')}`, caption: it.caption, fileName: `f${i}.png`, mimeType: 'image/png' }]
+        : undefined,
+      idempotencyKey: `${title}_${i}`,
+    });
+  }
+  return { interview: created.interview, token, questions };
+}
+
+test('V5.4.2-M1: un avatar nuevo crea por defecto un código GENERAL, sin familiar; el avatar no se apropia de la identidad de quien escribe', async () => {
+  const store = miEsencia.miEsenciaStore;
+  await store.ensureInitialized();
+  const { interview } = await interviewWithPhotos('Código general V5.4.2', [
+    { text: 'Mi hija Laura y mi nieto Pablo vivían conmigo en Acapulco.' },
+    { text: 'Mi esposa Carmen cocinaba pozole los jueves.' },
+  ]);
+  const created = await store.createOrSyncAvatarFromInterview({ interviewId: interview.id, adminEmail: 'admin_pruebas' });
+  assert.equal(created.credentials.length, 1, 'Un solo código por defecto (no uno por cada familiar mencionado).');
+  const cred = created.credentials[0];
+  const inter = store['interlocutors'].get(cred.interlocutorId);
+  assert.equal(inter.isGeneralAccess, true);
+  assert.equal(inter.fullName, 'Visitante');
+  assert.equal(inter.linkedRelatedPersonId, undefined, 'No está relacionado con ningún familiar.');
+  assert.equal(inter.permissions.canAddPrivateMemoryLevelC, false, 'Código compartido: sin memorias privadas.');
+
+  const callsBefore = externalCalls.length;
+  const reply = await store.converseWithAvatar({
+    personalCode: cred.personalCodePlain,
+    messageText: 'Hola, soy Laura, tu hija.',
+    acceptConsent: true,
+  });
+  externalCalls.splice(callsBefore);
+  assert.ok(reply.replyText.length > 0);
+  const after = store['interlocutors'].get(cred.interlocutorId);
+  assert.equal(after.fullName, 'Visitante', 'El código general nunca se renombra con la identidad de quien escribe.');
+  assert.equal(store['credentials'].get(cred.accessCredentialId).interlocutorName, cred.interlocutorName);
+
+  // Codes for specific relatives are still created when the administrator lists them.
+  const other = await interviewWithPhotos('Con familiares V5.4.2', [{ text: 'Recuerdo mi infancia.' }]);
+  const withFamily = await store.createOrSyncAvatarFromInterview({
+    interviewId: other.interview.id,
+    adminEmail: 'admin_pruebas',
+    initialFamilyMembers: [{ fullName: 'Ana Robles', relationshipToPerson: 'Nieta' }],
+  });
+  assert.equal(withFamily.credentials.length, 2);
+  assert.equal(store['interlocutors'].get(withFamily.credentials[0].interlocutorId).isGeneralAccess, true);
+  assert.equal(store['interlocutors'].get(withFamily.credentials[1].interlocutorId).isGeneralAccess, undefined);
+});
+
+test('V5.4.2-M2: con ChatGPT seleccionado y su campo de prompt vacío, TODOS los turnos pasan por el modelo con el prompt (sin textos fijos)', async () => {
+  const store = miEsencia.miEsenciaStore;
+  await store.ensureInitialized();
+  const { interview } = await interviewWithPhotos('Prompt ChatGPT V5.4.2', [{ text: 'Nací en Acapulco.' }]);
+  const created = await store.createOrSyncAvatarFromInterview({ interviewId: interview.id, adminEmail: 'admin_pruebas' });
+  const person = created.persons[0];
+  const live = store['persons'].get(person.personId);
+  live.aiConfig = {
+    ...live.aiConfig,
+    conversationConfigMode: 'modo_personalizado',
+    primaryProvider: 'openai',
+    openaiPromptContent: '',
+    geminiPromptContent: 'Eres la abuela Elena. Responde siempre con calidez.',
+  };
+  const code = created.credentials[0].personalCodePlain;
+  // Small talk used to be intercepted by a fixed text when OpenAI's own field was empty.
+  const callsBefore = externalCalls.length;
+  const first = await store.converseWithAvatar({ personalCode: code, messageText: 'Hola, ¿cómo estás?', acceptConsent: true });
+  first.session.lastProviderUsed = undefined;
+  const reply = await store.converseWithAvatar({ personalCode: code, messageText: '¿Cómo estás hoy?', acceptConsent: true });
+  externalCalls.splice(callsBefore);
+  assert.ok(reply.session.lastProviderUsed, 'El turno se resolvió por el orquestador del modelo con el prompt.');
+
+  const panel = fs.readFileSync(path.join(REPO_ROOT, 'src/modules/mi-esencia/MiEsenciaAvatarAiConfigPanel.tsx'), 'utf-8');
+  assert.match(panel, /openai-prompt-differs-warning/);
+  assert.match(panel, /Usar el mismo prompt que Gemini/);
+});
+
+test('V5.4.2-M3: el pie de cada foto lo escribe el motor configurado con el prompt del avatar (no la transcripción literal), y se reutiliza', async () => {
+  const store = miEsencia.miEsenciaStore;
+  await store.ensureInitialized();
+  const { interview } = await interviewWithPhotos('Pie de foto IA V5.4.2', [
+    { text: 'La casa de mi abuelita Irene tenía un sillón.', caption: 'y bueno la casa de de mi abuelita ju- Irene en acapulco' },
+  ]);
+  const created = await store.createOrSyncAvatarFromInterview({ interviewId: interview.id, adminEmail: 'admin_pruebas' });
+  const live = store['persons'].get(created.persons[0].personId);
+  live.aiConfig = { ...live.aiConfig, conversationConfigMode: 'modo_personalizado', primaryProvider: 'gemini', geminiPromptContent: 'PROMPT-DEL-AVATAR: habla como la abuela Elena.' };
+  const code = created.credentials[0].personalCodePlain;
+
+  const calls: Array<{ systemInstructions: string; userText: string }> = [];
+  store.__setPhotoDescriptionGeneratorForTests(async (input: any) => {
+    calls.push(input);
+    return '«Así era la casa de mi abuelita Irene, allá en Acapulco.»';
+  });
+  try {
+    const callsBefore = externalCalls.length;
+    const r1 = await store.converseWithAvatar({ personalCode: code, messageText: '¿Tienes una foto de la casa de tu abuelita?', acceptConsent: true });
+    const r2 = await store.converseWithAvatar({ personalCode: code, messageText: 'Muéstrame otra vez la foto de la casa de tu abuelita', acceptConsent: true });
+    externalCalls.splice(callsBefore);
+    assert.equal(r1.photoAttachments[0].caption, 'Así era la casa de mi abuelita Irene, allá en Acapulco.');
+    assert.equal(r2.photoAttachments[0].caption, r1.photoAttachments[0].caption);
+    assert.equal(calls.length, 1, 'La descripción se genera una vez y se reutiliza.');
+    assert.match(calls[0].systemInstructions, /PROMPT-DEL-AVATAR/, 'Usa el prompt del avatar.');
+    assert.match(calls[0].systemInstructions, /pie de una fotograf/i);
+    assert.match(calls[0].userText, /ju- Irene/, 'Recibe la descripción original como fuente.');
+    assert.doesNotMatch(JSON.stringify(r1.session.messages.at(-1)), /ju-|de de/, 'El chat nunca muestra el texto literal.');
+
+    // No engine available → original description cleaned (no fillers or false starts).
+    store.__setPhotoDescriptionGeneratorForTests(async () => null);
+    const r3 = await store.converseWithAvatar({ personalCode: code, messageText: 'foto de la casa de tu abuelita', acceptConsent: true });
+    externalCalls.splice(callsBefore);
+    assert.equal(r3.photoAttachments[0].caption, 'La casa de mi abuelita Irene en acapulco.');
+  } finally {
+    store.__setPhotoDescriptionGeneratorForTests(null);
+  }
+});
+
+test('V5.4.2-M4: rendimiento — sin cambios no se reconstruye nada; el PDF compilado se genera solo al descargarlo; el acceso familiar no arma el panorama de administrador', async () => {
+  const store = miEsencia.miEsenciaStore;
+  await store.ensureInitialized();
+  const { interview, token, questions } = await interviewWithPhotos('Rendimiento V5.4.2', [
+    { text: 'Primer recuerdo.', caption: 'Foto uno' },
+    { text: 'Segundo recuerdo.' },
+  ]);
+  const created = await store.createOrSyncAvatarFromInterview({ interviewId: interview.id, adminEmail: 'admin_pruebas' });
+  const personId = created.persons[0].personId;
+  store.syncPersonWithAssignedPdfAndInterview(personId);
+
+  const original = store['buildTestimonyBlocksFromInterviewData'].bind(store);
+  let builds = 0;
+  let withPhotoData = 0;
+  store['buildTestimonyBlocksFromInterviewData'] = (p: any) => {
+    builds++;
+    if (p.includePhotoData) withPhotoData++;
+    return original(p);
+  };
+  try {
+    for (let i = 0; i < 5; i++) store.syncPersonWithAssignedPdfAndInterview(personId);
+    assert.equal(builds, 0, 'Sin cambios en la entrevista no se reconstruye nada.');
+
+    await storage.submitAnswer({ plainToken: token, questionId: questions[1].id, answerText: 'Segundo recuerdo, corregido.', notRecalled: false, autosave: true, idempotencyKey: 'perf_edit' });
+    store.syncPersonWithAssignedPdfAndInterview(personId);
+    assert.equal(builds, 1, 'Un cambio sí reconstruye (una vez).');
+    assert.equal(withPhotoData, 0, 'La sincronización no carga el contenido de las fotos.');
+    const person = store['persons'].get(personId);
+    const pdf = store['compilationPdfs'].get(person.sourcePdfId);
+    assert.match(pdf.rawTextContent, /Segundo recuerdo, corregido\./, 'El texto que lee el avatar se actualiza al momento.');
+    assert.equal(pdf.pdfBase64, '', 'El archivo PDF no se regenera en cada sincronización.');
+
+    const downloaded = store.getCompilationPdfById(person.sourcePdfId);
+    assert.ok(downloaded && downloaded.pdfBase64.length > 100, 'Al descargarlo, el PDF se genera completo.');
+    assert.ok(Buffer.from(downloaded.pdfBase64, 'base64').subarray(0, 5).toString() === '%PDF-');
+  } finally {
+    store['buildTestimonyBlocksFromInterviewData'] = original;
+  }
+
+  const router = fs.readFileSync(path.join(REPO_ROOT, 'src/server/miEsencia/miEsenciaRouter.ts'), 'utf-8');
+  const verify = router.slice(router.indexOf("'/family/verify-code'"), router.indexOf("'/family/accept-consent'"));
+  assert.doesNotMatch(verify, /getAdminOverviewData/);
+  assert.match(verify, /getFamilyPortalData/);
 });

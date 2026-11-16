@@ -1333,7 +1333,18 @@ apiRouter.post('/participant/session', async (req: Request, res: Response) => {
       )
     );
     const questions = storage.getQuestionsForVersion(interview.questionnaireVersionId);
-    const answers = storage.getAnswersForInterview(interview.id);
+    // V5.4.2: recordings travel as links (/api/audio/:id, authorized for this participant), never
+    // embedded as base64 inside every answer of the session.
+    const stripEmbeddedAudio = <T extends { audioUrl?: string; audioDataUrl?: string }>(v: T): T => {
+      if (!v || !v.audioUrl) return v;
+      const { audioDataUrl: _drop, ...rest } = v;
+      return rest as T;
+    };
+    const answers = storage.getAnswersForInterview(interview.id).map((a) => ({
+      ...a,
+      ...(a.audio ? { audio: stripEmbeddedAudio(a.audio) } : {}),
+      ...(Array.isArray(a.audioRecordings) ? { audioRecordings: a.audioRecordings.map(stripEmbeddedAudio) } : {}),
+    }));
     const otherParticipants = storage.getParticipantsForInterview(interview.id);
     // V5.3: participants never receive audit information (coverage, contradictions, reports).
     // V5.3.6: only the LIST of versions (no book text): each book is loaded when it is opened.

@@ -4424,7 +4424,11 @@ export class StorageManager {
     return undefined;
   }
 
-  public getPhotosForInterview(interviewId: string): InterviewPhotoRecord[] {
+  /**
+   * @param hydrate V5.4.2: false returns the photo records WITHOUT loading their image from disk
+   * (ids, descriptions and links only) — for routine syncs that never need the image itself.
+   */
+  public getPhotosForInterview(interviewId: string, hydrate: boolean = true): InterviewPhotoRecord[] {
     const activePhotoIds = new Set<string>();
     for (const ans of this.answers.values()) {
       if (ans.interviewId === interviewId && Array.isArray(ans.photos)) {
@@ -4439,6 +4443,7 @@ export class StorageManager {
     return Array.from(this.photos.values())
       .filter((p) => p.interviewId === interviewId && activePhotoIds.has(p.id))
       .map((p) => {
+        if (!hydrate) return p;
         if (
           !p.dataUrl ||
           !p.dataUrl.startsWith('data:image/') ||

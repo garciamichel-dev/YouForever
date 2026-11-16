@@ -913,3 +913,35 @@ test('V5.4.1-D3: el panel ofrece ambos borrados por entrevistado y siempre pide 
   const bulkFn = panel.slice(panel.indexOf('const handleConfirmBulkDelete'), panel.indexOf('const handleConfirmDeleteVersion'));
   assert.match(bulkFn, /method: 'DELETE'/);
 });
+
+test('V5.4.2-P1: la sesión del participante no incrusta las grabaciones en las respuestas (viajan como enlace protegido)', async () => {
+  const created = await storage.createInterview({
+    title: 'Audio en sesión V5.4.2',
+    storyMode: 'individual',
+    storyType: 'biografia_personal',
+    participants: [{ name: 'Elena Robles', relationship: 'Titular', role: 'primary' }],
+    customSufficiencyThreshold: 100000,
+    performedBy: 'admin_pruebas',
+  });
+  created.interview.maxFollowUpsAtCreation = 0;
+  const interview = created.interview;
+  const token = created.participantTokens[0].plainToken;
+  const q = storage.getQuestionsForVersion(interview.questionnaireVersionId)[0];
+  const tinyAudio = Buffer.from('OggS-grabacion-corta-simulada-0123456789'.repeat(20)).toString('base64');
+  await storage.submitAnswer({
+    plainToken: token,
+    questionId: q.id,
+    answerText: 'Recuerdo de voz',
+    notRecalled: false,
+    audios: [{ audioBase64: tinyAudio, mimeType: 'audio/ogg', durationSeconds: 2, transcription: 'Recuerdo de voz' }],
+    idempotencyKey: 'audio_p1',
+  });
+  const stored = storage.getAnswersForInterview(interview.id).find((a: any) => a.questionId === q.id);
+  assert.ok(stored.audioRecordings?.[0]?.audioDataUrl, 'Precondición: la respuesta guarda el audio corto incrustado.');
+
+  const session = await http('POST', '/participant/session', { body: { token } });
+  assert.equal(session.status, 200, session.text.slice(0, 300));
+  const ans = session.json.data.answers.find((a: any) => a.questionId === q.id);
+  assert.ok(ans.audioRecordings[0].audioUrl, 'La grabación llega como enlace.');
+  assert.doesNotMatch(JSON.stringify(session.json.data.answers), /audioDataUrl/, 'Sin audio incrustado en la sesión.');
+});

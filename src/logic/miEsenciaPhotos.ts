@@ -173,6 +173,7 @@ export function buildPhotoContextNote(selection: MiEsenciaPhotoSelection): strin
       `[Nota del sistema, no visible para el familiar: junto a tu respuesta se mostrará automáticamente ` +
       `${selection.photos.length === 1 ? 'esta fotografía real' : 'estas fotografías reales'} de tu testimonio: ${list}. ` +
       `Refiérete a ${selection.photos.length === 1 ? 'ella' : 'ellas'} con naturalidad y en primera persona usando solo lo que dice su descripción y tus recuerdos. ` +
+      `Esa descripción es la original del entrevistado y puede tener errores o muletillas: nunca la copies literalmente; dilo con tus propias palabras. ` +
       `Nunca digas que no puedes mostrar fotografías.]`
     );
   }
@@ -200,4 +201,45 @@ export function finalizeReplyForPhotos(reply: string, photos: MiEsenciaChatPhoto
       ? 'Aquí te comparto la fotografía que guardé de ese recuerdo.'
       : 'Aquí te comparto las fotografías que guardé de ese recuerdo.';
   return cleaned ? `${lead} ${cleaned}` : lead;
+}
+
+// =============================================================================================
+// V5.4.2 — Descripción de la fotografía generada por la IA (en lugar de la transcripción literal).
+// =============================================================================================
+import { cleanSpokenDisfluencies } from './spokenTextCleanup.ts';
+
+/** Instrucción puntual que se añade al prompt del avatar para describir una fotografía. */
+export const PHOTO_DESCRIPTION_TASK = `TAREA PUNTUAL (no es un turno de la conversación): escribe el pie de una fotografía tuya que se mostrará en el chat.
+- Escribe en tu propia voz y con el estilo de tu prompt, en una o dos oraciones (máximo 45 palabras).
+- Básate SOLO en la descripción original y en tu recuerdo; no inventes personas, lugares, fechas ni detalles que no estén ahí.
+- Corrige la redacción: sin muletillas, repeticiones ni titubeos del habla.
+- Devuelve únicamente el texto del pie de foto, sin comillas, sin títulos y sin saludos.`;
+
+export function buildPhotoDescriptionUserText(entry: Pick<MiEsenciaPhotoCatalogEntry, 'caption' | 'questionLiteral' | 'answerLiteral'>): string {
+  const answer = String(entry.answerLiteral || '').trim();
+  return [
+    `Descripción original que escribiste al subir la fotografía (puede tener errores de redacción o muletillas): «${entry.caption}»`,
+    entry.questionLiteral ? `Pregunta de tu testimonio: «${entry.questionLiteral}»` : '',
+    answer ? `Tu recuerdo: «${answer.length > 1200 ? `${answer.slice(0, 1200)}…` : answer}»` : '',
+    'Escribe ahora el pie de foto.',
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+/** Limpia lo que devuelve el modelo: un solo párrafo, sin comillas envolventes ni etiquetas. */
+export function sanitizeGeneratedPhotoDescription(text: string | null | undefined): string {
+  let t = String(text || '').replace(/\s+/g, ' ').trim();
+  t = t.replace(/^(pie de foto|descripci[oó]n)\s*:\s*/i, '');
+  t = t.replace(/^["«“']+|["»”']+$/g, '').trim();
+  if (t.length > 320) t = `${t.slice(0, 317).replace(/\s+\S*$/, '')}…`;
+  return t;
+}
+
+/** Respaldo sin IA: la descripción original sin muletillas ni titubeos y con puntuación final. */
+export function cleanPhotoCaptionForDisplay(caption: string): string {
+  const [clean] = cleanSpokenDisfluencies([String(caption || '').trim()]);
+  const t = (clean || '').trim();
+  if (!t) return 'Fotografía de mi testimonio.';
+  return /[.!?…]$/.test(t) ? t : `${t}.`;
 }
