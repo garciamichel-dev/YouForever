@@ -1074,7 +1074,12 @@ test('V5.1-D2: un fallo técnico conserva los lotes, se informa como técnico y 
   assert.equal(first.manuscript.incompleteDraftNotice, buildIncompleteDraftUserNotice('technical'));
   assert.equal(first.manuscript.approvalEvidence, undefined);
   assert.deepEqual(first.invalidatedBatchIndexes || [], [], 'Un fallo técnico no invalida texto ya redactado.');
-  assert.deepEqual(Object.keys(savedCheckpoints), ['0']);
+  // V5.3.3: batches are drafted in parallel; every batch that finished is kept (only batch 1 failed).
+  assert.deepEqual(
+    Object.keys(savedCheckpoints).sort(),
+    Array.from({ length: first.totalBatches || 0 }, (_, i) => String(i)).filter((i) => i !== '1')
+  );
+  assert.equal(first.batchesCompleted, (first.totalBatches || 0) - 1);
   assert.equal(savedCheckpoints['0'].sourceFingerprint, first.sourceFingerprint);
 
   // Resume in a "new process": only the persisted checkpoints are available.
@@ -1092,7 +1097,7 @@ test('V5.1-D2: un fallo técnico conserva los lotes, se informa como técnico y 
   });
   assert.equal(resumed.manuscript.generationStatus, 'approved', `${resumed.internalReasonCode}: ${resumed.diagnosticSummary}`);
   assert.equal(resumedDrafter.calls.includes(0), false, 'El lote 0 ya estaba redactado y no debe pagarse de nuevo.');
-  assert.equal(resumedDrafter.calls.length, (resumed.totalBatches || 0) - 1);
+  assert.deepEqual(resumedDrafter.calls, [1], 'Solo se redacta el lote que faltaba.');
 });
 
 test('V5.1-D3: los lotes de otra versión de la entrevista, de otro estilo o sin huella nunca se reutilizan', async () => {
@@ -1314,9 +1319,11 @@ test('V5.1-D4: el gestor de trabajos solo hereda lotes de la misma huella y no s
       null
     );
 
-    // Participants see the failure family but never the internal code or diagnostic.
+    // V5.3.3: participants never see a failure family, internal code or diagnostic: only that
+    // their book is still being prepared.
     const view = toParticipantBookJobView(sameSettled!);
-    assert.equal(view.failureCategory, 'repair_pending');
+    assert.equal(view.failureCategory, undefined);
+    assert.equal(view.repairPass, 0);
     assert.equal('internalReasonCode' in view, false);
     assert.equal('diagnosticSummary' in view, false);
   } finally {

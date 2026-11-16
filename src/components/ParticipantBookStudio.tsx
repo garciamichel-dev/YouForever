@@ -58,6 +58,13 @@ import { generateRealDemoBookPdf, preloadBookResourcesForPdf } from '../utils/de
 import { ForeverYouLogo } from './ForeverYouLogo';
 
 /** V5.3.1: shown in the preview and before saving the final book. */
+/**
+ * V5.3.3: the only message a participant sees while their book is not ready yet. Technical causes
+ * are recorded in the administrator log; the participant is never told about errors.
+ */
+const BOOK_IN_PROGRESS_MESSAGE =
+  'Tu libro sigue en preparación. Pulsa «Continuar preparando» y seguiremos desde donde avanzamos.';
+
 const AI_DOCUMENT_REVIEW_NOTICE =
   'Este documento se redacta con ayuda de inteligencia artificial y puede contener errores. Siempre será necesaria una revisión exhaustiva por parte del autor de la autobiografía.';
 
@@ -304,7 +311,7 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
     if (!rawText || !rawText.trim()) {
       return {
         success: false,
-        error: 'No recibimos respuesta en este momento. Por favor intenta nuevamente.',
+        error: BOOK_IN_PROGRESS_MESSAGE,
       };
     }
     try {
@@ -312,7 +319,7 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
     } catch (_parseErr) {
       return {
         success: false,
-        error: 'Ocurrió un inconveniente temporal al preparar tu libro. Por favor intenta nuevamente.',
+        error: BOOK_IN_PROGRESS_MESSAGE,
       };
     }
   };
@@ -599,7 +606,7 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
 
       if (consecutiveNetworkErrors >= 6) {
         throw new Error(
-          'Perdimos brevemente la conexión mientras preparábamos tu libro. Puedes intentar de nuevo y continuaremos desde el último avance guardado.'
+BOOK_IN_PROGRESS_MESSAGE
         );
       }
     }
@@ -611,8 +618,7 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
     }
     if (currentJob.status === 'failed' || !currentJob.result) {
       throw new Error(
-        currentJob.error ||
-          'No pudimos reunir todos tus recuerdos en este momento. Por favor intenta nuevamente.'
+BOOK_IN_PROGRESS_MESSAGE
       );
     }
 
@@ -679,8 +685,7 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
           } catch (resumeErr: any) {
             if (!cancelledEffect && reqId === styleRequestIdRef.current) {
               setStudioError(
-                resumeErr?.message ||
-                  'No pudimos retomar la preparación de tu libro. Puedes intentarlo nuevamente.'
+BOOK_IN_PROGRESS_MESSAGE
               );
               setRetryAction('preview');
             }
@@ -775,8 +780,7 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
 
       if (!startRes.ok || !startData.success || !startData.data) {
         setStudioError(
-          startData.error ||
-            'No pudimos reunir todos tus recuerdos en este momento. Por favor intenta nuevamente.'
+          startData.error || BOOK_IN_PROGRESS_MESSAGE
         );
         setRetryAction('preview');
         return;
@@ -791,16 +795,13 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
       if (payload.manuscript) {
         applyGeneratedManuscriptPayload(payload, styleId);
       } else {
-        setStudioError(
-          'No pudimos reunir todos tus recuerdos en este momento. Por favor intenta nuevamente.'
-        );
+        setStudioError(BOOK_IN_PROGRESS_MESSAGE);
         setRetryAction('preview');
       }
     } catch (err: any) {
       if (reqId === styleRequestIdRef.current && err?.name !== 'AbortError') {
         setStudioError(
-          err?.message ||
-            'Ocurrió un inconveniente al preparar tu vista previa. Puedes intentarlo nuevamente desde donde nos quedamos.'
+BOOK_IN_PROGRESS_MESSAGE
         );
         setRetryAction('preview');
       }
@@ -1109,7 +1110,7 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
         } catch (_fetchErr: any) {
           setRetryAction('save');
           throw new Error(
-            'No pudimos conectar para preparar tu libro completo. No se guardó ninguna versión incompleta. Por favor intenta de nuevo.'
+BOOK_IN_PROGRESS_MESSAGE
           );
         }
 
@@ -1117,8 +1118,7 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
         if (!startRes.ok || !startData.success || !startData.data) {
           setRetryAction('save');
           throw new Error(
-            startData.error ||
-              'No fue posible finalizar tu libro completo en este momento. No se guardó ninguna versión incompleta ni afectó tus libros disponibles.'
+            startData.error || BOOK_IN_PROGRESS_MESSAGE
           );
         }
 
@@ -1133,7 +1133,7 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
         if (!payload || !payload.manuscript) {
           setRetryAction('save');
           throw new Error(
-            'No fue posible finalizar tu libro completo en este momento. No se guardó ninguna versión incompleta ni afectó tus libros disponibles.'
+BOOK_IN_PROGRESS_MESSAGE
           );
         }
 
@@ -1162,8 +1162,7 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
           setHasAiDraftLoadedForSession(true);
           setRetryAction('full');
           throw new Error(
-            candidateManu.incompleteDraftNotice ||
-              'Este libro aún es un borrador preliminar y necesita una nueva revisión para reunir todos tus recuerdos antes de guardarlo como versión definitiva.'
+BOOK_IN_PROGRESS_MESSAGE
           );
         }
         if (
@@ -1175,7 +1174,7 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
         ) {
           setRetryAction('save');
           throw new Error(
-            'No pudimos completar la revisión de todos tus recuerdos en este intento. No se guardó una versión incompleta.'
+BOOK_IN_PROGRESS_MESSAGE
           );
         }
 
@@ -1337,7 +1336,7 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
     } catch (err: any) {
       const rawMsg = String(err?.message || '');
       const cleanMsg = /aborted/i.test(rawMsg)
-        ? 'La generación tardó más de lo esperado. Por favor haz clic nuevamente en «Generar y Descargar Libro Completo en PDF».'
+        ? BOOK_IN_PROGRESS_MESSAGE
         : rawMsg || 'Error al guardar la versión del libro.';
       setStudioError(cleanMsg);
     } finally {
@@ -1448,9 +1447,18 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
       </div>
 
       {studioError && (
-        <div className="bg-red-50 border border-red-200 text-red-800 rounded-2xl p-4 text-sm flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div
+          data-testid={retryAction ? 'book-in-progress-notice' : 'studio-error'}
+          className={`${
+            retryAction ? 'bg-amber-50 border-amber-200 text-amber-950' : 'bg-red-50 border-red-200 text-red-800'
+          } border rounded-2xl p-4 text-sm flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3`}
+        >
           <div className="flex items-start gap-3">
-            <ShieldAlert className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
+            {retryAction ? (
+              <Loader2 className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
+            ) : (
+              <ShieldAlert className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
+            )}
             <div>{studioError}</div>
           </div>
           {retryAction && (
@@ -1463,10 +1471,10 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
                   void handleSelectNarrativeStyle(narrativeStyle);
                 }
               }}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-red-700 hover:bg-red-800 text-white text-xs font-semibold shrink-0 cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-amber-800 hover:bg-amber-900 text-white text-xs font-semibold shrink-0 cursor-pointer"
             >
               <RefreshCw className="w-3.5 h-3.5" />
-              <span>Reintentar operación</span>
+              <span>Continuar preparando</span>
             </button>
           )}
         </div>
@@ -1503,9 +1511,6 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
                       generationJobProgress.totalBatches
                     )}{' '}
                     de {generationJobProgress.totalBatches}
-                    {generationJobProgress.repairPass > 0
-                      ? ` • Revisando detalles (ronda ${generationJobProgress.repairPass})`
-                      : ''}
                   </p>
                 )}
               </div>
@@ -1547,18 +1552,15 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
         manuscript.status === 'incomplete_draft') && (
         <div
           data-testid="incomplete-draft-banner"
-          className="bg-amber-50 border-2 border-amber-300 text-amber-950 rounded-2xl p-4 sm:p-5 text-sm flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 shadow-xs"
+          className="bg-amber-50 border border-amber-200 text-amber-950 rounded-2xl p-4 sm:p-5 text-sm flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 shadow-xs"
         >
           <div className="flex items-start gap-3">
-            <ShieldAlert className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
+            <Loader2 className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
             <div className="space-y-1">
               <div className="text-xs font-extrabold tracking-wide uppercase text-amber-900">
-                BORRADOR INCOMPLETO — PENDIENTE DE REVISIÓN
+                TU LIBRO SIGUE EN PREPARACIÓN
               </div>
-              <p className="text-xs text-amber-900 leading-relaxed">
-                {manuscript.incompleteDraftNotice ||
-                  'Puedes leer este borrador preliminar aquí, pero todavía necesita una nueva revisión para incluir todos tus recuerdos con fidelidad y fluidez antes de guardarlo como libro definitivo.'}
-              </p>
+              <p className="text-xs text-amber-900 leading-relaxed">{BOOK_IN_PROGRESS_MESSAGE}</p>
             </div>
           </div>
           {narrativeStyle && (
@@ -1570,7 +1572,7 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
               className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-amber-800 hover:bg-amber-900 disabled:opacity-50 text-white text-xs font-semibold shrink-0 cursor-pointer"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isGeneratingAI ? 'animate-spin' : ''}`} />
-              <span>Intentar de nuevo</span>
+              <span>Continuar preparando</span>
             </button>
           )}
         </div>

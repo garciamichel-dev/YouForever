@@ -1617,6 +1617,53 @@ async function callGeminiBookModelBatch(params: {
   throw lastError || new Error(`Fallo al generar manuscrito con Google Gemini (${params.modelName}).`);
 }
 
+// =============================================================================================
+// V5.3.3 — Time and token budget of book generation
+// =============================================================================================
+/** The 5-page editorial sample must be on screen within 60 s (budget leaves margin for the PDF view). */
+export let PREVIEW_TIME_BUDGET_MS = Number(process.env.BOOK_PREVIEW_TIME_BUDGET_MS) || 50_000;
+/** Tests only. */
+export function __setPreviewTimeBudgetForTests(ms: number | null): void {
+  PREVIEW_TIME_BUDGET_MS = ms ?? (Number(process.env.BOOK_PREVIEW_TIME_BUDGET_MS) || 50_000);
+}
+/** Shortest model call worth starting inside the sample budget. */
+export const PREVIEW_MIN_CALL_MS = 8_000;
+/** A second provider is only tried for the sample if at least this much budget is left. */
+export const PREVIEW_FAILOVER_MIN_MS = 18_000;
+
+export type BookReasoningEffort = 'minimal' | 'low' | 'medium' | 'high';
+const parseEffort = (raw: string | undefined, fallback: BookReasoningEffort): BookReasoningEffort =>
+  raw === 'minimal' || raw === 'low' || raw === 'medium' || raw === 'high' ? raw : fallback;
+/**
+ * Reasoning models (gpt-5/gpt-6/o-series) spend most of their completion tokens "thinking". Book
+ * drafting follows explicit instructions and does not need deep reasoning: a low effort keeps the
+ * same instructions while cutting latency and completion tokens. Configurable per scope.
+ */
+export const BOOK_REASONING_EFFORT_PREVIEW = parseEffort(process.env.BOOK_REASONING_EFFORT_PREVIEW, 'low');
+export const BOOK_REASONING_EFFORT_FULL = parseEffort(process.env.BOOK_REASONING_EFFORT_FULL, 'low');
+export const BOOK_REASONING_EFFORT_AUDIT = parseEffort(process.env.BOOK_REASONING_EFFORT_AUDIT, 'low');
+
+export function isReasoningBookModel(model: string): boolean {
+  return /^gpt-6|^gpt-5|^o1|^o3|^o4/i.test(String(model || ''));
+}
+
+/** Models that rejected the `reasoning_effort` parameter (they are called without it afterwards). */
+const modelsRejectingReasoningEffort = new Set<string>();
+export function reasoningEffortParams(model: string, effort?: BookReasoningEffort): Record<string, unknown> {
+  if (!effort || !isReasoningBookModel(model) || modelsRejectingReasoningEffort.has(model)) return {};
+  return { reasoning_effort: effort };
+}
+export function noteReasoningEffortRejection(model: string, err: unknown): boolean {
+  const msg = String((err as any)?.message || err || '');
+  if (/reasoning_effort|reasoning effort|unrecognized request argument|unsupported.*parameter|unsupported_parameter/i.test(msg)) {
+    if (!modelsRejectingReasoningEffort.has(model)) {
+      modelsRejectingReasoningEffort.add(model);
+      return true;
+    }
+  }
+  return false;
+}
+
 async function callOpenAiBookModelBatch(params: {
   modelName: string;
   systemInstructionText: string;
@@ -1624,6 +1671,7 @@ async function callOpenAiBookModelBatch(params: {
   multimodalPhotos: MultimodalBookPhotoInput[];
   timeoutMs: number;
   allowBackupModels?: boolean;
+  reasoningEffort?: BookReasoningEffort;
 }): Promise<{ parsed: ParsedAiManuscriptBatchResponse; respondedModel: string; cachedTokens?: number }> {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey || apiKey.trim() === '' || apiKey === 'MY_OPENAI_API_KEY') {
@@ -1690,6 +1738,7 @@ async function callOpenAiBookModelBatch(params: {
         const callPromise = openai.chat.completions.create(
           {
             model: candidateModel,
+            ...reasoningEffortParams(candidateModel, params.reasoningEffort),
             response_format: { type: 'json_object' },
             messages: [
               {
@@ -1722,6 +1771,11 @@ async function callOpenAiBookModelBatch(params: {
       throw new Error(`Respuesta JSON vacía o incompleta del modelo OpenAI (${candidateModel}).`);
     } catch (err: any) {
       lastError = err;
+      // V5.3.3: a model that does not accept `reasoning_effort` is retried once without it.
+      if (noteReasoningEffortRejection(candidateModel, err)) {
+        candidateModels.splice(candidateModels.indexOf(candidateModel) + 1, 0, candidateModel);
+        continue;
+      }
       const errMsg = String(err?.message || '');
       const isInvalidModelOrTimeout =
         /model_not_found|does not exist|no existe|Tiempo de espera agotado|aborted/i.test(errMsg);
@@ -1732,6 +1786,7 @@ async function callOpenAiBookModelBatch(params: {
           const textOnlyPromise = openai.chat.completions.create(
             {
               model: candidateModel,
+              ...reasoningEffortParams(candidateModel, params.reasoningEffort),
               response_format: { type: 'json_object' },
               messages: [
                 {
@@ -2199,37 +2254,46 @@ Responde EXCLUSIVAMENTE con un JSON válido:
             ? mdl
             : available.find((m) => /^gpt-4o|^gpt-4\.1/.test(m)) || 'gpt-4o';
         const openai = new OpenAI({ apiKey });
-        const ctrl = new AbortController();
-        const timer = setTimeout(() => ctrl.abort(), 22000);
-        try {
-          const resp = await withTimeout(
-            openai.chat.completions.create(
-              {
-                model: resolvedModel,
-                response_format: { type: 'json_object' },
-                messages: [
-                  {
-                    role: 'system',
-                    content:
-                      'Eres un auditor semántico documental estricto de biografías. Evalúas fidelidad factual sin tolerar invenciones ni inversiones de sentido. Devuelves únicamente JSON.',
-                  },
-                  { role: 'user', content: judgePrompt },
-                ],
-              },
-              { signal: ctrl.signal }
-            ),
-            22000,
-            () => {
-              ctrl.abort();
-              return null;
-            }
-          );
-          const raw = resp?.choices?.[0]?.message?.content || '';
-          const parsed = safeJsonExtract<{ verdicts?: SemanticJudgmentVerdict[] } | null>(raw, null);
-          return Array.isArray(parsed?.verdicts) ? parsed!.verdicts : null;
-        } finally {
-          clearTimeout(timer);
+        // V5.3.3: one retry without `reasoning_effort` if the model does not accept it.
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => ctrl.abort(), 22000);
+          try {
+            const resp = await withTimeout(
+              openai.chat.completions.create(
+                {
+                  model: resolvedModel,
+                  // The judge classifies short cases; deep reasoning only multiplies tokens.
+                  ...reasoningEffortParams(resolvedModel, BOOK_REASONING_EFFORT_AUDIT),
+                  response_format: { type: 'json_object' },
+                  messages: [
+                    {
+                      role: 'system',
+                      content:
+                        'Eres un auditor semántico documental estricto de biografías. Evalúas fidelidad factual sin tolerar invenciones ni inversiones de sentido. Devuelves únicamente JSON.',
+                    },
+                    { role: 'user', content: judgePrompt },
+                  ],
+                },
+                { signal: ctrl.signal }
+              ),
+              22000,
+              () => {
+                ctrl.abort();
+                return null;
+              }
+            );
+            const raw = resp?.choices?.[0]?.message?.content || '';
+            const parsed = safeJsonExtract<{ verdicts?: SemanticJudgmentVerdict[] } | null>(raw, null);
+            return Array.isArray(parsed?.verdicts) ? parsed!.verdicts : null;
+          } catch (err) {
+            if (attempt === 0 && noteReasoningEffortRejection(resolvedModel, err)) continue;
+            throw err;
+          } finally {
+            clearTimeout(timer);
+          }
         }
+        return null;
       } else {
         const apiKey = process.env.GEMINI_API_KEY;
         if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') return null;
@@ -4034,7 +4098,14 @@ export async function generateParticipantBookManuscriptWithAI(params: {
     const draftStartedAt = Date.now();
 
     try {
-      for (let batchIdx = 0; batchIdx < chapterBatches.length; batchIdx++) {
+      // V5.3.3 — Batches of the full book are drafted IN PARALLEL (bounded concurrency) and merged
+      // afterwards in their original order, so the result is identical to sequential drafting but
+      // takes roughly the time of the slowest batch instead of the sum of all of them.
+      const draftConcurrency =
+        scope === 'preview' ? 1 : Math.max(1, Math.min(4, Number(process.env.BOOK_DRAFT_CONCURRENCY) || 3));
+      const draftedBatchResults: Array<BookBatchCheckpointPayload | null> = new Array(chapterBatches.length).fill(null);
+      let draftingFailed = false;
+      const draftSingleBatch = async (batchIdx: number): Promise<BookBatchCheckpointPayload | null> => {
         if (isCancelled?.()) {
           throw new Error('Generación cancelada por solicitud del usuario.');
         }
@@ -4125,12 +4196,23 @@ ${structureInstructions}`;
         if (!batchResult && pipelineOverrides.draftBatch) {
           metrics.draftCalls++;
           metrics.callsByOperation.push({ operation: 'draft_batch', provider: 'simulated', model: 'override', batchIdx });
-          batchResult = await pipelineOverrides.draftBatch({
+          const overrideCall = pipelineOverrides.draftBatch({
             batchIdx,
             totalBatches: chapterBatches.length,
             batchChapters,
             narrativeStyle,
           });
+          // V5.3.3: the sample's time budget applies to every drafter, real or injected.
+          batchResult =
+            scope === 'preview'
+              ? await withTimeout(
+                  overrideCall,
+                  Math.max(1, PREVIEW_TIME_BUDGET_MS - (Date.now() - metrics.startedAtMs)),
+                  () => {
+                    throw new Error('Tiempo de espera agotado en la muestra (presupuesto de 60 s).');
+                  }
+                )
+              : await overrideCall;
           if (batchResult?.parsed) {
             const stampedOverrideCheckpoint: BookBatchCheckpointPayload = {
               ...batchResult,
@@ -4150,14 +4232,26 @@ ${structureInstructions}`;
         }
 
         if (!batchResult && !pipelineOverrides.draftBatch) {
-          const isReasoningModel = /^gpt-6|^gpt-5|^o1|^o3|^o4/i.test(effectiveModel);
-          const timeoutMs = isReasoningModel ? 65000 : 38000;
+          const isReasoningModel = isReasoningBookModel(effectiveModel);
+          // V5.3.3: the editorial sample must be ready within a minute, whatever the model.
+          const remainingPreviewMs =
+            scope === 'preview' ? PREVIEW_TIME_BUDGET_MS - (Date.now() - metrics.startedAtMs) : Number.POSITIVE_INFINITY;
+          if (scope === 'preview' && remainingPreviewMs < PREVIEW_MIN_CALL_MS) {
+            throw new Error('Presupuesto de tiempo de la muestra agotado antes de redactar.');
+          }
+          const timeoutMs =
+            scope === 'preview'
+              ? Math.max(PREVIEW_MIN_CALL_MS, Math.min(isReasoningModel ? 45000 : 35000, remainingPreviewMs - 3000))
+              : isReasoningModel
+              ? 65000
+              : 38000;
 
           try {
             metrics.draftCalls++;
             metrics.callsByOperation.push({ operation: 'draft_batch', provider: effectiveProvider, model: effectiveModel, batchIdx });
             if (effectiveProvider === 'openai') {
               batchResult = await callOpenAiBookModelBatch({
+                reasoningEffort: scope === 'preview' ? BOOK_REASONING_EFFORT_PREVIEW : BOOK_REASONING_EFFORT_FULL,
                 modelName: effectiveModel,
                 systemInstructionText: systemInstructionWithActivePrompt,
                 prompt: batchPrompt,
@@ -4179,6 +4273,13 @@ ${structureInstructions}`;
               });
             }
           } catch (primaryErr: any) {
+            // V5.3.3: no time left for a second provider inside the sample budget → the sample
+            // falls back to the faithful rule-based redaction (handled by the caller).
+            const remainingAfterPrimaryMs =
+              scope === 'preview' ? PREVIEW_TIME_BUDGET_MS - (Date.now() - metrics.startedAtMs) : Number.POSITIVE_INFINITY;
+            if (scope === 'preview' && remainingAfterPrimaryMs < PREVIEW_FAILOVER_MIN_MS) throw primaryErr;
+            const failoverTimeoutMs =
+              scope === 'preview' ? Math.max(PREVIEW_MIN_CALL_MS, remainingAfterPrimaryMs - 3000) : timeoutMs;
             const primaryErrorMsg =
               primaryErr?.message || 'Error de conexión con el proveedor principal';
             const primaryLabel =
@@ -4201,11 +4302,12 @@ ${structureInstructions}`;
 
             if (effectiveProvider === 'openai') {
               batchResult = await callOpenAiBookModelBatch({
+                reasoningEffort: scope === 'preview' ? BOOK_REASONING_EFFORT_PREVIEW : BOOK_REASONING_EFFORT_FULL,
                 modelName: effectiveModel,
                 systemInstructionText: systemInstructionWithActivePrompt,
                 prompt: batchPrompt,
                 multimodalPhotos: batchMultimodalPhotos,
-                timeoutMs,
+                timeoutMs: failoverTimeoutMs,
                 allowBackupModels: true,
               });
             } else {
@@ -4218,7 +4320,7 @@ ${structureInstructions}`;
                   scope !== 'preview' && chapterBatches.length === 1 && batchIdx === 0
                     ? compilationPdfRecord?.pdfBase64
                     : undefined,
-                timeoutMs,
+                timeoutMs: failoverTimeoutMs,
               });
             }
           }
@@ -4234,9 +4336,34 @@ ${structureInstructions}`;
             onBatchCheckpoint?.(batchIdx, stampedCheckpoint);
           }
         }
-
+        return batchResult;
+      };
+      let nextBatchToDraft = 0;
+      let firstDraftingError: unknown = null;
+      // On a failure no NEW batch is started, but the ones already in flight are allowed to finish:
+      // they are counted and checkpointed, so a resumption only drafts what is really missing.
+      await Promise.allSettled(
+        Array.from({ length: Math.min(draftConcurrency, chapterBatches.length) }, async () => {
+          for (;;) {
+            const batchIdx = nextBatchToDraft++;
+            if (batchIdx >= chapterBatches.length || draftingFailed) return;
+            try {
+              const drafted = await draftSingleBatch(batchIdx);
+              draftedBatchResults[batchIdx] = drafted;
+              if (drafted?.parsed) completedBatchesCount++;
+            } catch (err) {
+              draftingFailed = true;
+              if (!firstDraftingError) firstDraftingError = err;
+              return;
+            }
+          }
+        })
+      );
+      if (firstDraftingError) throw firstDraftingError;
+      for (let batchIdx = 0; batchIdx < chapterBatches.length; batchIdx++) {
+        const batchChapters = chapterBatches[batchIdx];
+        const batchResult = draftedBatchResults[batchIdx];
         if (batchResult?.parsed) {
-          completedBatchesCount++;
           effectiveModel = batchResult.respondedModel || effectiveModel;
           if ((batchResult.cachedTokens || 0) > 0) {
             anyProviderCachedTokens = true;
@@ -4960,6 +5087,44 @@ ${structureInstructions}`;
       );
       metrics.technicalErrors.push(String(bothFailedErr?.message || bothFailedErr).slice(0, 200));
       metrics.totalMs = Date.now() - metrics.startedAtMs;
+
+      // V5.3.3 — The editorial SAMPLE never ends as an "incomplete draft": when the model does not
+      // answer within the sample's time budget (or fails), the participant receives the faithful
+      // rule-based redaction of the same first memories, in the chosen style's structure. The
+      // technical cause is recorded for administrators only. It is not cached, so the next request
+      // tries the model again.
+      if (scope === 'preview' && !isCancelled?.()) {
+        const sampleChapterIds = Array.from(new Set(segmentsForThisRun.map((seg) => seg.id)));
+        const ruleBasedSample = finalizePreviewSample({
+          candidate: { ...fallbackResult.manuscript, narrativeStyle, canonicalCacheKey: canonicalKey },
+          fallback: fallbackResult.manuscript,
+          sampleChapterIds,
+          answers,
+          questions,
+        });
+        return {
+          manuscript: {
+            ...ruleBasedSample,
+            aiGenerated: false,
+            previewSource: 'rule_based_fallback',
+          } as DemoManuscript,
+          chapterPhotos: fallbackResult.chapterPhotos,
+          allPhotosById: fallbackResult.allPhotosById,
+          scope,
+          providerUsed: effectiveProvider,
+          modelUsed: effectiveModel,
+          compilationPdfId: compilationPdfRecord?.pdfId,
+          compilationPdfSha256: compilationPdfRecord?.sha256Hash,
+          cachedContextUsed: false,
+          // Admin-only diagnostics (stripped from every participant response).
+          internalReasonCode: failureDiag.code,
+          diagnosticSummary: `Muestra servida con la redacción fiel basada en reglas: ${failureDiag.summary}`,
+          sourceFingerprint,
+          batchesCompleted: completedBatchesCount,
+          totalBatches: chapterBatches.length,
+          generationMetrics: { ...metrics, previewSource: 'rule_based_fallback' },
+        };
+      }
 
       const auditedFallback = auditAndApproveBookManuscript({
         manuscript: {

@@ -6097,6 +6097,14 @@ export class StorageManager {
         judgeCasesDeferred: (result as any).generationMetrics?.judgeCasesDeferred ?? null,
         repairRounds: (result as any).repairSummary?.roundsExecuted ?? null,
         durationMs: (result as any).generationMetrics?.totalMs ?? null,
+        // V5.3.3 (admin only): whether the sample came from the model or from the faithful
+        // rule-based fallback, and the technical errors observed (never shown to participants).
+        previewSource:
+          result.scope === 'preview'
+            ? (result as any).generationMetrics?.previewSource || ((result as any).generationMetrics?.servedFromCache ? 'cache' : 'model')
+            : null,
+        draftCalls: (result as any).generationMetrics?.draftCalls ?? null,
+        technicalErrors: ((result as any).generationMetrics?.technicalErrors || []).slice(0, 5),
       }
     );
 
@@ -6173,19 +6181,45 @@ export class StorageManager {
       sourceFingerprint,
       generationFingerprint,
       executor: async (hooks) => {
-        return this.generateParticipantBookManuscript({
-          plainToken: params.plainToken,
-          narrativeStyle: selectedStyle,
-          scope,
-          forceRefresh: Boolean(params.forceRefresh),
-          lockedPreviewManuscript: params.lockedPreviewManuscript || null,
-          lockedPreviewGroups: params.lockedPreviewGroups || null,
-          onProgress: hooks.onProgress,
-          initialBatchCheckpoints: hooks.initialBatchCheckpoints,
-          onBatchCheckpoint: hooks.onBatchCheckpoint,
-          isCancelled: hooks.isCancelled,
-          generationJobId: hooks.jobId,
-        });
+        const run = (forceRefresh: boolean, lockedPreview: DemoManuscript | null) =>
+          this.generateParticipantBookManuscript({
+            plainToken: params.plainToken,
+            narrativeStyle: selectedStyle,
+            scope,
+            forceRefresh,
+            lockedPreviewManuscript: lockedPreview,
+            lockedPreviewGroups: params.lockedPreviewGroups || null,
+            onProgress: hooks.onProgress,
+            initialBatchCheckpoints: hooks.initialBatchCheckpoints,
+            onBatchCheckpoint: hooks.onBatchCheckpoint,
+            isCancelled: hooks.isCancelled,
+            generationJobId: hooks.jobId,
+          });
+        let result = await run(Boolean(params.forceRefresh), params.lockedPreviewManuscript || null);
+        // V5.3.3 — The participant never receives an unfinished book because of a transient problem
+        // (provider timeout, a batch below the minimum): the server continues on its own, reusing
+        // every valid batch and redrafting only the invalidated ones. Each continuation is recorded
+        // for administrators only.
+        const maxContinuations = Math.max(0, Math.min(3, Number(process.env.BOOK_FULL_AUTO_CONTINUE_ATTEMPTS ?? 2)));
+        for (
+          let attempt = 1;
+          scope === 'full' &&
+          attempt <= maxContinuations &&
+          !hooks.isCancelled?.() &&
+          result?.manuscript?.generationStatus === 'incomplete_draft';
+          attempt++
+        ) {
+          await this.addAuditLog('BOOK_GENERATION_AUTO_CONTINUE', 'interview', interview.id, participant.name || interview.title, {
+            jobId: hooks.jobId,
+            attempt,
+            narrativeStyle: selectedStyle,
+            previousReasonCode: result.internalReasonCode || null,
+            previousDiagnostic: result.diagnosticSummary || null,
+          });
+          hooks.onProgress?.({ phase: 'drafting_batches', userMessage: 'Dando los últimos toques a tu libro...' } as any);
+          result = await run(false, null);
+        }
+        return result;
       },
       onJobSettled: async (job) => {
         if (job.status === 'failed' && job.internalReasonCode) {

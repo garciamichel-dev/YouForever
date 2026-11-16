@@ -2139,3 +2139,200 @@ test('V5.3-T8: seguridad: toda ruta del informe exige administrador en el servid
   const participantSession = blocks.find((b) => b.includes("'/participant/session'"));
   assert.ok(participantSession && /sanitizeBookVersionForParticipant/.test(participantSession));
 });
+
+// =============================================================================================
+// V5.3.3 — Vista previa en ≤ 60 s, borrador completo sin mensajes de error al participante,
+// redacción en paralelo y control del razonamiento del modelo.
+// =============================================================================================
+
+let jobs: any;
+async function loadV533Modules() {
+  gemini ||= await import(path.join(REPO_ROOT, 'src/server/geminiService.ts'));
+  jobs ||= await import(path.join(REPO_ROOT, 'src/server/bookJobManager.ts'));
+}
+
+const PARTICIPANT_FORBIDDEN_WORDS = /error|fall[oó]|incomplet|pendiente de revisi|\bronda\b|\breparaci|tiempo de espera|timeout|proveedor|openai|gemini|cobertura|auditor/i;
+
+test('V5.3.3-P1: la muestra respeta su presupuesto de tiempo: si el modelo no responde, se entrega la muestra fiel (nunca "borrador incompleto")', async () => {
+  await loadV533Modules();
+  const { interview, token } = await createSyntheticInterview('medium');
+  gemini.__setPreviewTimeBudgetForTests(1500);
+  try {
+    for (const style of ALL_STYLES) {
+      scenario.judge = helpers.createScenarioJudge().judge;
+      scenario.draftBatch = () => new Promise(() => undefined); // the model never answers
+      const started = Date.now();
+      const result = await storage.generateParticipantBookManuscript({ plainToken: token, narrativeStyle: style, scope: 'preview', forceRefresh: true });
+      const elapsed = Date.now() - started;
+      assert.ok(elapsed < 4000, `${STYLE_LABEL[style]}: ${elapsed} ms`);
+      assert.equal(result.manuscript.generationStatus, 'preview_sample');
+      assert.ok(result.manuscript.chapters.length > 0 && result.manuscript.chapters.every((c: any) => c.paragraphs.length > 0));
+      assert.equal(result.manuscript.incompleteDraftNotice, undefined);
+      // Participant: just the sample. Admin log: the real cause.
+      const seen = jobs.sanitizeBookResultForParticipant(jsonRoundTrip(result));
+      assert.equal(seen.manuscript.previewSource, undefined);
+      assert.equal(seen.providerUsed, undefined);
+      assert.doesNotMatch(JSON.stringify({ n: seen.manuscript.incompleteDraftNotice, f: seen.providerFallbackNotice }), PARTICIPANT_FORBIDDEN_WORDS);
+      const log = storage.getAuditLogs(10).find((l: any) => l.action === 'GENERATE_BOOK_MANUSCRIPT_FROM_COMPILATION_PDF' && l.targetId === interview.id);
+      assert.equal(log.details.previewSource, 'rule_based_fallback');
+      assert.match(log.details.diagnosticSummary || '', /redacción fiel/);
+    }
+    // A failing model is handled the same way.
+    scenario.draftBatch = async () => {
+      throw new Error('500 simulado del proveedor');
+    };
+    const failing = await storage.generateParticipantBookManuscript({ plainToken: token, narrativeStyle: 'first_person_simple', scope: 'preview', forceRefresh: true });
+    assert.equal(failing.manuscript.generationStatus, 'preview_sample');
+    // And when the model answers in time, its text is used (only the sample is drafted, 1 call).
+    const drafter = helpers.createFaithfulDrafter(baseManuscriptFor(interview.id, 'first_person_simple'));
+    scenario.draftBatch = drafter.draftBatch;
+    const ok = await storage.generateParticipantBookManuscript({ plainToken: token, narrativeStyle: 'first_person_simple', scope: 'preview', forceRefresh: true });
+    assert.equal(ok.manuscript.generationStatus, 'preview_sample');
+    assert.equal(drafter.calls.length, 1);
+    const okLog = storage.getAuditLogs(10).find((l: any) => l.action === 'GENERATE_BOOK_MANUSCRIPT_FROM_COMPILATION_PDF' && l.targetId === interview.id);
+    assert.equal(okLog.details.previewSource, 'model');
+  } finally {
+    gemini.__setPreviewTimeBudgetForTests(null);
+  }
+});
+
+test('V5.3.3-P2: los lotes del libro completo se redactan en paralelo con el mismo resultado que en serie', async () => {
+  const { interview, token } = await createSyntheticInterview('medium');
+  const style: StyleId = 'first_person_literary';
+  const base = baseManuscriptFor(interview.id, style);
+  const DELAY = 400;
+  const run = async (concurrency: string) => {
+    process.env.BOOK_DRAFT_CONCURRENCY = concurrency;
+    const drafter = helpers.createFaithfulDrafter(base);
+    let inFlight = 0;
+    let maxInFlight = 0;
+    scenario.draftBatch = async (ctx: any) => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((r) => setTimeout(r, DELAY));
+      inFlight--;
+      return drafter.draftBatch(ctx);
+    };
+    scenario.judge = helpers.createScenarioJudge().judge;
+    const started = Date.now();
+    const result = await storage.generateParticipantBookManuscript({ plainToken: token, narrativeStyle: style, scope: 'full', forceRefresh: true });
+    return { result, elapsed: Date.now() - started, maxInFlight };
+  };
+  try {
+    const serial = await run('1');
+    const parallel = await run('3');
+    assert.equal(serial.result.totalBatches, 3);
+    assert.equal(serial.maxInFlight, 1);
+    assert.equal(parallel.maxInFlight, 3, 'Los tres lotes se redactan a la vez.');
+    assert.ok(parallel.elapsed < serial.elapsed - DELAY, `paralelo ${parallel.elapsed} ms vs serie ${serial.elapsed} ms`);
+    assert.equal(parallel.result.manuscript.generationStatus, 'approved');
+    assert.deepEqual(
+      parallel.result.manuscript.chapters.map((c: any) => [c.id, c.paragraphs]),
+      serial.result.manuscript.chapters.map((c: any) => [c.id, c.paragraphs]),
+      'Mismo libro, mismo orden.'
+    );
+  } finally {
+    delete process.env.BOOK_DRAFT_CONCURRENCY;
+  }
+});
+
+test('V5.3.3-P3: un fallo transitorio en el libro completo se resuelve solo (continuación automática) y el participante no ve ningún error', async () => {
+  await loadV533Modules();
+  const { interview, token } = await createSyntheticInterview('medium');
+  const style: StyleId = 'first_person_simple';
+  const drafter = helpers.createFaithfulDrafter(baseManuscriptFor(interview.id, style));
+  let failures = 0;
+  scenario.draftBatch = async (ctx: any) => {
+    if (ctx.batchIdx === 1 && failures === 0) {
+      failures++;
+      throw new Error('Tiempo de espera agotado en OpenAI (simulado)');
+    }
+    return drafter.draftBatch(ctx);
+  };
+  scenario.judge = helpers.createScenarioJudge().judge;
+  const job = storage.startOrResumeParticipantBookJob({ plainToken: token, narrativeStyle: style, scope: 'full', forceRefresh: true });
+  const settled = await jobs.bookJobManager.waitForJob(job.jobId);
+  assert.equal(settled.status, 'completed');
+  assert.equal(settled.result.manuscript.generationStatus, 'approved');
+  assert.equal(failures, 1);
+  assert.ok(drafter.calls.filter((i: number) => i !== 1).every((i: number) => i !== undefined));
+  assert.equal(drafter.calls.filter((i: number) => i === 0).length, 1, 'Los lotes válidos no se vuelven a pagar.');
+  const autoLog = storage.getAuditLogs(20).find((l: any) => l.action === 'BOOK_GENERATION_AUTO_CONTINUE' && l.targetId === interview.id);
+  assert.ok(autoLog, 'La continuación queda en la bitácora de administrador.');
+  assert.match(String(autoLog.details.previousDiagnostic || autoLog.details.previousReasonCode), /Tiempo de espera|PARTIAL|TIMEOUT/);
+  const view = jobs.toParticipantBookJobView(settled);
+  assert.doesNotMatch(JSON.stringify({ m: view.userMessage, e: view.error, f: view.failureCategory, n: view.result?.manuscript?.incompleteDraftNotice }), PARTICIPANT_FORBIDDEN_WORDS);
+});
+
+test('V5.3.3-P4: si aun así no queda listo, el participante solo lee que su libro sigue en preparación', async () => {
+  await loadV533Modules();
+  const failedJob = {
+    jobId: 'j1',
+    interviewId: 'i',
+    participantId: 'p',
+    narrativeStyle: 'first_person_simple',
+    scope: 'full',
+    status: 'failed',
+    phase: 'error',
+    currentBatch: 2,
+    totalBatches: 3,
+    completedBatches: 1,
+    repairPass: 3,
+    repairedChapters: 4,
+    totalRepairChapters: 4,
+    userMessage: 'Puliendo capítulos (4 de 4 revisados)...',
+    error: 'Ocurrió un inconveniente temporal',
+    failureCategory: 'technical',
+    internalReasonCode: 'PROVIDER_ERROR',
+    diagnosticSummary: '13 INTERNAL',
+    createdAt: '',
+    updatedAt: '',
+  };
+  const view = jobs.toParticipantBookJobView(failedJob);
+  assert.equal(view.error, jobs.PARTICIPANT_BOOK_PAUSED_MESSAGE);
+  assert.equal(view.userMessage, jobs.PARTICIPANT_BOOK_PAUSED_MESSAGE);
+  assert.equal(view.failureCategory, undefined);
+  assert.equal(view.repairPass, 0);
+  assert.equal(view.phase, 'paused');
+  // `status` stays machine-readable for the studio (it offers «Continuar preparando»); every
+  // human-readable field is neutral and no internal code or diagnostic is present.
+  const { status: _status, ...humanFacing } = view;
+  assert.doesNotMatch(JSON.stringify(Object.values(humanFacing)), PARTICIPANT_FORBIDDEN_WORDS);
+  assert.equal('internalReasonCode' in view, false);
+  assert.equal('diagnosticSummary' in view, false);
+  const draft = jobs.sanitizeManuscriptForParticipant({
+    title: 't',
+    chapters: [],
+    generationStatus: 'incomplete_draft',
+    incompleteDraftNotice: 'Este borrador ya reúne casi toda tu historia, pero algunos recuerdos aún no quedaron integrados con la fidelidad necesaria.',
+    failureCategory: 'repair_pending',
+    internalReasonCode: 'REPAIR_EXHAUSTED',
+    diagnosticSummary: 'Cobertura documental del 95%',
+  });
+  assert.equal(draft.incompleteDraftNotice, jobs.PARTICIPANT_BOOK_IN_PROGRESS_NOTICE);
+  assert.equal(draft.failureCategory, undefined);
+  // generationStatus stays machine-readable (the studio shows «Tu libro sigue en preparación»).
+  assert.doesNotMatch(String(draft.incompleteDraftNotice), PARTICIPANT_FORBIDDEN_WORDS);
+  assert.equal(draft.internalReasonCode, undefined);
+  assert.equal(draft.diagnosticSummary, undefined);
+  // The studio never shows the old warnings.
+  const studio = fs.readFileSync(path.join(REPO_ROOT, 'src/components/ParticipantBookStudio.tsx'), 'utf-8');
+  for (const phrase of ['BORRADOR INCOMPLETO', 'PENDIENTE DE REVISIÓN', 'Revisando detalles (ronda', 'Reintentar operación', 'No pudimos', 'Ocurrió un inconveniente', 'No fue posible finalizar']) {
+    assert.ok(!studio.includes(phrase), phrase);
+  }
+});
+
+test('V5.3.3-P5: modelos con razonamiento: esfuerzo bajo para no gastar tokens, y reintento sin el parámetro si el modelo no lo admite', async () => {
+  await loadV533Modules();
+  assert.deepEqual(gemini.reasoningEffortParams('gpt-6-luna', 'low'), { reasoning_effort: 'low' });
+  assert.deepEqual(gemini.reasoningEffortParams('gpt-5-mini', 'low'), { reasoning_effort: 'low' });
+  assert.deepEqual(gemini.reasoningEffortParams('gpt-4o', 'low'), {}, 'Los modelos sin razonamiento no lo reciben.');
+  assert.equal(gemini.BOOK_REASONING_EFFORT_PREVIEW, 'low');
+  assert.equal(gemini.BOOK_REASONING_EFFORT_FULL, 'low');
+  assert.equal(gemini.BOOK_REASONING_EFFORT_AUDIT, 'low');
+  // A model that rejects the parameter is remembered and called without it.
+  assert.equal(gemini.noteReasoningEffortRejection('o3-test', new Error("400 Unrecognized request argument supplied: reasoning_effort")), true);
+  assert.deepEqual(gemini.reasoningEffortParams('o3-test', 'low'), {});
+  assert.equal(gemini.noteReasoningEffortRejection('gpt-6-luna', new Error('429 rate limit')), false);
+  assert.equal(gemini.PREVIEW_TIME_BUDGET_MS <= 55_000, true, 'La muestra deja margen dentro de 60 s.');
+});

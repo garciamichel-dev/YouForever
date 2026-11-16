@@ -108,7 +108,7 @@ export interface ParticipantBookJobView {
   narrativeStyle: DemoNarrativeStyleId;
   scope: 'preview' | 'full';
   status: BookJobStatus;
-  phase: BookGenerationJobRecord['phase'];
+  phase: BookGenerationJobRecord['phase'] | 'paused';
   currentBatch: number;
   totalBatches: number;
   completedBatches: number;
@@ -150,12 +150,27 @@ export const PARTICIPANT_HIDDEN_MANUSCRIPT_FIELDS = [
   'editorialAudit',
   'deliveryDecision',
   'previewFidelity',
+  // V5.3.3: nothing that reveals a failure, a fallback or the provider reaches the participant.
+  'failureCategory',
+  'previewSource',
+  'providerFallbackNotice',
 ] as const;
+
+/**
+ * V5.3.3 — The only things a participant is ever told about generation: their book is being
+ * prepared, or it is ready. Technical causes (timeouts, provider failures, coverage below the
+ * minimum, repair rounds) are recorded in the administrator log only.
+ */
+export const PARTICIPANT_BOOK_IN_PROGRESS_NOTICE =
+  'Estamos dando los últimos toques a tu libro. Pulsa «Continuar preparando» y lo terminaremos desde donde avanzamos.';
+export const PARTICIPANT_BOOK_PAUSED_MESSAGE =
+  'Tu libro sigue en preparación. Pulsa «Continuar preparando» en unos momentos y seguiremos desde donde avanzamos.';
 
 export function sanitizeManuscriptForParticipant(manuscript: DemoManuscript): DemoManuscript {
   if (!manuscript || typeof manuscript !== 'object') return manuscript;
   const copy: any = { ...manuscript };
   for (const field of PARTICIPANT_HIDDEN_MANUSCRIPT_FIELDS) delete copy[field];
+  if (copy.incompleteDraftNotice) copy.incompleteDraftNotice = PARTICIPANT_BOOK_IN_PROGRESS_NOTICE;
   // The signed evidence carries coverage figures: the browser only keeps an opaque reference
   // (the HMAC signature), which the server resolves when the book is saved.
   if (isFullBookApprovalEvidence(copy.approvalEvidence)) {
@@ -174,6 +189,12 @@ const PARTICIPANT_HIDDEN_RESULT_FIELDS = [
   'generationMetrics',
   'repairSummary',
   'invalidatedBatchIndexes',
+  // V5.3.3
+  'failureCategory',
+  'providerFallbackNotice',
+  'providerUsed',
+  'modelUsed',
+  'cachedContextUsed',
 ] as const;
 
 export function sanitizeBookResultForParticipant(result: BookJobResultPayload): BookJobResultPayload {
@@ -202,17 +223,19 @@ export function toParticipantBookJobView(job: BookGenerationJobRecord): Particip
     narrativeStyle: job.narrativeStyle,
     scope: job.scope,
     status: job.status,
-    phase: job.phase,
+    // V5.3.3: a stopped job is "paused" for the participant (never "error").
+    phase: job.status === 'failed' ? 'paused' : job.phase,
     currentBatch: job.currentBatch,
     totalBatches: job.totalBatches,
     completedBatches: job.completedBatches,
-    repairPass: job.repairPass,
-    repairedChapters: job.repairedChapters,
-    totalRepairChapters: job.totalRepairChapters,
-    userMessage: job.userMessage,
-    failureCategory: job.failureCategory,
+    // V5.3.3: repair rounds and failure categories are internal (admin log only).
+    repairPass: 0,
+    repairedChapters: 0,
+    totalRepairChapters: 0,
+    userMessage: job.status === 'failed' ? PARTICIPANT_BOOK_PAUSED_MESSAGE : job.userMessage,
+    failureCategory: undefined,
     result: job.result ? sanitizeBookResultForParticipant(job.result) : undefined,
-    error: job.error,
+    error: job.status === 'failed' ? PARTICIPANT_BOOK_PAUSED_MESSAGE : undefined,
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
   };
