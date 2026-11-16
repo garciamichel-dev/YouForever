@@ -797,3 +797,119 @@ test('V5.3.6-A1: el autoguardado no cuenta la respuesta ni genera profundizació
   // The new follow-up above is a first submission too (it asked for the next follow-up; refused by the stub).
   externalCalls.splice(callsBefore);
 });
+
+// =============================================================================================
+// V5.4.1 — Administrador: borrar TODAS las versiones PDF y TODOS los manuscritos de un entrevistado.
+// =============================================================================================
+
+async function saveDistinctViaHttp(token: string, manuscript: any, bookFormatId: string) {
+  return http('POST', '/participant/book/save-version', {
+    body: {
+      token,
+      narrativeStyle: 'first_person_simple',
+      editorialConfig: { ...editorialConfigFor('first_person_simple'), bookFormatId },
+      manuscript,
+      coverPhoto: null,
+      chapterPhotos: {},
+      pageCount: 20,
+    },
+  });
+}
+
+test('V5.4.1-D1: borrar todas las versiones PDF es solo para administradores, es definitivo y no revive en otra instancia', async () => {
+  const { interview, token, manuscript } = await generateBookWithObservations();
+  storage.getInterviewById(interview.id).layoutEditsAllowed = 10;
+  const v1 = await saveDistinctViaHttp(token, manuscript, '6x9');
+  assert.equal(v1.status, 200, v1.text.slice(0, 300));
+  const v2 = await saveDistinctViaHttp(token, manuscript, 'a5');
+  assert.equal(v2.status, 200, v2.text.slice(0, 300));
+  const savedIds = [v1.json.data.bookVersion.id, v2.json.data.bookVersion.id];
+
+  // Two manuscripts of the same interviewee (they must survive the PDF bulk delete).
+  for (const n of [1, 2]) {
+    const m = { id: `manu_${interview.id}_v${n}`, interviewId: interview.id, version: n, title: `Manuscrito ${n}`, content: `# Manuscrito ${n}`, status: 'draft', generatedAt: new Date().toISOString(), generatedBy: 'admin_pruebas' };
+    storage['manuscripts'].set(m.id, m);
+    await storage['persistDoc']('manuscripts', m.id, m);
+  }
+  // A stale admin browser copy taken BEFORE the delete.
+  const staleVersions = JSON.parse(JSON.stringify(storage.getBookVersionsForInterview(interview.id, false)));
+  assert.equal(staleVersions.length, 2);
+
+  const anon = await http('DELETE', `/interviews/${interview.id}/book-versions`);
+  assert.equal(anon.status, 401);
+  const forged = await http('DELETE', `/interviews/${interview.id}/book-versions`, { headers: { 'x-admin-user': ADMIN_EMAIL } });
+  assert.equal(forged.status, 401);
+  assert.equal(storage.getBookVersionsForInterview(interview.id, false).length, 2, 'Sin autorización no se borra nada.');
+
+  const res = await http('DELETE', `/interviews/${interview.id}/book-versions`, { headers: { Authorization: `Bearer ${mintIdToken()}` } });
+  assert.equal(res.status, 200, res.text.slice(0, 300));
+  assert.equal(res.json.data.deletedCount, 2);
+  assert.deepEqual([...res.json.data.deletedVersionIds].sort(), [...savedIds].sort());
+  assert.equal(storage.getBookVersionsForInterview(interview.id).length, 0, 'No queda ninguna versión (ni sintetizada desde los manuscritos).');
+  for (const id of savedIds) assert.equal(remoteDocs.has(`participantBookVersions/${id}`), false, 'También se borró de Firestore.');
+  assert.equal(storage.getManuscriptsForInterview(interview.id).length, 2, 'Los manuscritos no se tocan.');
+  const remoteInterview = remoteDocs.get(`interviews/${interview.id}`) as any;
+  assert.equal(remoteInterview.bookGeneratedCount, 0);
+  assert.ok(remoteInterview.bookVersionsClearedUpTo >= 2);
+
+  // Another instance (no in-memory deleted registry): Firestore + a stale admin browser copy +
+  // remaining manuscripts must not bring any version back.
+  const fresh = new mod.StorageManager({ remoteDocStore: fakeRemoteStore });
+  fresh['interviews'].set(interview.id, JSON.parse(JSON.stringify(remoteInterview)));
+  for (const n of [1, 2]) {
+    const m = remoteDocs.get(`manuscripts/manu_${interview.id}_v${n}`) as any;
+    fresh['manuscripts'].set(m.id, m);
+  }
+  fresh['ingestRemoteBookVersionDocs'](remoteCollection('participantBookVersions'));
+  fresh.restoreFromClientCache([], staleVersions);
+  assert.equal(fresh.getBookVersionsForInterview(interview.id).length, 0, 'Nada revive en otra instancia.');
+
+  // The participant only sees later books, numbered above the deleted ones.
+  const v3 = await saveDistinctViaHttp(token, manuscript, 'carta');
+  assert.equal(v3.status, 200, v3.text.slice(0, 300));
+  assert.ok(v3.json.data.bookVersion.versionNumber > 2, 'La numeración continúa.');
+  const visible = storage.getBookVersionsForInterview(interview.id).map((v: any) => v.id);
+  assert.deepEqual(visible, [v3.json.data.bookVersion.id], 'El nuevo libro sí se ve.');
+
+  const logs = storage.getAuditLogs ? storage.getAuditLogs() : Array.from(storage['auditLogs']?.values?.() || storage['auditLogs'] || []);
+  assert.ok(JSON.stringify(logs).includes('DELETE_ALL_PARTICIPANT_BOOK_VERSIONS'), 'Queda en la bitácora.');
+});
+
+test('V5.4.1-D2: borrar todos los manuscritos es solo para administradores y no toca las versiones PDF', async () => {
+  const { interview, token, manuscript } = await generateBookWithObservations();
+  const saved = await saveViaHttp(token, 'first_person_simple', manuscript);
+  assert.equal(saved.status, 200, saved.text.slice(0, 300));
+  for (const n of [1, 2, 3]) {
+    const m = { id: `manu_${interview.id}_v${n}`, interviewId: interview.id, version: n, title: `Manuscrito ${n}`, content: `# Manuscrito ${n}`, status: 'draft', generatedAt: new Date().toISOString(), generatedBy: 'admin_pruebas' };
+    storage['manuscripts'].set(m.id, m);
+    await storage['persistDoc']('manuscripts', m.id, m);
+  }
+  const anon = await http('DELETE', `/interviews/${interview.id}/manuscripts`);
+  assert.equal(anon.status, 401);
+  assert.equal(storage.getManuscriptsForInterview(interview.id).length, 3);
+
+  const res = await http('DELETE', `/interviews/${interview.id}/manuscripts`, { headers: { Authorization: `Bearer ${mintIdToken()}` } });
+  assert.equal(res.status, 200, res.text.slice(0, 300));
+  assert.equal(res.json.data.deletedCount, 3);
+  assert.equal(storage.getManuscriptsForInterview(interview.id).length, 0);
+  for (const n of [1, 2, 3]) assert.equal(remoteDocs.has(`manuscripts/manu_${interview.id}_v${n}`), false);
+  assert.deepEqual(
+    storage.getBookVersionsForInterview(interview.id).map((v: any) => v.id),
+    [saved.json.data.bookVersion.id],
+    'La versión PDF sigue intacta.'
+  );
+  const missing = await http('DELETE', `/interviews/no_existe/manuscripts`, { headers: { Authorization: `Bearer ${mintIdToken()}` } });
+  assert.equal(missing.status, 400);
+});
+
+test('V5.4.1-D3: el panel ofrece ambos borrados por entrevistado y siempre pide confirmación', () => {
+  const panel = fs.readFileSync(path.join(REPO_ROOT, 'src/components/InterviewsPanel.tsx'), 'utf-8');
+  assert.match(panel, /bulk-delete-versions-\$\{inv\.id\}/);
+  assert.match(panel, /bulk-delete-manuscripts-\$\{inv\.id\}/);
+  // The buttons only open the confirmation; the DELETE request is sent from the confirm action.
+  assert.match(panel, /onClick=\{\(\) =>\s*setBulkDeleteTarget\(/);
+  assert.match(panel, /data-testid="bulk-delete-confirm"/);
+  assert.match(panel, /onClick=\{handleConfirmBulkDelete\}/);
+  const bulkFn = panel.slice(panel.indexOf('const handleConfirmBulkDelete'), panel.indexOf('const handleConfirmDeleteVersion'));
+  assert.match(bulkFn, /method: 'DELETE'/);
+});

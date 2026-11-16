@@ -235,6 +235,8 @@ export type QuotaTrackedInterview = InterviewRecord & {
   lastBookSaveVersionId?: string;
   /** Highest version number ever committed for this interview (never reused, even after deletes). */
   lastBookVersionNumber?: number;
+  /** V5.4.1: an administrator deleted every book version up to this number (never shown again). */
+  bookVersionsClearedUpTo?: number;
 };
 
 export interface BookVersionCommitRequest {
@@ -289,6 +291,7 @@ const GUARDED_QUOTA_FIELDS = [
   'lastBookSaveKey',
   'lastBookSaveVersionId',
   'lastBookVersionNumber',
+  'bookVersionsClearedUpTo',
 ];
 
 const firestoreRemoteDocStore: StorageRemoteDocStore = {
@@ -959,7 +962,8 @@ export class StorageManager {
       if (
         !raw?.id ||
         this.deletedBookVersionIds.has(raw.id) ||
-        this.deletedBookVersionIds.has(`pbv_${raw.interviewId}_v${raw.versionNumber}`)
+        this.deletedBookVersionIds.has(`pbv_${raw.interviewId}_v${raw.versionNumber}`) ||
+        this.isBookVersionClearedByAdmin(raw)
       ) {
         continue;
       }
@@ -1849,7 +1853,8 @@ export class StorageManager {
               bv.manuscript &&
               !this.participantBookVersions.has(bv.id) &&
               !this.deletedBookVersionIds.has(bv.id) &&
-              !this.deletedBookVersionIds.has(`pbv_${bv.interviewId}_v${bv.versionNumber}`)
+              !this.deletedBookVersionIds.has(`pbv_${bv.interviewId}_v${bv.versionNumber}`) &&
+              !this.isBookVersionClearedByAdmin(bv)
             ) {
               this.participantBookVersions.set(bv.id, this.sanitizeClientRestoredBookVersion(bv));
               restoredCount++;
@@ -1927,7 +1932,8 @@ export class StorageManager {
           bv.manuscript &&
           !this.participantBookVersions.has(bv.id) &&
           !this.deletedBookVersionIds.has(bv.id) &&
-          !this.deletedBookVersionIds.has(`pbv_${bv.interviewId}_v${bv.versionNumber}`)
+          !this.deletedBookVersionIds.has(`pbv_${bv.interviewId}_v${bv.versionNumber}`) &&
+          !this.isBookVersionClearedByAdmin(bv)
         ) {
           this.participantBookVersions.set(bv.id, this.sanitizeClientRestoredBookVersion(bv));
           const inv = this.interviews.get(bv.interviewId);
@@ -5656,10 +5662,15 @@ export class StorageManager {
       },
     ];
 
+    // V5.4.1: the administrator deleted every version up to this number (persisted with the
+    // interview, so every server instance respects it): never synthesize them again.
+    const clearedUpTo =
+      Number((interview as { bookVersionsClearedUpTo?: number }).bookVersionsClearedUpTo ?? 0) || 0;
+
     let createdAny = false;
     for (let vNum = 1; vNum <= targetCount; vNum++) {
       const versionId = `pbv_${interviewId}_v${vNum}`;
-      if (this.deletedBookVersionIds.has(versionId)) {
+      if (vNum <= clearedUpTo || this.deletedBookVersionIds.has(versionId)) {
         continue;
       }
       const existingRealOrSynth = existingBookVersions.find((v) => v.versionNumber === vNum);
@@ -7083,6 +7094,128 @@ export class StorageManager {
       deletedVersionId: versionId,
       restoredQuota: Boolean(restoreQuota),
     };
+  }
+
+  /**
+   * V5.4.1 — True when an administrator deleted all book versions of the interview up to this
+   * version's number (persisted on the interview: respected by every instance and every restore).
+   */
+  private isBookVersionClearedByAdmin(bv: { interviewId?: string; versionNumber?: number } | null | undefined): boolean {
+    if (!bv?.interviewId) return false;
+    const inv = this.interviews.get(bv.interviewId) as { bookVersionsClearedUpTo?: number } | undefined;
+    const clearedUpTo = Number(inv?.bookVersionsClearedUpTo ?? 0) || 0;
+    return clearedUpTo > 0 && (Number(bv.versionNumber) || 0) <= clearedUpTo;
+  }
+
+  /**
+   * V5.4.1 — Administrator: deletes ALL saved PDF book versions of an interview at once.
+   *
+   * - Durable: memory, disk snapshot and Firestore (including the chunk documents of large versions).
+   * - The manuscripts are NOT touched (they have their own bulk delete).
+   * - Legacy versions synthesized from manuscripts can never come back: the interview records up to
+   *   which number the versions were cleared (bookVersionsClearedUpTo, persisted with the interview,
+   *   so every instance respects it), and the next saved book is numbered above them.
+   * - Layout quota (edits used / allowed) is not modified.
+   */
+  public async deleteAllParticipantBookVersionsForInterview(
+    interviewId: string,
+    performedBy: string
+  ): Promise<{ interview: InterviewRecord; deletedCount: number; deletedVersionIds: string[] }> {
+    const interview = this.interviews.get(interviewId);
+    if (!interview) {
+      throw new Error('Entrevista no encontrada.');
+    }
+    const versions = Array.from(this.participantBookVersions.values()).filter(
+      (v) => v.interviewId === interviewId && !this.deletedBookVersionIds.has(v.id)
+    );
+    const manuscriptsForInterview = Array.from(this.manuscripts.values()).filter(
+      (m) => m.interviewId === interviewId
+    );
+    const tracked = interview as QuotaTrackedInterview & { bookVersionsClearedUpTo?: number };
+    const highestNumber = Math.max(
+      0,
+      ...versions.map((v) => Number(v.versionNumber) || 0),
+      Number(tracked.lastBookVersionNumber ?? 0) || 0,
+      Number(tracked.bookVersionsClearedUpTo ?? 0) || 0,
+      Number(interview.bookGeneratedCount ?? 0) || 0,
+      manuscriptsForInterview.length,
+      ...manuscriptsForInterview.map((m) => Number(m.version) || 0)
+    );
+
+    const deletedVersionIds: string[] = [];
+    for (const v of versions) {
+      this.deletedBookVersionIds.add(v.id);
+      this.participantBookVersions.delete(v.id);
+      await this.removeDoc('participantBookVersions', v.id);
+      const remoteChunks = this.bookAuditReports.get(v.id)?.durability?.versionDocument?.chunks || 0;
+      for (let i = 0; i < remoteChunks; i++) {
+        await this.removeDoc('participantBookVersions', chunkDocId(v.id, i));
+      }
+      deletedVersionIds.push(v.id);
+    }
+    // Legacy synthesized ids (pbv_<interview>_v<n>) up to the highest number ever used.
+    for (let n = 1; n <= highestNumber; n++) {
+      this.deletedBookVersionIds.add(`pbv_${interviewId}_v${n}`);
+    }
+
+    tracked.bookVersionsClearedUpTo = highestNumber;
+    // The next saved book is numbered above every deleted one (never hidden by the registry).
+    tracked.lastBookVersionNumber = Math.max(Number(tracked.lastBookVersionNumber ?? 0) || 0, highestNumber);
+    interview.bookGeneratedCount = 0;
+    tracked.quotaRevision = (Number(tracked.quotaRevision ?? 0) || 0) + 1;
+    delete tracked.lastBookSaveKey;
+    delete tracked.lastBookSaveVersionId;
+    interview.lastActivityAt = new Date().toISOString();
+    this.interviews.set(interviewId, interview);
+    await this.persistDoc('interviews', interviewId, interview);
+
+    await this.addAuditLog(
+      'DELETE_ALL_PARTICIPANT_BOOK_VERSIONS',
+      'participantBookVersion',
+      interviewId,
+      performedBy,
+      {
+        interviewId,
+        deletedCount: deletedVersionIds.length,
+        versionNumbers: versions.map((v) => v.versionNumber).sort((a, b) => a - b),
+        clearedUpTo: highestNumber,
+      }
+    );
+    this.saveStateToDisk();
+    return { interview, deletedCount: deletedVersionIds.length, deletedVersionIds };
+  }
+
+  /**
+   * V5.4.1 — Administrator: deletes ALL manuscripts of an interview at once (memory, disk snapshot
+   * and Firestore). Saved PDF book versions are not touched.
+   */
+  public async deleteAllManuscriptsForInterview(
+    interviewId: string,
+    performedBy: string
+  ): Promise<{ interview: InterviewRecord; deletedCount: number; deletedManuscriptIds: string[] }> {
+    const interview = this.interviews.get(interviewId);
+    if (!interview) {
+      throw new Error('Entrevista no encontrada.');
+    }
+    const manuscriptsForInterview = Array.from(this.manuscripts.values()).filter(
+      (m) => m.interviewId === interviewId
+    );
+    const deletedManuscriptIds: string[] = [];
+    for (const m of manuscriptsForInterview) {
+      this.manuscripts.delete(m.id);
+      await this.removeDoc('manuscripts', m.id);
+      deletedManuscriptIds.push(m.id);
+    }
+    interview.lastActivityAt = new Date().toISOString();
+    this.interviews.set(interviewId, interview);
+    await this.persistDoc('interviews', interviewId, interview);
+    await this.addAuditLog('DELETE_ALL_MANUSCRIPTS', 'manuscript', interviewId, performedBy, {
+      interviewId,
+      deletedCount: deletedManuscriptIds.length,
+      versions: manuscriptsForInterview.map((m) => m.version).sort((a, b) => a - b),
+    });
+    this.saveStateToDisk();
+    return { interview, deletedCount: deletedManuscriptIds.length, deletedManuscriptIds };
   }
 
   public async seedCompleteTestStories(performedBy: string = 'system_admin'): Promise<{

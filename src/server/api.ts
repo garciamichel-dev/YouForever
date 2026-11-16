@@ -978,6 +978,41 @@ apiRouter.delete('/participant-book-versions/:id', requireAdmin, async (req: Req
   }
 });
 
+// V5.4.1 — Administrator: delete ALL saved PDF book versions of an interviewee at once.
+apiRouter.delete('/interviews/:id/book-versions', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const admin = (req as any).adminUser as string;
+    const result = await storage.deleteAllParticipantBookVersionsForInterview(req.params.id, admin);
+    res.json({
+      success: true,
+      message: `Se eliminaron ${result.deletedCount} versión(es) del libro en PDF.`,
+      data: {
+        deletedCount: result.deletedCount,
+        deletedVersionIds: result.deletedVersionIds,
+        clearedUpTo: Number((result.interview as { bookVersionsClearedUpTo?: number }).bookVersionsClearedUpTo ?? 0) || 0,
+        interview: result.interview,
+      },
+    });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
+// V5.4.1 — Administrator: delete ALL manuscripts of an interviewee at once.
+apiRouter.delete('/interviews/:id/manuscripts', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const admin = (req as any).adminUser as string;
+    const result = await storage.deleteAllManuscriptsForInterview(req.params.id, admin);
+    res.json({
+      success: true,
+      message: `Se eliminaron ${result.deletedCount} manuscrito(s).`,
+      data: { deletedCount: result.deletedCount, interview: result.interview },
+    });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
 // Seed 7 complete test stories (3 individual with varied flows, 4 shared of 2, 3, 4 and 5 people)
 apiRouter.post('/interviews/seed-test-stories', requireAdmin, async (req: Request, res: Response) => {
   try {
