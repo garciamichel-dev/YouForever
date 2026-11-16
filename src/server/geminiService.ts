@@ -1621,7 +1621,7 @@ async function callGeminiBookModelBatch(params: {
 // V5.3.3 — Time and token budget of book generation
 // =============================================================================================
 /** The 5-page editorial sample must be on screen within 60 s (budget leaves margin for the PDF view). */
-export let PREVIEW_TIME_BUDGET_MS = Number(process.env.BOOK_PREVIEW_TIME_BUDGET_MS) || 50_000;
+export let PREVIEW_TIME_BUDGET_MS = Number(process.env.BOOK_PREVIEW_TIME_BUDGET_MS) || 55_000;
 /** Tests only. */
 export function __setPreviewTimeBudgetForTests(ms: number | null): void {
   PREVIEW_TIME_BUDGET_MS = ms ?? (Number(process.env.BOOK_PREVIEW_TIME_BUDGET_MS) || 50_000);
@@ -1959,6 +1959,55 @@ export function selectPreviewSampleSegments<T extends { id: string; unidadesTest
 }
 
 /**
+ * V5.3.5 — The book's cover subtitle is never "Un libro parcial de memorias": a partial interview is
+ * still presented with a normal subtitle (the introduction keeps the honest note about which life
+ * stages are documented).
+ */
+export function neutralBookSubtitle(candidate: string | undefined | null, isCouple: boolean): string {
+  const clean = String(candidate || '').trim();
+  if (clean && !/libro parcial de memorias/i.test(clean)) return clean;
+  return isCouple ? 'Libro biográfico de memorias compartidas' : 'Libro autobiográfico y legado familiar';
+}
+
+/**
+ * V5.3.5 — Title the participant already saw on the sample's cover. The full book keeps it, so the
+ * name shown in the sample is the name the book will have.
+ */
+export function presetBookTitleFromSample(sample: DemoManuscript | null | undefined): string {
+  if (!sample || !(sample as any).isPreviewSample) return '';
+  const title = String(sample.title || '').trim();
+  return title.length > 0 && title.length <= 140 ? title : '';
+}
+
+/**
+ * V5.3.5 — Light, deterministic cleanup of spoken disfluencies for the sample's faithful redaction
+ * (used only when the model could not draft the sample in time, or when a chapter contained
+ * excluded content). It never adds words: it removes truncated fragments ("ju-", "gus-"),
+ * immediate repetitions ("Y y", "que que"), and oral fillers ("bueno,", "pues", "vaya,", "o sea"),
+ * then fixes spacing and capitalisation.
+ */
+export function cleanSpokenDisfluencies(paragraphs: string[]): string[] {
+  return paragraphs.map((raw) => {
+    let t = ` ${String(raw || '')} `;
+    // Truncated fragments: "ju-, precisamente" / "le gus- le gustaba" / "se- mi".
+    t = t.replace(/(\s)[\p{L}]{1,6}-,?(?=\s)/gu, '$1');
+    // Immediate repetitions: "Y y", "de de", "que que" (twice or more in a row).
+    t = t.replace(/(?<![\p{L}])(\p{L}+)(?:[\s,]+\1)+(?![\p{L}])/giu, '$1');
+    // Oral fillers.
+    t = t.replace(/(^|[.!?]\s+|\s)[Yy] bueno,?\s+/gu, '$1');
+    t = t.replace(/([,;]\s*|\s)bueno,\s+/giu, '$1');
+    t = t.replace(/(^|[.!?]\s+)Bueno,?\s+/gu, '$1');
+    t = t.replace(/\s(?:pues|vaya|o sea),?(?=\s)/giu, '');
+    // Spacing and punctuation.
+    t = t.replace(/\s+([,.;:!?])/g, '$1').replace(/,\s*,/g, ',').replace(/([.!?])\s*,\s*/g, '$1 ');
+    t = t.replace(/\s{2,}/g, ' ').trim();
+    t = t.replace(/^,\s*/, '');
+    t = t.replace(/(^|[.!?]\s+)(\p{Ll})/gu, (_m, pre: string, ch: string) => pre + ch.toUpperCase());
+    return t;
+  });
+}
+
+/**
  * V5.3 — Local fidelity of the sample: ONLY the memories it uses are checked, with the
  * deterministic rules (names, dates, places, figures, actions, family relations, invented data,
  * excluded content). No global coverage, no semantic judge, no repair call. A sample chapter
@@ -1986,9 +2035,15 @@ export function finalizePreviewSample(params: {
     questions,
   });
   const ver = local.report.veracityAudit;
-  const badFlags = [
+  // V5.3.5 — The deterministic rules are tuned for a literal transcription: a literary rewrite in
+  // the chosen style (a remembered phrase in quotes, a reordered sentence) trips them easily. They
+  // used to swap the whole AI chapter for the literal transcription of the answers, so the sample
+  // stopped looking like the chosen prompt. Now ONLY content the participant excluded (privacy)
+  // forces the faithful redaction; any other finding is kept in the admin log (previewFidelity),
+  // exactly like the full book, where these findings are non-blocking observations.
+  const leakedFlags = ver?.leakedExcludedContentFlags || [];
+  const observationFlags = [
     ...(ver?.inventedDataFlags || []),
-    ...(ver?.leakedExcludedContentFlags || []),
     ...(ver?.semanticContradictionFlags || []),
   ];
   const contradictedChapterIds = new Set(
@@ -1997,16 +2052,23 @@ export function finalizePreviewSample(params: {
       .map((t) => t.chapterId as string)
   );
   chapters = chapters.map((ch) => {
-    const flagged =
-      contradictedChapterIds.has(ch.id) || badFlags.some((f) => f.includes(`"${ch.title}"`));
-    if (!flagged) return ch;
+    const leaked = leakedFlags.some((f) => f.includes(`"${ch.title}"`));
+    if (contradictedChapterIds.has(ch.id) || observationFlags.some((f) => f.includes(`"${ch.title}"`))) {
+      for (const f of observationFlags.filter((flag) => flag.includes(`"${ch.title}"`))) {
+        issues.push(`Observación (no bloqueante) en la muestra: ${f}`);
+      }
+      if (contradictedChapterIds.has(ch.id)) {
+        issues.push(`Capítulo "${ch.title}": posible contradicción con los testimonios usados (observación, no se reemplaza).`);
+      }
+    }
+    if (!leaked) return ch;
     const safe = fallback.chapters.find((c) => c.id === ch.id);
     if (!safe) return ch;
     replacedChapterIds.push(ch.id);
-    issues.push(`Capítulo "${ch.title}": dato incompatible con los testimonios usados; se usó la redacción fiel.`);
-    return { ...safe };
+    issues.push(`Capítulo "${ch.title}": contenía información que el participante excluyó; se usó la redacción fiel.`);
+    return { ...safe, paragraphs: cleanSpokenDisfluencies(safe.paragraphs || []) };
   });
-  const introInvented = (ver?.inventedDataFlags || []).some((f) => f.includes('"Introducción"'));
+  const introInvented = leakedFlags.some((f) => f.includes('"Introducción"'));
   const fidelity: PreviewFidelityReport = {
     checkedAnswerIds: Array.from(usedAnswerIds),
     checkedUnits: local.report.totalSourceUnits,
@@ -4042,7 +4104,11 @@ export async function generateParticipantBookManuscriptWithAI(params: {
     const systemInstructionWithActivePrompt = `${activeLiteraryPrompt}\n\n${styleDifferentiationDirective}`;
 
     let effectiveProvider: BookAiProvider = primaryProvider;
-    let effectiveModel: string = primaryModel;
+    // V5.3.5: optional faster model for the sample only (same provider), e.g. BOOK_PREVIEW_MODEL.
+    let effectiveModel: string =
+      scope === 'preview' && String(process.env.BOOK_PREVIEW_MODEL || '').trim()
+        ? String(process.env.BOOK_PREVIEW_MODEL).trim()
+        : primaryModel;
     let providerFallbackNotice: string | undefined = undefined;
     let anyProviderCachedTokens = false;
 
@@ -4138,8 +4204,18 @@ export async function generateParticipantBookManuscriptWithAI(params: {
 
         const partialFramingNote = fallbackResult.editorialPlan.isPartialMemoir
           ? `\n- ENCUADRE EDITORIAL DE ENTREVISTA PARCIAL (Etapas documentadas: ${(fallbackResult.editorialPlan.documentedStages || []).join(', ')}):
-  Presenta el subtítulo como "${fallbackResult.editorialPlan.partialMemoirSubtitle || 'Un libro parcial de memorias'}". NO inventes ni completes otras etapas de vida sin testimonios reales.`
+  NO inventes ni completes otras etapas de vida sin testimonios reales. El subtítulo NUNCA debe ser "Un libro parcial de memorias".`
           : '';
+
+        // V5.3.5 — The sample is the first pages of the real book: same prompt and style, a definitive
+        // title, and a bounded length so the model answers within the sample's time budget.
+        const previewSampleInstructions = `
+
+MUESTRA EDITORIAL (PRIMERAS PÁGINAS DEL LIBRO):
+- Estas son las primeras páginas del libro definitivo: aplica el prompt literario activo y el estilo "${styleTitle}" con la misma calidad que en el libro completo. Nunca transcribas las respuestas literalmente: reescríbelas como prosa del estilo elegido, sin muletillas, repeticiones ni titubeos del habla.
+- "title": propón el TÍTULO DEFINITIVO del libro (evocador, coherente con la vida narrada). No uses solo el nombre del protagonista ni la frase "Un libro parcial de memorias".
+- "subtitle": un subtítulo breve; nunca "Un libro parcial de memorias".
+- Extensión total aproximada: entre 700 y 1,000 palabras entre la introducción y los capítulos de este lote (es solo la muestra).`;
 
         const structureInstructions = isAutonomousStructure
           ? `MODO DE ESTRUCTURA EDITORIAL ACTIVO (OPCIÓN 1 — OBEDIENCIA 100% AUTÓNOMA AL PROMPT LITERARIO ACTIVO):
@@ -4177,7 +4253,7 @@ UNIDADES TESTIMONIALES A REDACTAR EN ESTE LOTE (LOTE ${batchIdx + 1}/${chapterBa
 ${JSON.stringify(batchChapters, null, 2)}
 
 REGLAS OBLIGATORIAS DE SALIDA JSON:
-${structureInstructions}`;
+${structureInstructions}${scope === 'preview' ? previewSampleInstructions : ''}`;
 
         // V5.2: a checkpoint (persisted OR held in this process's memory) is replayed only when it
         // belongs to these sources, this generation configuration and this exact chapter plan.
@@ -4241,7 +4317,8 @@ ${structureInstructions}`;
           }
           const timeoutMs =
             scope === 'preview'
-              ? Math.max(PREVIEW_MIN_CALL_MS, Math.min(isReasoningModel ? 45000 : 35000, remainingPreviewMs - 3000))
+              ? // V5.3.5: the sample's single call may use the whole remaining budget.
+                Math.max(PREVIEW_MIN_CALL_MS, remainingPreviewMs - 3000)
               : isReasoningModel
               ? 65000
               : 38000;
@@ -4639,15 +4716,17 @@ ${structureInstructions}`;
         aiGenerated: true,
         isPartialMemoir: fallbackResult.editorialPlan.isPartialMemoir,
         documentedStages: fallbackResult.editorialPlan.documentedStages,
+        // V5.3.5: the full book keeps the title the participant saw on the sample's cover.
         title: (
-          stripInlinePhotoMarkers(aiTitle || '').trim() || fallbackResult.manuscript.title
+          (scope !== 'preview' ? presetBookTitleFromSample(lockedPreviewManuscript) : '') ||
+          stripInlinePhotoMarkers(aiTitle || '').trim() ||
+          fallbackResult.manuscript.title
         ).trim(),
-        subtitle: fallbackResult.editorialPlan.isPartialMemoir
-          ? fallbackResult.editorialPlan.partialMemoirSubtitle || 'Un libro parcial de memorias'
-          : (
-              stripInlinePhotoMarkers(aiSubtitle || '').trim() ||
-              fallbackResult.manuscript.subtitle
-            ).trim(),
+        // V5.3.5: never "Un libro parcial de memorias" on the cover.
+        subtitle: neutralBookSubtitle(
+          stripInlinePhotoMarkers(aiSubtitle || '').trim() || fallbackResult.manuscript.subtitle,
+          isCouple
+        ),
         introduction: (
           stripInlinePhotoMarkers(aiIntroduction || '').trim() ||
           fallbackResult.manuscript.introduction
@@ -5102,9 +5181,15 @@ ${structureInstructions}`;
           answers,
           questions,
         });
+        // V5.3.5: the faithful redaction is cleaned of spoken disfluencies ("Y y", "bueno", "ju-").
         return {
           manuscript: {
             ...ruleBasedSample,
+            chapters: ruleBasedSample.chapters.map((ch) => ({
+              ...ch,
+              paragraphs: cleanSpokenDisfluencies(ch.paragraphs || []),
+            })),
+            subtitle: neutralBookSubtitle(fallbackResult.manuscript.subtitle, isCouple),
             aiGenerated: false,
             previewSource: 'rule_based_fallback',
           } as DemoManuscript,

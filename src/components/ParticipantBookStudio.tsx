@@ -56,6 +56,7 @@ import {
 } from './DemoBookPageRenderer.tsx';
 import { generateRealDemoBookPdf, preloadBookResourcesForPdf } from '../utils/demoPdfGenerator.ts';
 import { ForeverYouLogo } from './ForeverYouLogo';
+import { BookProgressOverlay, type BookProgressState } from './BookProgressOverlay.tsx';
 
 /** V5.3.1: shown in the preview and before saving the final book. */
 /**
@@ -304,6 +305,17 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
     totalRepairChapters: number;
   } | null>(null);
   const activeJobIdRef = useRef<string | null>(null);
+  // V5.3.5: floating, non-dismissable progress alert for every book creation step.
+  const [progressOverlay, setProgressOverlay] = useState<BookProgressState | null>(null);
+  const pdfCancelRequestedRef = useRef<boolean>(false);
+  const startProgress = (kind: BookProgressState['kind'], stage: BookProgressState['stage'] = 'job') =>
+    setProgressOverlay({ kind, stage, status: 'running', cancellable: true });
+  const updateProgress = (patch: Partial<BookProgressState>) =>
+    setProgressOverlay((prev) => (prev ? { ...prev, ...patch } : prev));
+  const pauseProgress = () =>
+    setProgressOverlay((prev) =>
+      prev ? { ...prev, status: 'paused', cancellable: true, pausedMessage: BOOK_IN_PROGRESS_MESSAGE } : prev
+    );
   const isUnmountedRef = useRef<boolean>(false);
 
   const safeReadJsonResponse = async (res: Response): Promise<any> => {
@@ -642,6 +654,20 @@ BOOK_IN_PROGRESS_MESSAGE
       setIsGeneratingAI(false);
       setIsSavingBook(false);
       setGenerationJobProgress(null);
+      setProgressOverlay(null);
+    }
+  };
+
+  // V5.3.5: «Cancelar» in the floating alert stops whatever is being created.
+  const handleCancelProgressOverlay = () => {
+    pdfCancelRequestedRef.current = true;
+    if (activeJobIdRef.current) {
+      void handleCancelActiveGeneration();
+    } else {
+      styleRequestIdRef.current += 1;
+      setIsGeneratingAI(false);
+      setGenerationJobProgress(null);
+      setProgressOverlay(null);
     }
   };
 
@@ -668,6 +694,7 @@ BOOK_IN_PROGRESS_MESSAGE
           setNarrativeStyle(styleId);
           setEditorialConfig((prev) => ({ ...prev, narrativeStyle: styleId }));
           setIsGeneratingAI(true);
+          startProgress(job.scope === 'full' ? 'full' : 'preview');
           try {
             const payload = await pollBookGenerationJob(
               job,
@@ -681,9 +708,22 @@ BOOK_IN_PROGRESS_MESSAGE
               payload.manuscript
             ) {
               applyGeneratedManuscriptPayload(payload, styleId);
+              setProgressOverlay((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      status: 'done',
+                      doneTitle: '¡Tus páginas están listas!',
+                      doneMessage: 'Ya puedes revisar el resultado en el visor.',
+                    }
+                  : prev
+              );
+            } else if (!cancelledEffect && reqId === styleRequestIdRef.current && payload?.cancelled) {
+              setProgressOverlay(null);
             }
           } catch (resumeErr: any) {
             if (!cancelledEffect && reqId === styleRequestIdRef.current) {
+              pauseProgress();
               setStudioError(
 BOOK_IN_PROGRESS_MESSAGE
               );
@@ -750,6 +790,7 @@ BOOK_IN_PROGRESS_MESSAGE
 
     setHasAiDraftLoadedForSession(false);
     setIsGeneratingAI(true);
+    startProgress('preview');
     setGenerationJobProgress({
       jobId: 'starting',
       phase: 'preparing_sources',
@@ -783,6 +824,7 @@ BOOK_IN_PROGRESS_MESSAGE
           startData.error || BOOK_IN_PROGRESS_MESSAGE
         );
         setRetryAction('preview');
+        pauseProgress();
         return;
       }
 
@@ -790,16 +832,36 @@ BOOK_IN_PROGRESS_MESSAGE
         startData.data,
         () => reqId !== styleRequestIdRef.current
       );
-      if (reqId !== styleRequestIdRef.current || !payload || payload.cancelled) return;
+      if (reqId !== styleRequestIdRef.current) return;
+      if (!payload || payload.cancelled) {
+        setProgressOverlay(null);
+        return;
+      }
 
       if (payload.manuscript) {
+        updateProgress({ stage: 'compose', cancellable: false });
         applyGeneratedManuscriptPayload(payload, styleId);
+        const stillInPreparation =
+          payload.manuscript.generationStatus === 'incomplete_draft' ||
+          payload.manuscript.status === 'incomplete_draft';
+        if (stillInPreparation) {
+          pauseProgress();
+        } else {
+          updateProgress({
+            status: 'done',
+            doneTitle: '¡Tu muestra editorial está lista!',
+            doneMessage:
+              'Pulsa «Aceptar» para revisar tus primeras páginas con el estilo que elegiste.',
+          });
+        }
       } else {
         setStudioError(BOOK_IN_PROGRESS_MESSAGE);
         setRetryAction('preview');
+        pauseProgress();
       }
     } catch (err: any) {
       if (reqId === styleRequestIdRef.current && err?.name !== 'AbortError') {
+        pauseProgress();
         setStudioError(
 BOOK_IN_PROGRESS_MESSAGE
         );
@@ -889,6 +951,8 @@ BOOK_IN_PROGRESS_MESSAGE
 
   // Download the 6-page sample preview PDF for the currently selected Literary Style
   const handleDownloadPreviewSamplePdf = async () => {
+    pdfCancelRequestedRef.current = false;
+    startProgress('pdf');
     try {
       setStudioError(null);
       const resolvedCover = await ensureDataUrlForPdf(coverPhoto);
@@ -902,6 +966,8 @@ BOOK_IN_PROGRESS_MESSAGE
         if (resPh) resolvedAllPhotos[k] = resPh;
       }
 
+      if (pdfCancelRequestedRef.current) return;
+      updateProgress({ stage: 'compose' });
       const previewComposed = composeBookPages({
         manuscript,
         editorialConfig,
@@ -914,6 +980,8 @@ BOOK_IN_PROGRESS_MESSAGE
       });
 
       await preloadBookResourcesForPdf(previewComposed);
+      if (pdfCancelRequestedRef.current) return;
+      updateProgress({ stage: 'pdf' });
 
       const styleSuffix =
         narrativeStyle === 'first_person_simple'
@@ -942,12 +1010,22 @@ BOOK_IN_PROGRESS_MESSAGE
       const a = document.createElement('a');
       a.href = pdfResult.blobUrl;
       a.download = pdfResult.filename.replace(/\.pdf$/i, `_Muestra_${styleSuffix}.pdf`);
+      if (pdfCancelRequestedRef.current) {
+        URL.revokeObjectURL(pdfResult.blobUrl);
+        return;
+      }
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       setTimeout(() => URL.revokeObjectURL(pdfResult.blobUrl), 10000);
+      updateProgress({
+        status: 'done',
+        doneTitle: '¡Tu PDF de muestra está listo!',
+        doneMessage: 'La descarga de tu muestra editorial ya comenzó.',
+      });
     } catch (err: any) {
-      setStudioError(err?.message || 'Error al descargar el PDF de muestra.');
+      console.warn('[ParticipantBookStudio] PDF de muestra no disponible:', err);
+      pauseProgress();
     }
   };
 
@@ -955,7 +1033,13 @@ BOOK_IN_PROGRESS_MESSAGE
   const handleDownloadBookVersionPdf = async (
     version: ParticipantBookVersionRecord,
     preComposedBook?: ReturnType<typeof composeBookPages>
-  ) => {
+  ): Promise<boolean> => {
+    // V5.3.5: inside the save flow the alert is already open (step «Creando el PDF»).
+    const standalone = !preComposedBook;
+    if (standalone) {
+      pdfCancelRequestedRef.current = false;
+      startProgress('pdf');
+    }
     try {
       let composedForVersion = preComposedBook;
       if (!composedForVersion) {
@@ -970,6 +1054,8 @@ BOOK_IN_PROGRESS_MESSAGE
           if (resPh) resolvedAllPhotos[k] = resPh;
         }
 
+        if (pdfCancelRequestedRef.current) return false;
+        updateProgress({ stage: 'compose' });
         composedForVersion = composeBookPages({
           manuscript: version.manuscript,
           editorialConfig: version.editorialConfig,
@@ -984,6 +1070,8 @@ BOOK_IN_PROGRESS_MESSAGE
       }
 
       await preloadBookResourcesForPdf(composedForVersion);
+      if (pdfCancelRequestedRef.current) return false;
+      if (standalone) updateProgress({ stage: 'pdf' });
 
       const pdfResult = generateRealDemoBookPdf({
         composed: composedForVersion,
@@ -1001,12 +1089,26 @@ BOOK_IN_PROGRESS_MESSAGE
       const a = document.createElement('a');
       a.href = pdfResult.blobUrl;
       a.download = version.fileName || pdfResult.filename;
+      if (pdfCancelRequestedRef.current) {
+        URL.revokeObjectURL(pdfResult.blobUrl);
+        return false;
+      }
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       setTimeout(() => URL.revokeObjectURL(pdfResult.blobUrl), 10000);
+      if (standalone) {
+        updateProgress({
+          status: 'done',
+          doneTitle: '¡Tu PDF está listo!',
+          doneMessage: 'La descarga de tu libro ya comenzó.',
+        });
+      }
+      return true;
     } catch (err: any) {
-      setStudioError(err?.message || 'Error al generar la descarga del PDF.');
+      console.warn('[ParticipantBookStudio] PDF no disponible:', err);
+      if (standalone) pauseProgress();
+      return false;
     }
   };
 
@@ -1058,6 +1160,8 @@ BOOK_IN_PROGRESS_MESSAGE
     setIsSavingBook(true);
     setStudioError(null);
     setStudioSuccessMsg(null);
+    pdfCancelRequestedRef.current = false;
+    startProgress('full');
 
     const activeStyle: DemoNarrativeStyleId =
       narrativeStyle || editorialConfig.narrativeStyle || 'first_person_literary';
@@ -1126,7 +1230,8 @@ BOOK_IN_PROGRESS_MESSAGE
         activeJobIdRef.current = null;
         setGenerationJobProgress(null);
 
-        if (payload?.cancelled) {
+        if (payload?.cancelled || pdfCancelRequestedRef.current) {
+          setProgressOverlay(null);
           return;
         }
 
@@ -1188,6 +1293,13 @@ BOOK_IN_PROGRESS_MESSAGE
           narrativeStyle: activeStyle,
         });
       }
+
+      // V5.3.5: from here on the book is being saved; «Cancelar» waits until the PDF step.
+      if (pdfCancelRequestedRef.current) {
+        setProgressOverlay(null);
+        return;
+      }
+      updateProgress({ stage: 'save', cancellable: false });
 
       // 2. Compose the complete book directly from the canonical manuscript (Pages 1..5 are 100% identical to preview)
       const fullComposedBook = composeBookPages({
@@ -1331,16 +1443,38 @@ BOOK_IN_PROGRESS_MESSAGE
               maxContentPages: 500,
               previewSampleOnly: false,
             });
-      await handleDownloadBookVersionPdf(savedVersion, canonicalComposedBook);
+      updateProgress({ stage: 'pdf', cancellable: true });
+      const pdfDelivered = await handleDownloadBookVersionPdf(savedVersion, canonicalComposedBook);
+      updateProgress({
+        status: 'done',
+        doneTitle: '¡Tu libro está listo!',
+        doneMessage: pdfDelivered
+          ? `Tu libro completo (Versión ${savedVersion.versionNumber}) se guardó en tu Portal del Participante y la descarga del PDF ya comenzó.`
+          : `Tu libro completo (Versión ${savedVersion.versionNumber}) se guardó en tu Portal del Participante. Puedes descargar el PDF desde tu lista de versiones.`,
+      });
       scrollAndFocusActionArea('viewer');
     } catch (err: any) {
       const rawMsg = String(err?.message || '');
       const cleanMsg = /aborted/i.test(rawMsg)
         ? BOOK_IN_PROGRESS_MESSAGE
-        : rawMsg || 'Error al guardar la versión del libro.';
+        : rawMsg || BOOK_IN_PROGRESS_MESSAGE;
       setStudioError(cleanMsg);
+      setRetryAction((prev) => prev || 'save');
+      pauseProgress();
     } finally {
       setIsSavingBook(false);
+    }
+  };
+
+  // V5.3.5: «Continuar preparando» (inline notice or floating alert) resumes the right process.
+  const handleContinuePreparing = () => {
+    setStudioError(null);
+    if (retryAction === 'full' || retryAction === 'save') {
+      void handleSaveAndGenerateBookVersion();
+    } else if (narrativeStyle) {
+      void handleSelectNarrativeStyle(narrativeStyle, true);
+    } else {
+      setProgressOverlay(null);
     }
   };
 
@@ -1464,13 +1598,7 @@ BOOK_IN_PROGRESS_MESSAGE
           {retryAction && (
             <button
               type="button"
-              onClick={() => {
-                if (retryAction === 'full') {
-                  void handleSaveAndGenerateBookVersion();
-                } else if (narrativeStyle) {
-                  void handleSelectNarrativeStyle(narrativeStyle);
-                }
-              }}
+              onClick={handleContinuePreparing}
               className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-amber-800 hover:bg-amber-900 text-white text-xs font-semibold shrink-0 cursor-pointer"
             >
               <RefreshCw className="w-3.5 h-3.5" />
@@ -1488,65 +1616,14 @@ BOOK_IN_PROGRESS_MESSAGE
         </div>
       )}
 
-      {(isGeneratingAI || isSavingBook) && generationJobProgress && (
-        <div
-          data-testid="book-generation-step-progress"
-          className="bg-amber-50/90 border border-amber-200 text-amber-950 rounded-2xl p-4 sm:p-5 text-sm space-y-3 shadow-xs"
-        >
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-            <div className="flex items-start gap-3">
-              <Loader2 className="w-5 h-5 text-amber-700 animate-spin shrink-0 mt-0.5" />
-              <div className="space-y-1">
-                <div className="text-xs font-bold uppercase tracking-wide text-amber-900">
-                  Preparando tu libro paso a paso
-                </div>
-                <p className="text-xs sm:text-sm text-amber-900 font-medium">
-                  {generationJobProgress.userMessage}
-                </p>
-                {generationJobProgress.totalBatches > 0 && (
-                  <p className="text-[11px] text-amber-800">
-                    Avance de capítulos: parte{' '}
-                    {Math.min(
-                      generationJobProgress.completedBatches + 1,
-                      generationJobProgress.totalBatches
-                    )}{' '}
-                    de {generationJobProgress.totalBatches}
-                  </p>
-                )}
-              </div>
-            </div>
-            {generationJobProgress.jobId && generationJobProgress.jobId !== 'starting' && (
-              <button
-                type="button"
-                onClick={() => void handleCancelActiveGeneration()}
-                className="px-3 py-1.5 rounded-xl border border-amber-300 bg-white hover:bg-amber-100 text-amber-900 text-xs font-semibold shrink-0 cursor-pointer"
-              >
-                Pausar por ahora
-              </button>
-            )}
-          </div>
-          {generationJobProgress.totalBatches > 0 && (
-            <div className="w-full h-2 rounded-full bg-amber-200/70 overflow-hidden">
-              <div
-                className="h-full bg-amber-700 transition-all duration-500 rounded-full"
-                style={{
-                  width: `${Math.min(
-                    100,
-                    Math.max(
-                      8,
-                      Math.round(
-                        (generationJobProgress.completedBatches /
-                          generationJobProgress.totalBatches) *
-                          100
-                      )
-                    )
-                  )}%`,
-                }}
-              />
-            </div>
-          )}
-        </div>
-      )}
+      {/* V5.3.5: progress of every book creation step is shown in the floating alert. */}
+      <BookProgressOverlay
+        state={progressOverlay}
+        job={generationJobProgress}
+        onCancel={handleCancelProgressOverlay}
+        onAccept={() => setProgressOverlay(null)}
+        onContinue={handleContinuePreparing}
+      />
 
       {(manuscript.generationStatus === 'incomplete_draft' ||
         manuscript.status === 'incomplete_draft') && (

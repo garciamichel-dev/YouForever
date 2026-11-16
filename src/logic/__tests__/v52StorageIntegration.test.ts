@@ -2336,3 +2336,78 @@ test('V5.3.3-P5: modelos con razonamiento: esfuerzo bajo para no gastar tokens, 
   assert.equal(gemini.noteReasoningEffortRejection('gpt-6-luna', new Error('429 rate limit')), false);
   assert.equal(gemini.PREVIEW_TIME_BUDGET_MS <= 55_000, true, 'La muestra deja margen dentro de 60 s.');
 });
+
+// ---------------------------------------------------------------------------------------------
+// V5.3.5 — The sample follows the chosen prompt (no literal copy), with the definitive title.
+// ---------------------------------------------------------------------------------------------
+
+test('V5.3.5-M1: la muestra conserva la redacción literaria del modelo aunque las reglas locales marquen una cita; solo el contenido excluido fuerza la redacción fiel', async () => {
+  await loadV533Modules();
+  const { interview, token } = await createSyntheticInterview('medium');
+  const style: StyleId = 'first_person_simple';
+  const base = baseManuscriptFor(interview.id, style);
+  const LITERARY = 'Mi madre lo repetía a menudo: «cuando tenga un hijo le pondré un nombre que me guste mucho».';
+  const faithful = helpers.createFaithfulDrafter(base, (_id: string, paragraphs: string[]) =>
+    paragraphs.length > 0 ? [LITERARY, ...paragraphs] : paragraphs
+  );
+  scenario.judge = helpers.createScenarioJudge().judge;
+  scenario.draftBatch = async (ctx: any) => {
+    const out = await faithful.draftBatch(ctx);
+    return {
+      ...out,
+      parsed: { ...out.parsed, title: 'Raíces junto al mar', subtitle: 'Un libro parcial de memorias' },
+    };
+  };
+  const result = await storage.generateParticipantBookManuscript({ plainToken: token, narrativeStyle: style, scope: 'preview', forceRefresh: true });
+  const sample = result.manuscript;
+  assert.equal(sample.generationStatus, 'preview_sample');
+  const allText = sample.chapters.flatMap((c: any) => c.paragraphs).join('\n');
+  assert.ok(allText.includes(LITERARY), 'El texto del modelo (con su cita) se conserva; no se sustituye por la transcripción literal.');
+  assert.deepEqual(sample.previewFidelity.replacedChapterIds, []);
+  assert.ok(sample.previewFidelity.issues.some((i: string) => /Observación/.test(i)), 'El hallazgo queda en la bitácora del administrador.');
+  // Definitive title; never "Un libro parcial de memorias".
+  assert.equal(sample.title, 'Raíces junto al mar');
+  assert.doesNotMatch(sample.subtitle || '', /libro parcial de memorias/i);
+  const seen = jobs.sanitizeBookResultForParticipant(jsonRoundTrip(result));
+  assert.equal(seen.manuscript.previewFidelity, undefined, 'El participante no recibe el informe de fidelidad.');
+
+  // The full book keeps the title shown on the sample's cover.
+  scenario.draftBatch = async (ctx: any) => {
+    const out = await helpers.createFaithfulDrafter(base).draftBatch(ctx);
+    return { ...out, parsed: { ...out.parsed, title: 'Otro título distinto' } };
+  };
+  const full = await storage.generateParticipantBookManuscript({
+    plainToken: token,
+    narrativeStyle: style,
+    scope: 'full',
+    forceRefresh: true,
+    lockedPreviewManuscript: jsonRoundTrip(sample),
+  });
+  assert.equal(full.manuscript.title, 'Raíces junto al mar');
+  assert.doesNotMatch(full.manuscript.subtitle || '', /libro parcial de memorias/i);
+});
+
+test('V5.3.5-M2: si el modelo no alcanza a responder, la muestra de respaldo sale sin muletillas ni titubeos', async () => {
+  await loadV533Modules();
+  const cleaned = gemini.cleanSpokenDisfluencies([
+    'Mi papá me decía Michael. Y y fuera de eso, no recuerdo otro apodo. Y y bueno, puedo decir que sí me gustaba.',
+    'lo primero que veía, pues era ese sillón que estaba ju-, precisamente ese sillón. mi se- mi abuelita los costuraba.',
+  ]);
+  assert.equal(cleaned[0], 'Mi papá me decía Michael. Y fuera de eso, no recuerdo otro apodo. Puedo decir que sí me gustaba.');
+  assert.equal(cleaned[1], 'Lo primero que veía, era ese sillón que estaba precisamente ese sillón. Mi abuelita los costuraba.');
+  assert.equal(gemini.neutralBookSubtitle('Un libro parcial de memorias', false), 'Libro autobiográfico y legado familiar');
+  assert.equal(gemini.neutralBookSubtitle('Recuerdos de Acapulco', false), 'Recuerdos de Acapulco');
+  assert.equal(gemini.presetBookTitleFromSample({ title: 'X' } as any), '', 'Solo una muestra fija el título.');
+
+  const { token } = await createSyntheticInterview('medium');
+  gemini.__setPreviewTimeBudgetForTests(1500);
+  try {
+    scenario.draftBatch = () => new Promise(() => undefined);
+    const result = await storage.generateParticipantBookManuscript({ plainToken: token, narrativeStyle: 'first_person_simple', scope: 'preview', forceRefresh: true });
+    const text = result.manuscript.chapters.flatMap((c: any) => c.paragraphs).join(' ');
+    assert.doesNotMatch(text, /(?<![\p{L}])(\p{L}+)\s+\1(?![\p{L}])/iu);
+    assert.doesNotMatch(result.manuscript.subtitle || '', /libro parcial de memorias/i);
+  } finally {
+    gemini.__setPreviewTimeBudgetForTests(null);
+  }
+});
