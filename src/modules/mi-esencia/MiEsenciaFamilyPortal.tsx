@@ -19,6 +19,7 @@ import {
   X,
 } from 'lucide-react';
 import { ForeverYouLogo } from '../../components/ForeverYouLogo';
+import { MiEsenciaChatPhotos } from './MiEsenciaChatPhotos.tsx';
 import { ThemeToggleButton, useTheme } from '../../context/ThemeContext';
 import {
   isGenericAdministrativeInterlocutorName,
@@ -1096,6 +1097,11 @@ export const MiEsenciaFamilyPortal: React.FC<MiEsenciaFamilyPortalProps> = ({
                   }`}
                 >
                   <p className="text-sm whitespace-pre-wrap leading-relaxed">{msg.content}</p>
+
+                  {/* V5.4.0: fotografías reales del testimonio que el avatar comparte. */}
+                  {!isUser && msg.photoAttachments && msg.photoAttachments.length > 0 && (
+                    <MiEsenciaChatPhotos personalCode={personalCode} photos={msg.photoAttachments} />
+                  )}
 
                   {!isUser && msgIndex === 0 && (
                     <div className="flex flex-wrap gap-1.5 pt-1 font-sans">

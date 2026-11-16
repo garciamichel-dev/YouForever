@@ -367,6 +367,8 @@ export interface MiEsenciaConversationMessage {
   memoryIdCreated?: string;
   contradictionIdCreated?: string;
   tokensEstimated?: number;
+  /** V5.4.0: fotografías reales del testimonio mostradas junto a este mensaje del avatar. */
+  photoAttachments?: Array<{ photoId: string; caption: string }>;
   timestamp: string;
 }
 

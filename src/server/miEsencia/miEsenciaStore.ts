@@ -1,4 +1,10 @@
 import fs from 'fs';
+import {
+  buildPersonPhotoCatalog,
+  buildPhotoContextNote,
+  finalizeReplyForPhotos,
+  selectPhotosForMessage,
+} from '../../logic/miEsenciaPhotos.ts';
 import path from 'path';
 import crypto from 'crypto';
 import { GoogleGenAI } from '@google/genai';
@@ -121,6 +127,28 @@ function sanitizeFirestoreObj<T>(data: T): Record<string, unknown> {
     return out;
   };
   return clean(raw);
+}
+
+/**
+ * V5.4.0 — Photo metadata (id + description) of an interview answer, for the Mi Esencia chat.
+ * Never copies the image itself.
+ */
+function photoAttachmentsFromAnswer(ans: {
+  questionId: string;
+  participantName?: string;
+  photos?: Array<{ id?: string; caption?: string; fileName?: string; mimeType?: string; imageUrl?: string; participantName?: string }>;
+}): MiEsenciaTestimonyPhotoAttachment[] {
+  return (ans.photos || [])
+    .filter((p) => p && p.id)
+    .map((p) => ({
+      id: p.id,
+      questionId: ans.questionId,
+      fileName: p.fileName,
+      mimeType: p.mimeType || 'image/jpeg',
+      caption: String(p.caption || '').trim() || 'Sin descripción registrada',
+      imageUrl: p.imageUrl,
+      participantName: p.participantName || ans.participantName,
+    }));
 }
 
 class MiEsenciaStore {
@@ -1400,6 +1428,11 @@ class MiEsenciaStore {
             answerLiteral: ans.answerText,
             audioTranscriptionLiteral: audioTranscriptions || undefined,
             photoCaptionsLiteral: photoCaptions.length > 0 ? photoCaptions : undefined,
+            // V5.4.0: keep which real photos belong to this memory (metadata only; the image is
+            // read from storage when the chat shows it).
+            ...(photoAttachmentsFromAnswer(ans).length > 0
+              ? { photoAttachments: photoAttachmentsFromAnswer(ans) }
+              : {}),
             entitiesMentioned: [],
             keywords: Array.from(new Set(words)).slice(0, 35),
             recordedAt: ans.updatedAt || ans.createdAt || nowIso,
@@ -3038,6 +3071,72 @@ class MiEsenciaStore {
     return { newSession, allSessions };
   }
 
+  /**
+   * V5.4.0 — Testimonies of a person with their photo identifiers. Avatars created before V5.4.0
+   * kept only the photo descriptions; the identifiers are recovered from the original interview
+   * answer (same answer, same descriptions), without modifying the stored testimonies.
+   */
+  private withPhotoAttachments(person: MiEsenciaPersonProfile, testimonies: MiEsenciaTestimonyBlock[]): MiEsenciaTestimonyBlock[] {
+    const needsLookup = testimonies.some(
+      (t) => !(t.photoAttachments && t.photoAttachments.length > 0) && (t.photoCaptionsLiteral || []).length > 0 && t.sourceAnswerId
+    );
+    if (!needsLookup) return testimonies;
+    const interviewId =
+      person.sourceInterviewId && person.sourceInterviewId !== 'manual' && person.sourceInterviewId !== 'uploaded_pdf'
+        ? person.sourceInterviewId
+        : '';
+    if (!interviewId) return testimonies;
+    const answersById = new Map(storage.getAnswersForInterview(interviewId).map((a) => [a.id, a]));
+    return testimonies.map((t) => {
+      if ((t.photoAttachments && t.photoAttachments.length > 0) || !t.sourceAnswerId) return t;
+      const ans = answersById.get(t.sourceAnswerId);
+      const attachments = ans ? photoAttachmentsFromAnswer(ans) : [];
+      return attachments.length > 0 ? { ...t, photoAttachments: attachments } : t;
+    });
+  }
+
+  /**
+   * V5.4.0 — Fotografía para el chat del portal familiar. Solo se entrega si pertenece al testimonio
+   * de una de las personas a las que da acceso ese código (nunca fotos de otro avatar).
+   */
+  public async getFamilyChatPhoto(params: {
+    personalCode: string;
+    photoId: string;
+  }): Promise<{ buffer: Buffer; mimeType: string } | null> {
+    const authCheck = this.verifyPersonalAccessCode(params.personalCode);
+    if (!authCheck.valid || !authCheck.persons || authCheck.persons.length === 0) {
+      throw new Error(authCheck.error || 'Acceso no autorizado.');
+    }
+    const photoId = String(params.photoId || '').trim();
+    if (!photoId) return null;
+    let attachment: MiEsenciaTestimonyPhotoAttachment | undefined;
+    for (const person of authCheck.persons) {
+      const testimonies = this.withPhotoAttachments(
+        person,
+        Array.from(this.testimonies.values()).filter((t) => t.personId === person.personId)
+      );
+      for (const t of testimonies) {
+        attachment = (t.photoAttachments || []).find((p) => p?.id === photoId);
+        if (attachment) break;
+      }
+      if (attachment) break;
+    }
+    if (!attachment) return null;
+
+    const fromStorage = storage.getPhotoBuffer(photoId);
+    if (fromStorage && fromStorage.buffer.length > 0) return fromStorage;
+    const decode = (dataUrl?: string) => {
+      const match = String(dataUrl || '').match(/^data:([^;]+);base64,(.+)$/);
+      return match && !match[1].includes('svg')
+        ? { buffer: Buffer.from(match[2], 'base64'), mimeType: match[1] || 'image/jpeg' }
+        : null;
+    };
+    const fromAttachment = decode(attachment.dataUrl);
+    if (fromAttachment) return fromAttachment;
+    const record = await storage.getPhotoByIdAsync(photoId).catch(() => null);
+    return decode(record?.dataUrl);
+  }
+
   public async converseWithAvatar(params: {
     personalCode: string;
     selectedPersonId?: string;
@@ -3054,6 +3153,8 @@ class MiEsenciaStore {
     session: MiEsenciaConversationSession;
     updatedInterlocutor: MiEsenciaInterlocutor;
     updatedSubscription: MiEsenciaSubscriptionRecord;
+    /** V5.4.0: fotografías reales del testimonio mostradas con esta respuesta. */
+    photoAttachments?: Array<{ photoId: string; caption: string }>;
   }> {
     const authCheck = this.verifyPersonalAccessCode(params.personalCode);
     if (
@@ -3134,6 +3235,14 @@ class MiEsenciaStore {
     const personRelations = Array.from(this.relations.values()).filter(
       (r) => r.personId === activePerson.personId
     );
+
+    // V5.4.0 — Fotografías reales del testimonio que corresponden a lo que se pide (si se pide).
+    const photoSelection = selectPhotosForMessage(
+      params.messageText,
+      buildPersonPhotoCatalog(this.withPhotoAttachments(activePerson, allPersonTestimonies))
+    );
+    const photoContextNote = buildPhotoContextNote(photoSelection);
+    const shownPhotos = photoSelection.photos;
 
     // ==========================================================================
     // PASO 1: RECONOCIMIENTO CONTEXTUAL DE IDENTIDAD Y CLASIFICACIÓN DEL MENSAJE
@@ -3249,13 +3358,16 @@ class MiEsenciaStore {
           !intent.attemptsToAlterBaseTruth));
 
     if (isDirectIdentityOrFactTurn) {
-      const directReply = buildPersonalizedPostIdentificationGreeting({
-        person: activePerson,
-        identification,
-        relations: personRelations,
-        testimonies: allPersonTestimonies,
-        userMessage: params.messageText,
-      });
+      const directReply = finalizeReplyForPhotos(
+        buildPersonalizedPostIdentificationGreeting({
+          person: activePerson,
+          identification,
+          relations: personRelations,
+          testimonies: allPersonTestimonies,
+          userMessage: params.messageText,
+        }),
+        shownPhotos
+      );
 
       const userMsgObj: MiEsenciaConversationMessage = {
         messageId: `msg_${crypto.randomBytes(4).toString('hex')}`,
@@ -3273,6 +3385,7 @@ class MiEsenciaStore {
         responseCategory: 1,
         privacyLevelApplied: 'autobiografico_original',
         tokensEstimated: Math.ceil((params.messageText.length + directReply.length) / 3.5),
+        ...(shownPhotos.length > 0 ? { photoAttachments: shownPhotos } : {}),
         timestamp: nowIso,
       };
 
@@ -3306,6 +3419,7 @@ class MiEsenciaStore {
         session,
         updatedInterlocutor: interlocutor,
         updatedSubscription: subscription,
+        ...(shownPhotos.length > 0 ? { photoAttachments: shownPhotos } : {}),
       };
     }
 
@@ -3431,7 +3545,8 @@ class MiEsenciaStore {
 
     const previousLastMessageAt = session.lastMessageAt;
 
-    const replyText = await this.generateBiographicalReply({
+    const generatedReplyText = await this.generateBiographicalReply({
+      photoContextNote,
       person: activePerson,
       interlocutor,
       confirmedIdentity: session.confirmedIdentity,
@@ -3451,6 +3566,7 @@ class MiEsenciaStore {
       memoryCreated,
       contradictionCreated,
     });
+    const replyText = finalizeReplyForPhotos(generatedReplyText, shownPhotos);
 
     const userMsgObj: MiEsenciaConversationMessage = {
       messageId: `msg_${crypto.randomBytes(4).toString('hex')}`,
@@ -3477,6 +3593,7 @@ class MiEsenciaStore {
       memoryIdCreated: memoryCreated?.memoryId,
       contradictionIdCreated: contradictionCreated?.contradictionId,
       tokensEstimated,
+      ...(shownPhotos.length > 0 ? { photoAttachments: shownPhotos } : {}),
       timestamp: nowIso,
     };
 
@@ -3534,10 +3651,13 @@ class MiEsenciaStore {
       session,
       updatedInterlocutor: interlocutor,
       updatedSubscription: subscription,
+      ...(shownPhotos.length > 0 ? { photoAttachments: shownPhotos } : {}),
     };
   }
 
   private async generateBiographicalReply(params: {
+    /** V5.4.0: nota sobre la fotografía que se mostrará (solo para el modelo; no se guarda). */
+    photoContextNote?: string;
     person: MiEsenciaPersonProfile;
     interlocutor: MiEsenciaInterlocutor;
     confirmedIdentity?: MiEsenciaConfirmedInterlocutorIdentity;
@@ -3574,7 +3694,9 @@ class MiEsenciaStore {
       privateMemoriesLevelC,
       memoryCreated,
       contradictionCreated,
+      photoContextNote = '',
     } = params;
+    const userMessageForModel = photoContextNote ? `${userMessage}\n\n${photoContextNote}` : userMessage;
 
     const hasRealDeclaredName = Boolean(
       confirmedIdentity?.declaredName &&
@@ -3625,7 +3747,7 @@ class MiEsenciaStore {
             content: m.content,
             timestamp: m.timestamp,
           })),
-          userMessage,
+          userMessage: userMessageForModel,
           sessionStartedAt,
           previousLastMessageAt,
           existingSessionSummary: sessionObj?.sessionContextSummary,
@@ -3801,7 +3923,7 @@ REGLAS OBLIGATORIAS DE RESPUESTA VISIBLE Y CALIDAD CONVERSACIONAL (SECCIONES 1 A
 8. ${lengthRule}
 
 Mensaje del interlocutor: "${userMessage}"
-
+${photoContextNote ? `\n${photoContextNote}\n` : ''}
 Respuesta directa en primera persona singular:`;
 
         const response = await ai.models.generateContent({

@@ -608,3 +608,106 @@ test('V5.3.2-C1: modo de compatibilidad (SDK de cliente, como en AI Studio sin p
     fsAdmin.configureFirestoreModeForTests('admin');
   }
 });
+
+// =============================================================================================
+// V5.4.0 — Fotografías del testimonio en el chat de Mi Esencia (de punta a punta, sin red).
+// =============================================================================================
+
+test('V5.4.0-F1: el avatar muestra la fotografía real que se le pide y solo la entrega a quien tiene acceso', async () => {
+  const miEsencia = await import(path.join(REPO_ROOT, 'src/server/miEsencia/miEsenciaStore.ts'));
+  const store = miEsencia.miEsenciaStore;
+  await store.ensureInitialized();
+
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+    'base64'
+  );
+  const dataUrl = `data:image/png;base64,${png.toString('base64')}`;
+  const makeInterview = async (title: string, photos: Array<{ text: string; caption: string }>) => {
+    const created = await storage.createInterview({
+      title,
+      storyMode: 'individual',
+      storyType: 'biografia_personal',
+      participants: [{ name: 'Elena Robles', relationship: 'Titular', role: 'primary' }],
+      customSufficiencyThreshold: 100000,
+      performedBy: 'admin_pruebas',
+    });
+    created.interview.maxFollowUpsAtCreation = 0;
+    const token = created.participantTokens[0].plainToken;
+    const questions = storage.getQuestionsForVersion(created.interview.questionnaireVersionId);
+    for (const [i, p] of photos.entries()) {
+      await storage.submitAnswer({
+        plainToken: token,
+        questionId: questions[i].id,
+        answerText: p.text,
+        notRecalled: false,
+        photos: [{ dataUrl, caption: p.caption, fileName: `foto_${i}.png`, mimeType: 'image/png' }],
+        idempotencyKey: `photo_answer_${title}_${i}`,
+      });
+    }
+    return created.interview;
+  };
+
+  const interview = await makeInterview('Memorias con fotos V5.4.0', [
+    { text: 'La casa de mi abuelita Irene tenía un sillón junto a la ventana.', caption: 'La casa de mi abuelita Irene en Acapulco' },
+    { text: 'Volaba culebrinas en la playa con mis primos.', caption: 'Volando mi culebrina en la playa' },
+  ]);
+  const other = await makeInterview('Otra persona V5.4.0', [
+    { text: 'Mi primer coche fue un vocho rojo.', caption: 'Mi vocho rojo' },
+  ]);
+
+  const avatarFor = async (iv: any) => {
+    const created = await store.createOrSyncAvatarFromInterview({ interviewId: iv.id, adminEmail: 'admin_pruebas' });
+    const avatarId = created.avatarId || created.subscription?.avatarId || created.avatar?.avatarId || created.persons?.[0]?.avatarId;
+    assert.ok(avatarId, 'Se crea el avatar.');
+    const { credential } = await store.createInterlocutorWithCode({
+      avatarId,
+      fullName: 'Nieta de prueba',
+      relationshipToPerson: 'Nieta',
+      adminEmail: 'admin_pruebas',
+    });
+    return credential.personalCodePlain as string;
+  };
+  const code = await avatarFor(interview);
+  const otherCode = await avatarFor(other);
+
+  const callsBefore = externalCalls.length;
+  const reply = await store.converseWithAvatar({
+    personalCode: code,
+    messageText: '¿Tienes alguna foto de la casa de tu abuelita?',
+    acceptConsent: true,
+  });
+  externalCalls.splice(callsBefore); // the reply model is unreachable here (refused by the stub)
+
+  assert.equal(reply.photoAttachments?.length, 1, JSON.stringify(reply.photoAttachments));
+  assert.equal(reply.photoAttachments[0].caption, 'La casa de mi abuelita Irene en Acapulco');
+  assert.match(reply.replyText, /fotograf/i, 'El texto acompaña a la foto.');
+  assert.doesNotMatch(reply.replyText, /no puedo (mostrar|enseñar|compartir)/i);
+  const lastAvatarMsg = reply.session.messages[reply.session.messages.length - 1];
+  assert.deepEqual(lastAvatarMsg.photoAttachments, reply.photoAttachments, 'La foto queda en el historial del chat.');
+  const lastUserMsg = reply.session.messages[reply.session.messages.length - 2];
+  assert.doesNotMatch(lastUserMsg.content, /Nota del sistema/, 'La nota para el modelo nunca se guarda.');
+
+  // The image is delivered only with a code of that avatar.
+  const photoId = reply.photoAttachments[0].photoId;
+  const image = await store.getFamilyChatPhoto({ personalCode: code, photoId });
+  assert.ok(image && image.buffer.equals(png));
+  assert.equal(await store.getFamilyChatPhoto({ personalCode: otherCode, photoId }), null, 'Otro avatar no la obtiene.');
+  await assert.rejects(store.getFamilyChatPhoto({ personalCode: 'YF-NOEXISTE', photoId }));
+
+  // Without a photo request, no photo is attached.
+  const plain = await store.converseWithAvatar({ personalCode: code, messageText: '¿Cómo era tu abuelita?', acceptConsent: true });
+  externalCalls.splice(callsBefore);
+  assert.equal(plain.photoAttachments, undefined);
+
+  // An avatar created before V5.4.0 kept only the photo descriptions: the photo is still found
+  // (recovered from the original answer) and delivered.
+  for (const t of store['testimonies'].values()) {
+    if (t.personId === reply.activePerson.personId) delete t.photoAttachments;
+  }
+  const legacy = await store.converseWithAvatar({ personalCode: code, messageText: 'Muéstrame la foto de tu culebrina en la playa', acceptConsent: true });
+  externalCalls.splice(callsBefore);
+  assert.equal(legacy.photoAttachments?.[0]?.caption, 'Volando mi culebrina en la playa');
+  const legacyImage = await store.getFamilyChatPhoto({ personalCode: code, photoId: legacy.photoAttachments[0].photoId });
+  assert.ok(legacyImage && legacyImage.buffer.equals(png));
+});

@@ -853,6 +853,25 @@ miEsenciaRouter.post('/family/converse', async (req: Request, res: Response) => 
   }
 });
 
+// V5.4.0 — Fotografía real del testimonio mostrada en el chat (validada contra el código personal;
+// se pide por POST para que el código nunca viaje en una URL).
+miEsenciaRouter.post('/family/photo', async (req: Request, res: Response) => {
+  try {
+    await miEsenciaStore.ensureInitialized();
+    const { personalCode, photoId } = req.body || {};
+    const photo = await miEsenciaStore.getFamilyChatPhoto({ personalCode, photoId });
+    if (!photo) {
+      res.status(404).json({ success: false, error: 'Fotografía no disponible.' });
+      return;
+    }
+    res.setHeader('Content-Type', photo.mimeType);
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.send(photo.buffer);
+  } catch (err: unknown) {
+    res.status(401).json({ success: false, error: (err as Error).message });
+  }
+});
+
 miEsenciaRouter.post('/family/undo-memory', async (req: Request, res: Response) => {
   try {
     const { personalCode, memoryId } = req.body || {};

@@ -6,8 +6,8 @@
  * GET /api/admin/version, so a stale deployment (old frontend or old server) is visible at once.
  * Participants never see this label.
  */
-export const APP_VERSION = '5.3.6';
+export const APP_VERSION = '5.4.0';
 export const APP_VERSION_LABEL = `V${APP_VERSION}`;
 export const APP_RELEASE_DATE = '2026-11-16';
 export const APP_RELEASE_SUMMARY =
-  'Acceso más rápido: la sesión lista las versiones sin el texto del libro (se carga al abrirlo) y ya no sube la copia del navegador; autoguardado de todas las respuestas.';
+  'Mi Esencia: el avatar muestra en el chat las fotografías reales del testimonio que se le piden.';
