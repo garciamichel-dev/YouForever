@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Settings,
   Save,
@@ -16,6 +16,12 @@ import {
   Layers,
   Edit3,
   X,
+  Database,
+  Download,
+  Upload,
+  HardDrive,
+  RefreshCw,
+  AlertTriangle,
 } from 'lucide-react';
 import {
   AppConfig,
@@ -30,6 +36,33 @@ import {
 } from '../logic/interviewRules.ts';
 import { DEMO_NARRATIVE_STYLES } from '../logic/demoStoryRules.ts';
 import { apiFetch } from '../utils/apiClient.ts';
+import {
+  AdminProgressModal,
+  AdminProgressState,
+  INITIAL_ADMIN_PROGRESS,
+  executeWithAdminProgress,
+} from './AdminProgressModal.tsx';
+
+interface DatabaseBackupSummaryItem {
+  id: string;
+  label: string;
+  createdAt: string;
+  createdBy: string;
+  sizeBytes: number;
+  counts: {
+    interviews: number;
+    participants: number;
+    answers: number;
+    photos: number;
+    audios: number;
+    bookVersions: number;
+    manuscripts: number;
+    questions: number;
+    miEsenciaPersons: number;
+    miEsenciaSubscriptions: number;
+    miEsenciaConversations: number;
+  };
+}
 
 interface ConfigPanelProps {
   adminEmail: string | null;
@@ -154,6 +187,19 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ adminEmail }) => {
   const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [adminProgress, setAdminProgress] = useState<AdminProgressState>(INITIAL_ADMIN_PROGRESS);
+
+  // Database Backup & Restore state
+  const [backups, setBackups] = useState<DatabaseBackupSummaryItem[]>([]);
+  const [newBackupLabel, setNewBackupLabel] = useState<string>('');
+  const [backupNotice, setBackupNotice] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const [backupToRestore, setBackupToRestore] = useState<DatabaseBackupSummaryItem | null>(null);
+  const [backupToDelete, setBackupToDelete] = useState<DatabaseBackupSummaryItem | null>(null);
+  const [restoreUploadedImmediately, setRestoreUploadedImmediately] = useState<boolean>(false);
+  const [workingBackupAction, setWorkingBackupAction] = useState<boolean>(false);
+  const backupFileInputRef = useRef<HTMLInputElement>(null);
+
+  const resolvedAdminEmail = (adminEmail || '').trim() || 'garcia.michel@gmail.com';
 
   // Core numeric & boolean form fields
   const [openDays, setOpenDays] = useState<number>(15);
@@ -229,70 +275,354 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ adminEmail }) => {
   // Validation errors
   const [errors, setErrors] = useState<{ [key: string]: string }>({});
 
-  const fetchConfig = async () => {
+  const showBackupFeedback = (type: 'ok' | 'err', text: string) => {
+    setBackupNotice({ type, text });
+    setTimeout(() => {
+      setBackupNotice((prev) => (prev?.text === text ? null : prev));
+    }, 5500);
+  };
+
+  const fetchBackupsList = async () => {
     try {
-      setLoading(true);
-      const [res, provRes] = await Promise.all([
-        apiFetch<AppConfig>('/api/config', { retries: 2 }),
-        apiFetch<{
-          geminiConfiguredOnServer: boolean;
-          openaiConfiguredOnServer: boolean;
-        }>('/api/mi-esencia/admin/providers-status', { retries: 1 }),
-      ]);
-
-      if (provRes.ok && provRes.data) {
-        setProvidersStatus({
-          geminiConfiguredOnServer: Boolean(provRes.data.geminiConfiguredOnServer),
-          openaiConfiguredOnServer: Boolean(provRes.data.openaiConfiguredOnServer),
-        });
+      const res = await apiFetch<DatabaseBackupSummaryItem[]>('/api/admin/backups', {
+        headers: { 'x-admin-user': resolvedAdminEmail },
+        retries: 1,
+      });
+      if (res.ok && Array.isArray(res.data)) {
+        setBackups(res.data);
       }
+    } catch (err) {
+      console.warn('[ConfigPanel] Notice fetching backups list:', err);
+    }
+  };
 
-      if (res.ok && res.data) {
-        const data = res.data;
-        setConfig(data);
-        setOpenDays(data.defaultOpenDays);
-        setSufficiencyThreshold(data.defaultSufficiencyThreshold);
-        setMaxFollowUps(data.defaultMaxFollowUps);
-        setAllowEditing(data.allowAnswerEditing);
-        setAllowAdditional(data.allowAdditionalMemories);
+  const fetchConfig = async (silentProgress = false) => {
+    const runFetch = async (update?: (percent: number, stage?: string, detail?: string) => void) => {
+      try {
+        setLoading(true);
+        update?.(25, 'Consultando reglas globales, estado de motores IA y respaldos guardados...');
+        const [res, provRes, backupsRes] = await Promise.all([
+          apiFetch<AppConfig>('/api/config', { retries: 2 }),
+          apiFetch<{
+            geminiConfiguredOnServer: boolean;
+            openaiConfiguredOnServer: boolean;
+          }>('/api/mi-esencia/admin/providers-status', { retries: 1 }),
+          apiFetch<DatabaseBackupSummaryItem[]>('/api/admin/backups', {
+            headers: { 'x-admin-user': resolvedAdminEmail },
+            retries: 1,
+          }),
+        ]);
 
-        const provider = data.bookAiProvider === 'openai' ? 'openai' : 'gemini';
-        const gemModel = data.bookAiGeminiModel || 'gemini-3-flash-preview';
-        const oaiModel = data.bookAiOpenAiModel || 'gpt-6';
-        const structMode: BookStructureMode =
-          data.bookStructureMode === 'fixed_five_stages' ? 'fixed_five_stages' : 'prompt_autonomous';
+        update?.(75, 'Aplicando parámetros operativos, biblioteca de prompts y lista de respaldos...');
 
-        setBookAiProvider(provider);
-        setBookAiGeminiModel(gemModel);
-        setBookAiOpenAiModel(oaiModel);
-        setBookStructureMode(structMode);
-        setIsCustomGeminiModel(!GEMINI_BOOK_MODEL_PRESETS.some((m) => m.id === gemModel));
-        setIsCustomOpenAiModel(!OPENAI_BOOK_MODEL_PRESETS.some((m) => m.id === oaiModel));
+        if (backupsRes.ok && Array.isArray(backupsRes.data)) {
+          setBackups(backupsRes.data);
+        }
 
-        const mergedPrompts: Record<LiteraryPromptStyleId, LiteraryStylePromptConfig> = {
-          ...DEFAULT_LITERARY_PROMPTS_CONFIG,
-          ...(data.literaryPrompts || {}),
-        };
-        setLiteraryPrompts(mergedPrompts);
+        if (provRes.ok && provRes.data) {
+          setProvidersStatus({
+            geminiConfiguredOnServer: Boolean(provRes.data.geminiConfiguredOnServer),
+            openaiConfiguredOnServer: Boolean(provRes.data.openaiConfiguredOnServer),
+          });
+        }
 
-        const mergedVersions =
-          Array.isArray(data.literaryPromptVersions) && data.literaryPromptVersions.length > 0
-            ? data.literaryPromptVersions
-            : [...DEFAULT_LITERARY_PROMPT_VERSIONS];
-        setLiteraryPromptVersions(mergedVersions);
-      } else if (res.error) {
-        setErrorMsg('No se pudo cargar la configuración del servidor: ' + res.error);
+        if (res.ok && res.data) {
+          const data = res.data;
+          setConfig(data);
+          setOpenDays(data.defaultOpenDays);
+          setSufficiencyThreshold(data.defaultSufficiencyThreshold);
+          setMaxFollowUps(data.defaultMaxFollowUps);
+          setAllowEditing(data.allowAnswerEditing);
+          setAllowAdditional(data.allowAdditionalMemories);
+
+          const provider = data.bookAiProvider === 'openai' ? 'openai' : 'gemini';
+          const gemModel = data.bookAiGeminiModel || 'gemini-3-flash-preview';
+          const oaiModel = data.bookAiOpenAiModel || 'gpt-6';
+          const structMode: BookStructureMode =
+            data.bookStructureMode === 'fixed_five_stages' ? 'fixed_five_stages' : 'prompt_autonomous';
+
+          setBookAiProvider(provider);
+          setBookAiGeminiModel(gemModel);
+          setBookAiOpenAiModel(oaiModel);
+          setBookStructureMode(structMode);
+          setIsCustomGeminiModel(!GEMINI_BOOK_MODEL_PRESETS.some((m) => m.id === gemModel));
+          setIsCustomOpenAiModel(!OPENAI_BOOK_MODEL_PRESETS.some((m) => m.id === oaiModel));
+
+          const mergedPrompts: Record<LiteraryPromptStyleId, LiteraryStylePromptConfig> = {
+            ...DEFAULT_LITERARY_PROMPTS_CONFIG,
+            ...(data.literaryPrompts || {}),
+          };
+          setLiteraryPrompts(mergedPrompts);
+
+          const mergedVersions =
+            Array.isArray(data.literaryPromptVersions) && data.literaryPromptVersions.length > 0
+              ? data.literaryPromptVersions
+              : [...DEFAULT_LITERARY_PROMPT_VERSIONS];
+          setLiteraryPromptVersions(mergedVersions);
+        } else if (res.error) {
+          setErrorMsg('No se pudo cargar la configuración del servidor: ' + res.error);
+        }
+      } catch (_err: unknown) {
+        setErrorMsg('No se pudo cargar la configuración del servidor.');
+      } finally {
+        setLoading(false);
       }
-    } catch (_err: unknown) {
-      setErrorMsg('No se pudo cargar la configuración del servidor.');
-    } finally {
-      setLoading(false);
+    };
+
+    if (silentProgress) {
+      await runFetch();
+    } else {
+      await executeWithAdminProgress(
+        setAdminProgress,
+        {
+          kind: 'carga',
+          title: 'Cargando Configuración Global y Respaldos',
+          subtitle: 'Sincronizando reglas, prompts literarios y respaldos de la base de datos',
+          initialStage: 'Consultando configuración global del sistema...',
+        },
+        runFetch
+      );
     }
   };
 
   useEffect(() => {
     fetchConfig();
   }, []);
+
+  const handleCreateDatabaseBackup = async () => {
+    try {
+      setWorkingBackupAction(true);
+      await executeWithAdminProgress(
+        setAdminProgress,
+        {
+          kind: 'generacion',
+          title: 'Generando Respaldo Completo de la Base de Datos',
+          subtitle: 'Entrevistas, respuestas, libros PDF, manuscritos y Mi Esencia',
+          initialStage: 'Empaquetando todas las colecciones y registros actuales...',
+        },
+        async (update) => {
+          update(35, 'Exportando entrevistas, respuestas, fotografías, libros, manuscritos y Mi Esencia...');
+          const res = await fetch('/api/admin/backups', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-admin-user': resolvedAdminEmail,
+            },
+            body: JSON.stringify({
+              label: newBackupLabel.trim() || undefined,
+            }),
+          });
+          const data = await res.json();
+          if (!res.ok || !data.success || !data.data) {
+            throw new Error(data.error || 'No se pudo generar el respaldo de la base de datos.');
+          }
+          update(85, 'Guardando respaldo en servidor y actualizando catálogo...');
+          setBackups((prev) => [data.data, ...prev.filter((b) => b.id !== data.data.id)]);
+          setNewBackupLabel('');
+          showBackupFeedback(
+            'ok',
+            `Respaldo «${data.data.label}» creado con éxito (${data.data.counts.interviews} entrevistas, ${data.data.counts.answers} respuestas, ${data.data.counts.bookVersions} libros PDF, ${data.data.counts.manuscripts} manuscritos y ${data.data.counts.miEsenciaPersons} perfiles de Mi Esencia).`
+          );
+        }
+      );
+    } catch (err: any) {
+      showBackupFeedback('err', err?.message || 'Error al crear el respaldo de la base de datos.');
+    } finally {
+      setWorkingBackupAction(false);
+    }
+  };
+
+  const handleDownloadBackupFile = async (backup: DatabaseBackupSummaryItem) => {
+    try {
+      setWorkingBackupAction(true);
+      await executeWithAdminProgress(
+        setAdminProgress,
+        {
+          kind: 'generacion',
+          title: 'Preparando Descarga de Archivo de Respaldo (.json)',
+          subtitle: backup.label,
+          initialStage: 'Solicitando instantánea completa al servidor...',
+        },
+        async (update) => {
+          update(40, 'Descargando datos completos del respaldo...');
+          const res = await fetch(`/api/admin/backups/${encodeURIComponent(backup.id)}/download`, {
+            headers: { 'x-admin-user': resolvedAdminEmail },
+          });
+          if (!res.ok) {
+            throw new Error('No se pudo descargar el archivo de respaldo.');
+          }
+          update(80, 'Generando archivo JSON para descarga local...');
+          const blob = await res.blob();
+          const url = URL.createObjectURL(blob);
+          const link = document.createElement('a');
+          link.href = url;
+          const safeName = backup.label.replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, 45);
+          link.download = `respaldo_bdd_youforever_${safeName}_${backup.id}.json`;
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          setTimeout(() => URL.revokeObjectURL(url), 4000);
+        }
+      );
+    } catch (err: any) {
+      showBackupFeedback('err', err?.message || 'Error al descargar el archivo de respaldo.');
+    } finally {
+      setWorkingBackupAction(false);
+    }
+  };
+
+  const handleUploadBackupFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (e.target) e.target.value = '';
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = async (evt) => {
+      try {
+        setWorkingBackupAction(true);
+        const text = String(evt.target?.result || '');
+        const parsed = JSON.parse(text);
+
+        await executeWithAdminProgress(
+          setAdminProgress,
+          {
+            kind: 'carga',
+            title: restoreUploadedImmediately
+              ? 'Cargando y Restaurando Base de Datos desde Archivo'
+              : 'Cargando Archivo de Respaldo al Servidor',
+            subtitle: file.name,
+            initialStage: 'Validando integridad del archivo de respaldo JSON...',
+          },
+          async (update) => {
+            update(
+              45,
+              restoreUploadedImmediately
+                ? 'Subiendo respaldo y restaurando entrevistas, respuestas, libros y Mi Esencia...'
+                : 'Almacenando respaldo en el catálogo del servidor...'
+            );
+            const res = await fetch('/api/admin/backups/import', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'x-admin-user': resolvedAdminEmail,
+              },
+              body: JSON.stringify({
+                backup: parsed,
+                restoreImmediately: restoreUploadedImmediately,
+              }),
+            });
+            const data = await res.json();
+            if (!res.ok || !data.success || !data.data?.summary) {
+              throw new Error(data.error || 'El archivo de respaldo no pudo importarse.');
+            }
+            update(85, 'Actualizando catálogo de respaldos...');
+            const summary: DatabaseBackupSummaryItem = data.data.summary;
+            setBackups((prev) => [summary, ...prev.filter((b) => b.id !== summary.id)]);
+            if (restoreUploadedImmediately) {
+              try {
+                localStorage.removeItem('foreveryou_book_versions_cache');
+                localStorage.removeItem('foreveryou_interviews_cache');
+              } catch {
+                // ignore
+              }
+              await fetchConfig(true);
+              showBackupFeedback(
+                'ok',
+                `Archivo «${summary.label}» importado y restaurado íntegramente en la base de datos.`
+              );
+            } else {
+              showBackupFeedback(
+                'ok',
+                `Archivo de respaldo «${summary.label}» subido y guardado en el servidor. Puedes restaurarlo cuando lo desees.`
+              );
+            }
+          }
+        );
+      } catch (err: any) {
+        showBackupFeedback(
+          'err',
+          err?.message || 'El archivo seleccionado no es un respaldo JSON válido.'
+        );
+      } finally {
+        setWorkingBackupAction(false);
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const handleConfirmRestoreBackup = async () => {
+    if (!backupToRestore) return;
+    const target = backupToRestore;
+    setBackupToRestore(null);
+    try {
+      setWorkingBackupAction(true);
+      await executeWithAdminProgress(
+        setAdminProgress,
+        {
+          kind: 'carga',
+          title: `Restaurando Base de Datos Completa`,
+          subtitle: target.label,
+          initialStage: 'Preparando restauración de entrevistas, respuestas, libros y Mi Esencia...',
+        },
+        async (update) => {
+          update(40, 'Restaurando registros en el servidor y sincronizando estado...');
+          const res = await fetch(`/api/admin/backups/${encodeURIComponent(target.id)}/restore`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-admin-user': resolvedAdminEmail,
+            },
+          });
+          const data = await res.json();
+          if (!res.ok || !data.success) {
+            throw new Error(data.error || 'No se pudo restaurar el respaldo seleccionado.');
+          }
+          update(85, 'Limpiando caché local y recargando configuración...');
+          try {
+            localStorage.removeItem('foreveryou_book_versions_cache');
+            localStorage.removeItem('foreveryou_interviews_cache');
+          } catch {
+            // ignore
+          }
+          await fetchConfig(true);
+          showBackupFeedback(
+            'ok',
+            `¡Base de datos restaurada exitosamente al punto «${target.label}»! Todos los módulos (Entrevistas, Respuestas, Libros, Manuscritos y Mi Esencia) han sido actualizados.`
+          );
+        }
+      );
+    } catch (err: any) {
+      showBackupFeedback('err', err?.message || 'Error al restaurar el respaldo.');
+    } finally {
+      setWorkingBackupAction(false);
+    }
+  };
+
+  const handleConfirmDeleteBackup = async () => {
+    if (!backupToDelete) return;
+    const target = backupToDelete;
+    try {
+      setWorkingBackupAction(true);
+      const res = await fetch(`/api/admin/backups/${encodeURIComponent(target.id)}`, {
+        method: 'DELETE',
+        headers: {
+          'x-admin-user': resolvedAdminEmail,
+        },
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setBackups((prev) => prev.filter((b) => b.id !== target.id));
+        setBackupToDelete(null);
+        showBackupFeedback('ok', `El respaldo «${target.label}» fue eliminado del servidor.`);
+      } else {
+        showBackupFeedback('err', data.error || 'No se pudo eliminar el respaldo.');
+      }
+    } catch (err: any) {
+      showBackupFeedback('err', err?.message || 'Error de red al eliminar el respaldo.');
+    } finally {
+      setWorkingBackupAction(false);
+    }
+  };
 
   const showPromptFeedback = (msg: string) => {
     setPromptFeedbackMessage(msg);
@@ -361,43 +691,56 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ adminEmail }) => {
       setErrorMsg(null);
       setSaveSuccess(false);
 
-      const res = await apiFetch<AppConfig>('/api/config', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
+      await executeWithAdminProgress(
+        setAdminProgress,
+        {
+          kind: 'carga',
+          title: 'Guardando Configuración Global',
+          subtitle: 'Sincronizando reglas operativas, motores de IA y prompts literarios',
+          initialStage: 'Enviando parámetros al servidor y actualizando almacenamiento...',
         },
-        body: JSON.stringify({
-          defaultOpenDays: Number(openDays),
-          defaultSufficiencyThreshold: Number(sufficiencyThreshold),
-          defaultMaxFollowUps: Number(maxFollowUps),
-          allowAnswerEditing: allowEditing,
-          allowAdditionalMemories: allowAdditional,
-          bookAiProvider,
-          bookAiGeminiModel: bookAiGeminiModel.trim() || 'gemini-3-flash-preview',
-          bookAiOpenAiModel: bookAiOpenAiModel.trim() || 'gpt-6',
-          bookStructureMode: structureModeToSave,
-          literaryPrompts: promptsToSave,
-          literaryPromptVersions: versionsToSave,
-        }),
-      });
+        async (update) => {
+          const res = await apiFetch<AppConfig>('/api/config', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
+            },
+            body: JSON.stringify({
+              defaultOpenDays: Number(openDays),
+              defaultSufficiencyThreshold: Number(sufficiencyThreshold),
+              defaultMaxFollowUps: Number(maxFollowUps),
+              allowAnswerEditing: allowEditing,
+              allowAdditionalMemories: allowAdditional,
+              bookAiProvider,
+              bookAiGeminiModel: bookAiGeminiModel.trim() || 'gemini-3-flash-preview',
+              bookAiOpenAiModel: bookAiOpenAiModel.trim() || 'gpt-6',
+              bookStructureMode: structureModeToSave,
+              literaryPrompts: promptsToSave,
+              literaryPromptVersions: versionsToSave,
+            }),
+          });
 
-      if (res.ok && res.data) {
-        setConfig(res.data);
-        if (res.data.bookStructureMode) {
-          setBookStructureMode(res.data.bookStructureMode);
+          update(85, 'Verificando persistencia de la configuración global...');
+
+          if (res.ok && res.data) {
+            setConfig(res.data);
+            if (res.data.bookStructureMode) {
+              setBookStructureMode(res.data.bookStructureMode);
+            }
+            if (res.data.literaryPrompts) {
+              setLiteraryPrompts(res.data.literaryPrompts);
+            }
+            if (Array.isArray(res.data.literaryPromptVersions)) {
+              setLiteraryPromptVersions(res.data.literaryPromptVersions);
+            }
+            setSaveSuccess(true);
+            setTimeout(() => setSaveSuccess(false), 4000);
+          } else {
+            setErrorMsg(res.error || 'Error al guardar la configuración.');
+          }
         }
-        if (res.data.literaryPrompts) {
-          setLiteraryPrompts(res.data.literaryPrompts);
-        }
-        if (Array.isArray(res.data.literaryPromptVersions)) {
-          setLiteraryPromptVersions(res.data.literaryPromptVersions);
-        }
-        setSaveSuccess(true);
-        setTimeout(() => setSaveSuccess(false), 4000);
-      } else {
-        setErrorMsg(res.error || 'Error al guardar la configuración.');
-      }
+      );
     } catch (_err: unknown) {
       setErrorMsg('Error de conexión al guardar.');
     } finally {
@@ -640,6 +983,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ adminEmail }) => {
   if (loading) {
     return (
       <div className="p-8 text-center text-stone-500">
+        <AdminProgressModal state={adminProgress} />
         <Clock className="w-6 h-6 animate-spin mx-auto mb-2 text-amber-600" />
         <p>Cargando configuración global...</p>
       </div>
@@ -654,8 +998,16 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ adminEmail }) => {
     (v) => v.id === currentStyleConfig.activeVersionId
   );
 
+  const formatBytesLabel = (bytes: number): string => {
+    if (!bytes || bytes < 1024) return `${bytes || 0} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  };
+
   return (
     <div className="max-w-5xl mx-auto space-y-6">
+      <AdminProgressModal state={adminProgress} />
+
       {/* Title & Description */}
       <div className="bg-white p-6 rounded-xl border border-stone-200 shadow-sm">
         <div className="flex items-center space-x-3 mb-2">
@@ -671,7 +1023,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ adminEmail }) => {
               <code className="text-amber-800 bg-amber-50 px-1 py-0.5 rounded text-xs">
                 settings/appConfig
               </code>
-              . Incluye reglas operativas, motor de IA para generación de libros y el Gestor de Prompts Literarios.
+              . Incluye reglas operativas, motor de IA para generación de libros, Gestor de Prompts Literarios y Respaldos de Base de Datos.
             </p>
           </div>
         </div>
@@ -1690,6 +2042,342 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ adminEmail }) => {
           </button>
         </div>
       </form>
+
+      {/* Section 5: Respaldos y Restauración de la Base de Datos (BDD) */}
+      <div
+        data-testid="database-backups-section"
+        className="bg-white p-6 rounded-xl border border-stone-200 shadow-sm space-y-5"
+      >
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-b border-stone-200 pb-4">
+          <div className="flex items-center space-x-3">
+            <div className="p-2.5 bg-amber-100 text-amber-800 rounded-xl border border-amber-200">
+              <Database className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="text-lg font-bold font-serif text-stone-900">
+                Respaldos y Restauración de la Base de Datos (BDD)
+              </h3>
+              <p className="text-xs text-stone-500">
+                Crea copias de seguridad completas de la base de datos (entrevistas, respuestas, audios, fotografías, libros PDF, manuscritos, preguntas y Mi Esencia), descárgalas a tu equipo o restaura un respaldo anterior.
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center space-x-2 shrink-0">
+            <span className="inline-flex items-center space-x-1.5 px-3 py-1 bg-stone-100 text-stone-700 border border-stone-200 rounded-lg text-xs font-semibold">
+              <HardDrive className="w-3.5 h-3.5 text-amber-700" />
+              <span>{backups.length} {backups.length === 1 ? 'respaldo en servidor' : 'respaldos en servidor'}</span>
+            </span>
+          </div>
+        </div>
+
+        {backupNotice && (
+          <div
+            data-testid="database-backup-notice"
+            className={`p-3.5 rounded-xl border text-xs flex items-center justify-between gap-3 ${
+              backupNotice.type === 'ok'
+                ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                : 'bg-rose-50 border-rose-200 text-rose-900'
+            }`}
+          >
+            <div className="flex items-center space-x-2">
+              {backupNotice.type === 'ok' ? (
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+              ) : (
+                <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+              )}
+              <span className="font-medium">{backupNotice.text}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setBackupNotice(null)}
+              className="text-stone-400 hover:text-stone-700"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+
+        {/* Create Backup + Upload Backup Bar */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {/* Create Server Backup */}
+          <div className="p-4 rounded-xl bg-stone-50 border border-stone-200 space-y-3">
+            <div className="flex items-center space-x-2">
+              <HardDrive className="w-4 h-4 text-amber-700" />
+              <h4 className="text-xs font-bold uppercase tracking-wide text-stone-800">
+                1. Crear nuevo respaldo completo en el servidor
+              </h4>
+            </div>
+            <p className="text-[11px] text-stone-600">
+              Guarda instantáneamente el estado íntegro de la BDD hasta este momento para poder restaurarlo o descargarlo cuando lo necesites.
+            </p>
+            <div className="flex flex-col sm:flex-row gap-2">
+              <input
+                type="text"
+                data-testid="input-db-backup-label"
+                value={newBackupLabel}
+                onChange={(e) => setNewBackupLabel(e.target.value)}
+                placeholder="Etiqueta opcional (ej. Antes de limpieza mensual)"
+                className="flex-1 px-3 py-2 rounded-lg border border-stone-300 bg-white text-xs text-stone-900 focus:outline-none focus:ring-2 focus:ring-amber-200"
+              />
+              <button
+                type="button"
+                data-testid="btn-create-db-backup"
+                disabled={workingBackupAction}
+                onClick={handleCreateDatabaseBackup}
+                className="inline-flex items-center justify-center space-x-1.5 px-4 py-2 bg-amber-700 hover:bg-amber-800 text-white text-xs font-semibold rounded-lg shadow-xs transition disabled:opacity-50 cursor-pointer shrink-0"
+              >
+                <Database className="w-3.5 h-3.5" />
+                <span>Crear respaldo ahora</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Upload Backup File from Computer */}
+          <div className="p-4 rounded-xl bg-stone-50 border border-stone-200 space-y-3">
+            <div className="flex items-center space-x-2">
+              <Upload className="w-4 h-4 text-amber-700" />
+              <h4 className="text-xs font-bold uppercase tracking-wide text-stone-800">
+                2. Subir archivo de respaldo desde tu equipo (.json)
+              </h4>
+            </div>
+            <p className="text-[11px] text-stone-600">
+              Importa un archivo de respaldo descargado previamente para guardarlo en la lista del servidor o restaurarlo de inmediato.
+            </p>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <label className="inline-flex items-center space-x-2 text-xs text-stone-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={restoreUploadedImmediately}
+                  onChange={(e) => setRestoreUploadedImmediately(e.target.checked)}
+                  className="w-4 h-4 text-amber-700 border-stone-300 rounded focus:ring-amber-500"
+                />
+                <span>Restaurar inmediatamente al subir</span>
+              </label>
+
+              <input
+                ref={backupFileInputRef}
+                type="file"
+                accept=".json,application/json"
+                onChange={handleUploadBackupFile}
+                className="hidden"
+              />
+              <button
+                type="button"
+                data-testid="btn-upload-db-backup"
+                disabled={workingBackupAction}
+                onClick={() => backupFileInputRef.current?.click()}
+                className="inline-flex items-center justify-center space-x-1.5 px-4 py-2 bg-stone-900 hover:bg-stone-800 text-white text-xs font-semibold rounded-lg shadow-xs transition disabled:opacity-50 cursor-pointer shrink-0"
+              >
+                <Upload className="w-3.5 h-3.5" />
+                <span>Subir archivo de respaldo (.json)</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Backups Table / List */}
+        <div className="space-y-2.5">
+          <div className="flex items-center justify-between">
+            <h4 className="text-xs font-bold uppercase tracking-wide text-stone-700">
+              Historial de Respaldos Disponibles ({backups.length})
+            </h4>
+          </div>
+
+          {backups.length === 0 ? (
+            <div
+              data-testid="empty-backups-state"
+              className="p-8 text-center bg-stone-50 rounded-xl border border-dashed border-stone-300 text-stone-500 text-xs"
+            >
+              Aún no hay respaldos guardados en el servidor. Haz clic en <strong>«Crear respaldo ahora»</strong> para generar el primer punto de restauración completo de la BDD.
+            </div>
+          ) : (
+            <div className="divide-y divide-stone-200 border border-stone-200 rounded-xl overflow-hidden bg-white">
+              {backups.map((b) => (
+                <div
+                  key={b.id}
+                  data-testid={`backup-row-${b.id}`}
+                  className="p-4 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 hover:bg-stone-50/80 transition"
+                >
+                  <div className="space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-bold text-sm text-stone-900">{b.label}</span>
+                      <span className="px-2 py-0.5 rounded bg-amber-50 text-amber-900 border border-amber-200 text-[11px] font-mono">
+                        {formatBytesLabel(b.sizeBytes)}
+                      </span>
+                    </div>
+                    <div className="text-xs text-stone-500">
+                      Creado el{' '}
+                      <strong>
+                        {new Date(b.createdAt).toLocaleString('es-MX', {
+                          dateStyle: 'medium',
+                          timeStyle: 'short',
+                        })}
+                      </strong>{' '}
+                      por {b.createdBy || 'Administrador'}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2 pt-1 text-[11px] text-stone-600">
+                      <span className="px-2 py-0.5 bg-stone-100 rounded border border-stone-200">
+                        <strong>{b.counts?.interviews ?? 0}</strong> entrevistas
+                      </span>
+                      <span className="px-2 py-0.5 bg-stone-100 rounded border border-stone-200">
+                        <strong>{b.counts?.answers ?? 0}</strong> respuestas
+                      </span>
+                      <span className="px-2 py-0.5 bg-stone-100 rounded border border-stone-200">
+                        <strong>{b.counts?.bookVersions ?? 0}</strong> libros PDF
+                      </span>
+                      <span className="px-2 py-0.5 bg-stone-100 rounded border border-stone-200">
+                        <strong>{b.counts?.manuscripts ?? 0}</strong> manuscritos
+                      </span>
+                      <span className="px-2 py-0.5 bg-stone-100 rounded border border-stone-200">
+                        <strong>{b.counts?.questions ?? 0}</strong> preguntas
+                      </span>
+                      <span className="px-2 py-0.5 bg-amber-50 text-amber-900 rounded border border-amber-200">
+                        <strong>{b.counts?.miEsenciaPersons ?? 0}</strong> avatares Mi Esencia
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      data-testid={`btn-restore-backup-${b.id}`}
+                      disabled={workingBackupAction}
+                      onClick={() => setBackupToRestore(b)}
+                      className="inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold shadow-xs transition disabled:opacity-50 cursor-pointer"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      <span>Restaurar BDD</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      data-testid={`btn-download-backup-${b.id}`}
+                      disabled={workingBackupAction}
+                      onClick={() => handleDownloadBackupFile(b)}
+                      className="inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-lg border border-stone-300 bg-white hover:bg-stone-100 text-stone-700 text-xs font-semibold transition disabled:opacity-50 cursor-pointer"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>Descargar (.json)</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      data-testid={`btn-delete-backup-${b.id}`}
+                      disabled={workingBackupAction}
+                      onClick={() => setBackupToDelete(b)}
+                      className="inline-flex items-center space-x-1 px-2.5 py-1.5 rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-semibold transition disabled:opacity-50 cursor-pointer"
+                      title="Eliminar este respaldo"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>Borrar</span>
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Modal: Confirm Restore Backup */}
+      {backupToRestore && (
+        <div className="fixed inset-0 z-50 bg-stone-950/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-stone-200 space-y-4">
+            <div className="flex items-start space-x-3">
+              <div className="p-2.5 rounded-xl bg-amber-100 text-amber-800 shrink-0">
+                <RefreshCw className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold font-serif text-stone-900">
+                  ¿Restaurar este respaldo de la Base de Datos?
+                </h3>
+                <p className="text-xs text-stone-600 mt-1">
+                  Se restaurará el respaldo <strong>«{backupToRestore.label}»</strong> creado el{' '}
+                  {new Date(backupToRestore.createdAt).toLocaleString('es-MX')}.
+                </p>
+              </div>
+            </div>
+
+            <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-950 space-y-1">
+              <div className="font-bold">Contenido que se restaurará:</div>
+              <div>
+                • {backupToRestore.counts?.interviews ?? 0} entrevistas y{' '}
+                {backupToRestore.counts?.answers ?? 0} respuestas
+              </div>
+              <div>
+                • {backupToRestore.counts?.bookVersions ?? 0} libros PDF y{' '}
+                {backupToRestore.counts?.manuscripts ?? 0} manuscritos
+              </div>
+              <div>
+                • {backupToRestore.counts?.miEsenciaPersons ?? 0} perfiles de Mi Esencia y{' '}
+                {backupToRestore.counts?.questions ?? 0} preguntas
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setBackupToRestore(null)}
+                disabled={workingBackupAction}
+                className="px-4 py-2 rounded-lg border border-stone-300 text-stone-700 hover:bg-stone-50 text-xs font-semibold cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                data-testid="btn-confirm-restore-backup"
+                onClick={() => handleConfirmRestoreBackup()}
+                disabled={workingBackupAction}
+                className="px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold shadow-sm cursor-pointer disabled:opacity-50"
+              >
+                Confirmar y Restaurar BDD
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Confirm Delete Backup */}
+      {backupToDelete && (
+        <div className="fixed inset-0 z-50 bg-stone-950/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-stone-200 space-y-4">
+            <div className="flex items-start space-x-3">
+              <div className="p-2.5 rounded-xl bg-rose-100 text-rose-700 shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold font-serif text-stone-900">
+                  ¿Eliminar este respaldo del servidor?
+                </h3>
+                <p className="text-xs text-stone-600 mt-1">
+                  El archivo de respaldo <strong>«{backupToDelete.label}»</strong> se eliminará permanentemente del servidor. Esta acción no modifica los datos activos actuales de la plataforma.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setBackupToDelete(null)}
+                disabled={workingBackupAction}
+                className="px-4 py-2 rounded-lg border border-stone-300 text-stone-700 hover:bg-stone-50 text-xs font-semibold cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                data-testid="btn-confirm-delete-backup"
+                onClick={() => handleConfirmDeleteBackup()}
+                disabled={workingBackupAction}
+                className="px-4 py-2 rounded-lg bg-rose-700 hover:bg-rose-800 text-white text-xs font-semibold shadow-sm cursor-pointer disabled:opacity-50"
+              >
+                Eliminar Respaldo
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
+

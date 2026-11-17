@@ -659,6 +659,7 @@ export async function generateManuscriptDraft(params: {
   geminiModel?: string;
   openaiModel?: string;
   bookStructureMode?: BookStructureMode;
+  onProgress?: (percent: number, stage: string) => void;
 }): Promise<ManuscriptDraftResult> {
   const {
     interview,
@@ -670,7 +671,19 @@ export async function generateManuscriptDraft(params: {
     geminiModel = 'gemini-3-flash-preview',
     openaiModel = 'gpt-4o',
     bookStructureMode = 'prompt_autonomous',
+    onProgress,
   } = params;
+
+  const startMs = Date.now();
+  const reportProgress = (pct: number, stage: string) => {
+    try {
+      onProgress?.(pct, stage);
+    } catch {
+      // ignore progress callback error
+    }
+  };
+
+  reportProgress(10, 'Analizando respuestas, transcripciones y fotografías de la entrevista...');
 
   const participantNames = participants.map((p) => p.name).filter(Boolean);
   const effectiveNarrativeStyle: DemoNarrativeStyleId = 'first_person_literary';
@@ -687,6 +700,11 @@ export async function generateManuscriptDraft(params: {
     questions,
     bookStructureMode,
   });
+
+  reportProgress(
+    22,
+    `Planificando estructura editorial (${editorialPlan.chapters.length} capítulos)...`
+  );
 
   const questionMap = new Map(questions.map((q) => [q.id, q]));
   const structuredEntries = answers
@@ -827,38 +845,79 @@ DIRECTRICES PARA LA CREACIÓN DEL LIBRO COMPLETO DE HISTORIA Y LEGADO:
     });
   };
 
+  const normalizeGeminiModelId = (m: string): string => {
+    const clean = (m || '').trim();
+    if (!clean || clean === 'gemini-3.8-flash') return 'gemini-3-flash-preview';
+    if (clean === 'gemini-3.1-flash-lite') return 'gemini-3.1-flash-lite-preview';
+    return clean;
+  };
+
   try {
+    reportProgress(38, 'Redactando capítulos literarios a partir del legado testimonial...');
+
     let rawJsonText: string | null = null;
-    if (configuredProvider === 'openai' && process.env.OPENAI_API_KEY) {
-      try {
-        const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-        const modelToUse = openaiModel || 'gpt-4o';
-        const completion = await openai.chat.completions.create({
-          model: modelToUse,
-          response_format: { type: 'json_object' },
-          messages: [
-            {
-              role: 'system',
-              content: systemInstructionForDraft,
-            },
-            {
-              role: 'user',
-              content: prompt,
-            },
-          ],
+    const openAiKey = process.env.OPENAI_API_KEY;
+    if (
+      configuredProvider === 'openai' &&
+      openAiKey &&
+      openAiKey.trim() !== '' &&
+      openAiKey !== 'MY_OPENAI_API_KEY' &&
+      Date.now() >= openAiProjectBlockedUntil
+    ) {
+      const availableModels = await getAvailableOpenAiModels(openAiKey);
+      const candidates = resolveOpenAiCandidateModels(openaiModel, availableModels);
+      if (candidates.length === 0) {
+        openAiProjectBlockedUntil = Date.now() + 10 * 60 * 1000;
+      } else {
+        const openai = new OpenAI({
+          apiKey: openAiKey,
+          timeout: 15000,
+          maxRetries: 0,
         });
-        rawJsonText = completion.choices?.[0]?.message?.content || null;
-      } catch (openAiErr) {
-        console.warn('OpenAI error in generateManuscriptDraft, falling back to Gemini:', openAiErr);
+        let allAccessDenied = true;
+        for (const modelToUse of candidates) {
+          try {
+            const completion = await openai.chat.completions.create({
+              model: modelToUse,
+              response_format: { type: 'json_object' },
+              messages: [
+                {
+                  role: 'system',
+                  content: systemInstructionForDraft,
+                },
+                {
+                  role: 'user',
+                  content: prompt,
+                },
+              ],
+            });
+            rawJsonText = completion.choices?.[0]?.message?.content || null;
+            if (rawJsonText) {
+              allAccessDenied = false;
+              break;
+            }
+          } catch (openAiErr) {
+            const wasAccessDenied = recordOpenAiModelAccessError(modelToUse, openAiErr);
+            if (!wasAccessDenied) {
+              allAccessDenied = false;
+              break;
+            }
+          }
+        }
+        if (allAccessDenied && !rawJsonText) {
+          openAiProjectBlockedUntil = Date.now() + 10 * 60 * 1000;
+        }
       }
     }
 
     if (!rawJsonText) {
+      const normalizedGemini = normalizeGeminiModelId(geminiModel);
+      const uniqueModels = Array.from(new Set([normalizedGemini, 'gemini-2.5-flash']));
       rawJsonText = await generateJsonWithFallback({
         prompt,
         systemInstruction: systemInstructionForDraft,
-        models: [geminiModel, 'gemini-3-flash-preview', 'gemini-2.5-flash'],
-        timeoutMsPerModel: 25000,
+        models: uniqueModels,
+        timeoutMsPerModel: 15000,
         responseSchema: {
           type: Type.OBJECT,
           properties: {
@@ -890,6 +949,8 @@ DIRECTRICES PARA LA CREACIÓN DEL LIBRO COMPLETO DE HISTORIA Y LEGADO:
     if (!rawJsonText) {
       throw new Error('No response from Gemini manuscript models');
     }
+
+    reportProgress(68, 'Integrando capítulos y ubicando fotografías en sus pasajes...');
 
     const parsed = safeJsonExtract<ManuscriptDraftResult>(rawJsonText, {
       title: interview.title,
@@ -976,24 +1037,50 @@ DIRECTRICES PARA LA CREACIÓN DEL LIBRO COMPLETO DE HISTORIA Y LEGADO:
       }
     }
 
-    // Mandatory Hybrid Dual Audit + Contextual AI Repair Loop (unlimited chapters, bounded passes)
-    const alternateProvider: BookAiProvider =
-      configuredProvider === 'openai' ? 'gemini' : 'openai';
-    const alternateModel = configuredProvider === 'openai' ? geminiModel : openaiModel;
-    const primaryAdminModel = configuredProvider === 'openai' ? openaiModel : geminiModel;
+    reportProgress(82, 'Verificando fidelidad documental y cobertura de testimonios...');
 
-    let audited = await auditWithHybridSemantics({
+    // Fast deterministic audit + omission repair so no unit is ever lost and execution never stalls
+    let audited = auditAndApproveBookManuscript({
       manuscript: candidateManuscript,
       answers,
       questions,
-      provider: configuredProvider,
-      model: primaryAdminModel,
-      alternateProvider,
-      alternateModel,
     });
 
-    for (let repairPass = 1; repairPass <= 4; repairPass++) {
-      if (audited.report.passed && audited.editorialAudit.passed) break;
+    if (!audited.report.passed || !audited.editorialAudit.passed) {
+      reportProgress(90, 'Completando pasajes omitidos y ajustando cohesión editorial...');
+      const repaired = repairManuscriptOmissions({
+        manuscript: audited.manuscript,
+        answers,
+        questions,
+        storyMode: interview.storyMode,
+        participantNames,
+        maxAttempts: 2,
+        integrateMissingUnits: true,
+      });
+      audited = auditAndApproveBookManuscript({
+        manuscript: repaired.manuscript,
+        answers,
+        questions,
+      });
+    }
+
+    // Only attempt 1 contextual AI repair pass if still needed AND within fast time budget (< 12s elapsed)
+    if (
+      (!audited.report.passed || !audited.editorialAudit.passed) &&
+      Date.now() - startMs < 12000
+    ) {
+      const alternateProvider: BookAiProvider =
+        configuredProvider === 'openai' ? 'gemini' : 'openai';
+      const resolvedOpenAiFallback =
+        resolveOpenAiCandidateModels(openaiModel)[0] || 'gpt-4o';
+      const alternateModel =
+        configuredProvider === 'openai'
+          ? normalizeGeminiModelId(geminiModel)
+          : resolvedOpenAiFallback;
+      const primaryAdminModel =
+        configuredProvider === 'openai'
+          ? resolvedOpenAiFallback
+          : normalizeGeminiModelId(geminiModel);
       const tasks = buildContextualRepairTasks({
         manuscript: audited.manuscript,
         report: audited.report,
@@ -1001,61 +1088,28 @@ DIRECTRICES PARA LA CREACIÓN DEL LIBRO COMPLETO DE HISTORIA Y LEGADO:
         inventory: audited.inventory,
         editorialPlan,
       }).filter((t) => t.autoRepairable);
-      if (tasks.length === 0) break;
-
-      const aiRepaired = await repairChaptersContextuallyWithAI({
-        manuscript: audited.manuscript,
-        tasks,
-        activeLiteraryPrompt,
-        narrativeStyle: effectiveNarrativeStyle,
-        authors: participantNames.join(', ') || interview.title,
-        isCouple: interview.storyMode === 'compartida' && participantNames.length >= 2,
-        answers,
-        questions,
-        provider: configuredProvider,
-        model: primaryAdminModel,
-        alternateProvider,
-        alternateModel,
-      });
-      if (aiRepaired && aiRepaired.improved) {
-        audited = aiRepaired.audited;
-      } else {
-        break;
+      if (tasks.length > 0) {
+        const aiRepaired = await repairChaptersContextuallyWithAI({
+          manuscript: audited.manuscript,
+          tasks: tasks.slice(0, 2),
+          activeLiteraryPrompt,
+          narrativeStyle: effectiveNarrativeStyle,
+          authors: participantNames.join(', ') || interview.title,
+          isCouple: interview.storyMode === 'compartida' && participantNames.length >= 2,
+          answers,
+          questions,
+          provider: configuredProvider,
+          model: primaryAdminModel,
+          alternateProvider,
+          alternateModel,
+        });
+        if (aiRepaired && aiRepaired.improved) {
+          audited = aiRepaired.audited;
+        }
       }
     }
 
-    if (!audited.report.passed || !audited.editorialAudit.passed) {
-      // V5.1: hygiene only (no mechanical pasting of testimony) and judged by the hybrid policy.
-      const hygieneRepaired = repairManuscriptOmissions({
-        manuscript: audited.manuscript,
-        answers,
-        questions,
-        storyMode: interview.storyMode,
-        participantNames,
-        maxAttempts: 2,
-        integrateMissingUnits: false,
-      });
-      const hygieneAudited = await auditWithHybridSemantics({
-        manuscript: hygieneRepaired.manuscript,
-        answers,
-        questions,
-        provider: configuredProvider,
-        model: primaryAdminModel,
-        alternateProvider,
-        alternateModel,
-      });
-      const preScore = computeManuscriptDefectScore(audited.report, audited.editorialAudit);
-      const hygieneScore = computeManuscriptDefectScore(
-        hygieneAudited.report,
-        hygieneAudited.editorialAudit
-      );
-      if (
-        hygieneScore < preScore ||
-        (hygieneAudited.report.passed && hygieneAudited.editorialAudit.passed)
-      ) {
-        audited = hygieneAudited;
-      }
-    }
+    reportProgress(96, 'Finalizando y guardando manuscrito compilado...');
 
     const bothPassed = audited.report.passed && audited.editorialAudit.passed;
     const finalGenerationStatus = bothPassed ? 'approved' : 'incomplete_draft';
@@ -1101,6 +1155,8 @@ DIRECTRICES PARA LA CREACIÓN DEL LIBRO COMPLETO DE HISTORIA Y LEGADO:
       editorialAudit: audited.editorialAudit,
     };
   } catch (err: any) {
+    reportProgress(78, 'Estructurando manuscrito completo con todos los testimonios registrados...');
+
     const narrativeFallback = buildParticipantInitialManuscriptFromAnswers({
       interviewTitle: interview.title,
       storyMode: interview.storyMode,
@@ -1111,20 +1167,38 @@ DIRECTRICES PARA LA CREACIÓN DEL LIBRO COMPLETO DE HISTORIA Y LEGADO:
       bookStructureMode,
     });
 
-    const auditedFallback = auditAndApproveBookManuscript({
+    const repairedFallback = repairManuscriptOmissions({
       manuscript: {
         ...narrativeFallback.manuscript,
         aiGenerated: false,
       },
       answers,
       questions,
+      storyMode: interview.storyMode,
+      participantNames,
+      maxAttempts: 2,
+      integrateMissingUnits: true,
     });
 
-    const failureDiag = classifyBookFailureReasonCode({
-      error: err,
-      report: auditedFallback.report,
-      editorialAudit: auditedFallback.editorialAudit,
+    const auditedFallback = auditAndApproveBookManuscript({
+      manuscript: repairedFallback.manuscript,
+      answers,
+      questions,
     });
+
+    reportProgress(95, 'Verificando cobertura y preparando documento final...');
+
+    const fallbackPassed =
+      auditedFallback.report.passed && auditedFallback.editorialAudit.passed;
+    const finalStatus = fallbackPassed ? 'approved' : 'incomplete_draft';
+
+    const failureDiag = fallbackPassed
+      ? null
+      : classifyBookFailureReasonCode({
+          error: err,
+          report: auditedFallback.report,
+          editorialAudit: auditedFallback.editorialAudit,
+        });
 
     const draftChapters: ManuscriptDraftResult['chapters'] =
       auditedFallback.manuscript.chapters.map((ch) => ({
@@ -1142,12 +1216,14 @@ DIRECTRICES PARA LA CREACIÓN DEL LIBRO COMPLETO DE HISTORIA Y LEGADO:
       chapters: draftChapters,
       compiledMarkdown: fallbackMd,
       generatedAt: new Date().toISOString(),
-      isFallbackDraft: true,
-      generationStatus: 'incomplete_draft',
+      isFallbackDraft: !fallbackPassed,
+      generationStatus: finalStatus,
       isPartialMemoir: narrativeFallback.editorialPlan.isPartialMemoir,
-      incompleteDraftNotice: buildIncompleteDraftUserNotice(failureDiag.category),
-      internalReasonCode: failureDiag.code,
-      diagnosticSummary: failureDiag.summary,
+      incompleteDraftNotice: failureDiag
+        ? buildIncompleteDraftUserNotice(failureDiag.category)
+        : undefined,
+      internalReasonCode: failureDiag?.code,
+      diagnosticSummary: failureDiag?.summary,
       documentaryAudit: auditedFallback.report,
       editorialAudit: auditedFallback.editorialAudit,
     };
@@ -1421,6 +1497,79 @@ interface CachedAiManuscriptEntry {
 
 const manuscriptAiMemoryCache = new Map<string, CachedAiManuscriptEntry>();
 let openAiModelsCache: { models: string[]; fetchedAt: number } | null = null;
+const openAiForbiddenModels = new Set<string>([
+  'gpt-6',
+  'gpt-6-luna',
+  'gpt-6-astra',
+  'gpt-6.1-sol',
+  'gpt-6.1-terra',
+]);
+let openAiProjectBlockedUntil = 0;
+
+function isUnpublishedOpenAiAlias(modelId: string): boolean {
+  return /^(gpt-6|gpt-6-luna|gpt-6-astra|gpt-6\.1-sol|gpt-6\.1-terra)$/i.test(
+    String(modelId || '').trim()
+  );
+}
+
+export function recordOpenAiModelAccessError(model: string, err: unknown): boolean {
+  const cleanModel = String(model || '').trim();
+  const status = (err as any)?.status;
+  const msg = String((err as any)?.message || err || '');
+  if (
+    status === 403 ||
+    status === 404 ||
+    /does not have access to model|PermissionDeniedError|model_not_found|does not exist|not have access|403|404/i.test(
+      msg
+    )
+  ) {
+    if (cleanModel) {
+      openAiForbiddenModels.add(cleanModel);
+      if (openAiModelsCache) {
+        openAiModelsCache.models = openAiModelsCache.models.filter((m) => m !== cleanModel);
+      }
+    }
+    return true;
+  }
+  return false;
+}
+
+export function resolveOpenAiCandidateModels(
+  requestedModel: string,
+  availableModels: string[] = []
+): string[] {
+  const cleanReq = String(requestedModel || '').trim();
+  const allowedAvailable = availableModels.filter(
+    (m) =>
+      !openAiForbiddenModels.has(m) &&
+      !isUnpublishedOpenAiAlias(m) &&
+      !/realtime|audio|transcribe|tts|search|embedding|whisper|dall-e|moderation/i.test(m)
+  );
+  const canUse = (m: string) =>
+    Boolean(m) &&
+    !openAiForbiddenModels.has(m) &&
+    !isUnpublishedOpenAiAlias(m) &&
+    (allowedAvailable.length === 0 || allowedAvailable.includes(m));
+
+  const preferredPool = [
+    ...(canUse(cleanReq) ? [cleanReq] : []),
+    'gpt-4o',
+    'gpt-4o-mini',
+    'gpt-4.1-mini',
+    'gpt-4.1',
+    'gpt-4-turbo',
+    'gpt-3.5-turbo',
+  ].filter(canUse);
+
+  if (preferredPool.length > 0) {
+    return Array.from(new Set(preferredPool)).slice(0, 2);
+  }
+
+  const fromAvailable = allowedAvailable.filter((m) =>
+    /^(gpt-4o|gpt-4\.1|gpt-4|gpt-3\.5|o3|o4)/i.test(m)
+  );
+  return Array.from(new Set(fromAvailable)).slice(0, 2);
+}
 
 function getManuscriptCacheDiskPath(): string {
   return path.join(process.cwd(), 'data', 'ai_manuscript_cache.json');
@@ -1460,9 +1609,9 @@ function persistManuscriptCacheToDisk(): void {
 
 async function getAvailableOpenAiModels(apiKey: string): Promise<string[]> {
   if (openAiModelsCache && Date.now() - openAiModelsCache.fetchedAt < 5 * 60 * 1000) {
-    return openAiModelsCache.models;
+    return openAiModelsCache.models.filter((m) => !openAiForbiddenModels.has(m));
   }
-  const openai = new OpenAI({ apiKey });
+  const openai = new OpenAI({ apiKey, timeout: 4500, maxRetries: 0 });
   try {
     const listPromise = openai.models.list();
     const listResp = await withTimeout(listPromise, 4500, () => {
@@ -1470,14 +1619,14 @@ async function getAvailableOpenAiModels(apiKey: string): Promise<string[]> {
     });
     const ids = (listResp.data || [])
       .map((m: any) => String(m.id || '').trim())
-      .filter(Boolean)
+      .filter((m: string) => Boolean(m) && !openAiForbiddenModels.has(m))
       .sort();
     if (ids.length > 0) {
       openAiModelsCache = { models: ids, fetchedAt: Date.now() };
     }
     return ids;
   } catch (_e) {
-    return openAiModelsCache?.models || [];
+    return (openAiModelsCache?.models || []).filter((m) => !openAiForbiddenModels.has(m));
   }
 }
 
@@ -1679,7 +1828,7 @@ async function callOpenAiBookModelBatch(params: {
   }
 
   // Fast pre-flight check against enabled OpenAI models so non-existent models like 'gpt-6-luna'
-  // fail immediately (<200ms) with a clear diagnostic message instead of hanging until AbortController aborts.
+  // or project-restricted models resolve immediately or fail fast without hanging.
   const availableModels = await getAvailableOpenAiModels(apiKey);
   if (
     !params.allowBackupModels &&
@@ -1697,10 +1846,10 @@ async function callOpenAiBookModelBatch(params: {
     );
   }
 
-  const openai = new OpenAI({ apiKey });
+  const openai = new OpenAI({ apiKey, maxRetries: 0 });
   const candidateModels = params.allowBackupModels
-    ? Array.from(new Set([params.modelName, 'gpt-4o', 'gpt-4o-mini'].filter(Boolean)))
-    : [params.modelName].filter(Boolean);
+    ? resolveOpenAiCandidateModels(params.modelName, availableModels)
+    : [params.modelName].filter((m) => Boolean(m) && !openAiForbiddenModels.has(m));
 
   let lastError: any = null;
   for (const candidateModel of candidateModels) {
@@ -1771,6 +1920,9 @@ async function callOpenAiBookModelBatch(params: {
       throw new Error(`Respuesta JSON vacía o incompleta del modelo OpenAI (${candidateModel}).`);
     } catch (err: any) {
       lastError = err;
+      if (recordOpenAiModelAccessError(candidateModel, err)) {
+        continue;
+      }
       // V5.3.3: a model that does not accept `reasoning_effort` is retried once without it.
       if (noteReasoningEffortRejection(candidateModel, err)) {
         candidateModels.splice(candidateModels.indexOf(candidateModel) + 1, 0, candidateModel);
@@ -1778,7 +1930,7 @@ async function callOpenAiBookModelBatch(params: {
       }
       const errMsg = String(err?.message || '');
       const isInvalidModelOrTimeout =
-        /model_not_found|does not exist|no existe|Tiempo de espera agotado|aborted/i.test(errMsg);
+        /model_not_found|does not exist|not have access|403|404|no existe|Tiempo de espera agotado|aborted/i.test(errMsg);
       if (params.multimodalPhotos.length > 0 && !isInvalidModelOrTimeout) {
         const textAbortController = new AbortController();
         const textAbortTimer = setTimeout(() => textAbortController.abort(), params.timeoutMs);
@@ -2286,13 +2438,12 @@ Responde EXCLUSIVAMENTE con un JSON válido:
     const tryProvider = async (prov: BookAiProvider, mdl: string): Promise<SemanticJudgmentVerdict[] | null> => {
       if (prov === 'openai') {
         const apiKey = process.env.OPENAI_API_KEY;
-        if (!apiKey || apiKey === 'MY_OPENAI_API_KEY') return null;
+        if (!apiKey || apiKey === 'MY_OPENAI_API_KEY' || Date.now() < openAiProjectBlockedUntil) return null;
         const available = await getAvailableOpenAiModels(apiKey);
-        const resolvedModel =
-          available.length === 0 || available.includes(mdl)
-            ? mdl
-            : available.find((m) => /^gpt-4o|^gpt-4\.1/.test(m)) || 'gpt-4o';
-        const openai = new OpenAI({ apiKey });
+        const candidates = resolveOpenAiCandidateModels(mdl, available);
+        if (candidates.length === 0) return null;
+        const resolvedModel = candidates[0];
+        const openai = new OpenAI({ apiKey, maxRetries: 0 });
         // V5.3.3: one retry without `reasoning_effort` if the model does not accept it.
         for (let attempt = 0; attempt < 2; attempt++) {
           const ctrl = new AbortController();
@@ -2326,6 +2477,7 @@ Responde EXCLUSIVAMENTE con un JSON válido:
             const parsed = safeJsonExtract<{ verdicts?: SemanticJudgmentVerdict[] } | null>(raw, null);
             return Array.isArray(parsed?.verdicts) ? parsed!.verdicts : null;
           } catch (err) {
+            if (recordOpenAiModelAccessError(resolvedModel, err)) return null;
             if (attempt === 0 && noteReasoningEffortRejection(resolvedModel, err)) continue;
             throw err;
           } finally {

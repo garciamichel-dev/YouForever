@@ -154,13 +154,18 @@ export const MiEsenciaFamilyPortal: React.FC<MiEsenciaFamilyPortalProps> = ({
       }
       setIsAuthenticated(true);
     } catch (err: any) {
+      const rawMsg = String(err?.message || '');
       if (err?.name === 'AbortError') {
         setAuthError(
           'La verificación tardó más de lo esperado. Por favor intenta ingresar nuevamente.'
         );
+      } else if (/JSON\.parse|unexpected character|Unexpected token/i.test(rawMsg)) {
+        setAuthError(
+          'El servidor se está preparando en este momento. Por favor intenta ingresar nuevamente en unos segundos.'
+        );
       } else {
         setAuthError(
-          err?.message || 'No pudimos verificar tu código en este momento. Inténtalo nuevamente.'
+          rawMsg || 'No pudimos verificar tu código en este momento. Inténtalo nuevamente.'
         );
       }
     } finally {

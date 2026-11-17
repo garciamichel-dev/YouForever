@@ -45,10 +45,61 @@ export async function attachAdminAuthHeaders(
 export function installAdminAuthFetch(): void {
   if (installed || typeof window === 'undefined' || typeof window.fetch !== 'function') return;
   installed = true;
+
+  // Prevent "JSON.parse: unexpected character at line 1 column 1 of the JSON data"
+  // when a reverse proxy returns an HTML 502/503/504 page or empty body on res.json().
+  if (
+    typeof Response !== 'undefined' &&
+    Response.prototype &&
+    typeof Response.prototype.json === 'function'
+  ) {
+    try {
+      Object.defineProperty(Response.prototype, 'json', {
+        configurable: true,
+        writable: true,
+        value: async function safeResponseJson(this: Response) {
+          const text = await this.text();
+          const trimmed = text ? text.trim() : '';
+          if (!trimmed) {
+            return {
+              success: this.ok,
+              ok: this.ok,
+              error: this.ok
+                ? undefined
+                : 'El servidor no devolvió respuesta. Por favor intenta nuevamente en unos segundos.',
+            };
+          }
+          try {
+            return JSON.parse(trimmed);
+          } catch {
+            return {
+              success: false,
+              ok: false,
+              error:
+                this.status === 502 || this.status === 503 || this.status === 504
+                  ? 'El servidor tardó en responder o se está actualizando. Por favor intenta nuevamente en unos segundos.'
+                  : 'No pudimos procesar la respuesta del servidor en este momento. Por favor intenta nuevamente.',
+            };
+          }
+        },
+      });
+    } catch {
+      // Ignore if Response.prototype.json is not configurable
+    }
+  }
+
   const originalFetch = window.fetch.bind(window);
   const wrappedFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    const isApi = isSameOriginApiRequest(url);
     const nextInit = await attachAdminAuthHeaders(input, init);
-    return originalFetch(input, nextInit);
+    const res = await originalFetch(input, nextInit);
+    if (isApi && (res.status === 502 || res.status === 503)) {
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      const retryInit = await attachAdminAuthHeaders(input, init);
+      return originalFetch(input, retryInit);
+    }
+    return res;
   };
 
   try {

@@ -21,6 +21,12 @@ import {
 } from 'lucide-react';
 import { QuestionRecord, BranchConfig } from '../logic/interviewRules.ts';
 import { apiFetch } from '../utils/apiClient.ts';
+import {
+  AdminProgressModal,
+  AdminProgressState,
+  INITIAL_ADMIN_PROGRESS,
+  executeWithAdminProgress,
+} from './AdminProgressModal.tsx';
 
 
 interface QuestionBankPanelProps {
@@ -30,6 +36,7 @@ interface QuestionBankPanelProps {
 export const QuestionBankPanel: React.FC<QuestionBankPanelProps> = ({ adminEmail }) => {
   const [questions, setQuestions] = useState<QuestionRecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const [adminProgress, setAdminProgress] = useState<AdminProgressState>(INITIAL_ADMIN_PROGRESS);
   const [search, setSearch] = useState('');
   const [stageFilter, setStageFilter] = useState<string>('todas');
   const [modeFilter, setModeFilter] = useState<string>('todas');
@@ -87,12 +94,24 @@ export const QuestionBankPanel: React.FC<QuestionBankPanelProps> = ({ adminEmail
   const fetchQuestions = async () => {
     try {
       setLoading(true);
-      const res = await apiFetch<QuestionRecord[]>('/api/questions', { retries: 2 });
-      if (res.ok && res.data) {
-        setQuestions(res.data);
-      } else if (res.error) {
-        console.warn('Notice fetching questions:', res.error);
-      }
+      await executeWithAdminProgress(
+        setAdminProgress,
+        {
+          kind: 'carga',
+          title: 'Cargando Banco de Preguntas',
+          subtitle: 'Hilo principal, sub-flujos y reglas de ramificación',
+          initialStage: 'Consultando preguntas registradas en la base de datos...',
+        },
+        async (update) => {
+          const res = await apiFetch<QuestionRecord[]>('/api/questions', { retries: 2 });
+          update(85, 'Organizando flujos y etapas vitales...');
+          if (res.ok && res.data) {
+            setQuestions(res.data);
+          } else if (res.error) {
+            console.warn('Notice fetching questions:', res.error);
+          }
+        }
+      );
     } catch (err: unknown) {
       console.error('Error fetching questions:', err);
     } finally {
@@ -367,30 +386,42 @@ export const QuestionBankPanel: React.FC<QuestionBankPanelProps> = ({ adminEmail
     };
     reader.onload = async (evt) => {
       try {
-        const rawResult = evt.target?.result as string;
-        const base64 = rawResult.includes(',') ? rawResult.split(',')[1] : rawResult;
-        setImportingFileBase64(base64);
-
-        const res = await fetch('/api/questions/import', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
+        await executeWithAdminProgress(
+          setAdminProgress,
+          {
+            kind: 'carga',
+            title: 'Analizando Archivo de Preguntas',
+            subtitle: file.name,
+            initialStage: 'Codificando y enviando archivo al servidor para validación...',
           },
-          body: JSON.stringify({ fileBase64: base64, commit: false }),
-        });
+          async (update) => {
+            const rawResult = evt.target?.result as string;
+            const base64 = rawResult.includes(',') ? rawResult.split(',')[1] : rawResult;
+            setImportingFileBase64(base64);
 
-        const data = await res.json();
-        if (data.success && data.data) {
-          setImportPreview(data.data);
-          if (data.data.invalidRowsCount > 0) {
-            setImportError(
-              `Se analizaron ${data.data.totalRows} filas: ${data.data.validRowsCount} válidas y ${data.data.invalidRowsCount} con avisos.`
-            );
+            const res = await fetch('/api/questions/import', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
+              },
+              body: JSON.stringify({ fileBase64: base64, commit: false }),
+            });
+
+            update(85, 'Validando estructura de columnas y flujos...');
+            const data = await res.json();
+            if (data.success && data.data) {
+              setImportPreview(data.data);
+              if (data.data.invalidRowsCount > 0) {
+                setImportError(
+                  `Se analizaron ${data.data.totalRows} filas: ${data.data.validRowsCount} válidas y ${data.data.invalidRowsCount} con avisos.`
+                );
+              }
+            } else {
+              setImportError(data.error || 'No se pudo analizar el archivo. Verifica el formato de las columnas.');
+            }
           }
-        } else {
-          setImportError(data.error || 'No se pudo analizar el archivo. Verifica el formato de las columnas.');
-        }
+        );
       } catch (err: unknown) {
         setImportError('Error de red al comunicarse con el servidor.');
       } finally {
@@ -432,26 +463,38 @@ export const QuestionBankPanel: React.FC<QuestionBankPanelProps> = ({ adminEmail
     setIsAnalyzing(true);
 
     try {
-      const res = await fetch('/api/questions/import', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
+      await executeWithAdminProgress(
+        setAdminProgress,
+        {
+          kind: 'carga',
+          title: 'Analizando Contenido CSV',
+          subtitle: 'Validación de preguntas y ramificaciones',
+          initialStage: 'Procesando filas CSV en el servidor...',
         },
-        body: JSON.stringify({ csvText: pastedCsvText, commit: false }),
-      });
+        async (update) => {
+          const res = await fetch('/api/questions/import', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
+            },
+            body: JSON.stringify({ csvText: pastedCsvText, commit: false }),
+          });
 
-      const data = await res.json();
-      if (data.success && data.data) {
-        setImportPreview(data.data);
-        if (data.data.invalidRowsCount > 0) {
-          setImportError(
-            `Se analizaron ${data.data.totalRows} filas: ${data.data.validRowsCount} válidas y ${data.data.invalidRowsCount} con avisos.`
-          );
+          update(85, 'Generando vista previa de importación...');
+          const data = await res.json();
+          if (data.success && data.data) {
+            setImportPreview(data.data);
+            if (data.data.invalidRowsCount > 0) {
+              setImportError(
+                `Se analizaron ${data.data.totalRows} filas: ${data.data.validRowsCount} válidas y ${data.data.invalidRowsCount} con avisos.`
+              );
+            }
+          } else {
+            setImportError(data.error || 'No se pudo analizar el texto CSV pegado.');
+          }
         }
-      } else {
-        setImportError(data.error || 'No se pudo analizar el texto CSV pegado.');
-      }
+      );
     } catch (err) {
       setImportError('Error de red al analizar el texto CSV.');
     } finally {
@@ -465,33 +508,43 @@ export const QuestionBankPanel: React.FC<QuestionBankPanelProps> = ({ adminEmail
 
     try {
       setIsCommitting(true);
-      const res = await fetch('/api/questions/import', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
+      await executeWithAdminProgress(
+        setAdminProgress,
+        {
+          kind: 'carga',
+          title: 'Importando Preguntas a la Base de Datos',
+          subtitle: `${importPreview.validRowsCount} preguntas válidas`,
+          initialStage: 'Guardando lote de preguntas en el servidor y Firestore...',
         },
-        body: JSON.stringify({
-          fileBase64: importingFileBase64 || undefined,
-          csvText: !importingFileBase64 ? pastedCsvText : undefined,
-          commit: true,
-        }),
-      });
+        async (update) => {
+          const res = await fetch('/api/questions/import', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
+            },
+            body: JSON.stringify({
+              fileBase64: importingFileBase64 || undefined,
+              csvText: !importingFileBase64 ? pastedCsvText : undefined,
+              commit: true,
+            }),
+          });
 
-      const data = await res.json();
-      if (data.success) {
-        setImportSuccess(data.message);
-        setTimeout(() => {
-          setShowImportModal(false);
-          setImportPreview(null);
-          setImportingFileBase64(null);
-          setPastedCsvText('');
-          setSelectedFileName(null);
-          fetchQuestions();
-        }, 1500);
-      } else {
-        setImportError(data.error || 'Error al guardar las preguntas importadas en la base de datos.');
-      }
+          update(90, 'Actualizando catálogo del Banco de Preguntas...');
+          const data = await res.json();
+          if (data.success) {
+            setImportSuccess(data.message);
+            setShowImportModal(false);
+            setImportPreview(null);
+            setImportingFileBase64(null);
+            setPastedCsvText('');
+            setSelectedFileName(null);
+            await fetchQuestions();
+          } else {
+            setImportError(data.error || 'Error al guardar las preguntas importadas en la base de datos.');
+          }
+        }
+      );
     } catch (err) {
       setImportError('Error de red al confirmar importación.');
     } finally {
@@ -505,6 +558,7 @@ export const QuestionBankPanel: React.FC<QuestionBankPanelProps> = ({ adminEmail
 
   return (
     <div className="space-y-6">
+      <AdminProgressModal state={adminProgress} />
       {/* Header with actions */}
       <div className="bg-white p-6 rounded-xl border border-stone-200 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>

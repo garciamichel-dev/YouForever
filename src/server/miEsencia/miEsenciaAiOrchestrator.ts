@@ -175,19 +175,28 @@ async function callGeminiProvider(params: {
   );
 
   const candidateModels = Array.from(
-    new Set([normalizedGeminiModel, 'gemini-3-flash-preview', 'gemini-flash-latest'])
-  );
+    new Set([normalizedGeminiModel, 'gemini-3-flash-preview'])
+  ).slice(0, 2);
 
   let lastErr: unknown = null;
   for (const candidateModel of candidateModels) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const response = await ai.models.generateContent({
-        model: candidateModel,
-        contents: multiTurnContents,
-        config: {
-          systemInstruction: params.systemInstructions,
-        },
-      });
+      const response = await Promise.race([
+        ai.models.generateContent({
+          model: candidateModel,
+          contents: multiTurnContents,
+          config: {
+            systemInstruction: params.systemInstructions,
+          },
+        }),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`Tiempo de espera agotado en Gemini (${candidateModel}).`)),
+            20000
+          );
+        }),
+      ]).finally(() => timer && clearTimeout(timer));
 
       const outputText = (response.text || '').trim();
       if (!outputText) {
@@ -229,6 +238,14 @@ async function callGeminiProvider(params: {
  * de la cuenta de OpenAI del usuario, intenta de forma transparente con la cadena oficial de OpenAI
  * y reporta el modelo exacto que respondió.
  */
+const forbiddenOpenAiModels = new Set<string>([
+  'gpt-6',
+  'gpt-6-luna',
+  'gpt-6-astra',
+  'gpt-6.1-sol',
+  'gpt-6.1-terra',
+]);
+
 async function callOpenAiProvider(params: {
   model: string;
   systemInstructions: string;
@@ -248,32 +265,43 @@ async function callOpenAiProvider(params: {
 
   const client = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY,
-    timeout: 15000,
+    timeout: 12000,
     maxRetries: 0,
   });
 
-  const requestedModel = (params.model || 'gpt-4.1').trim();
+  const requestedModel = (params.model || 'gpt-4o').trim();
   const isUnpublishedAlias = (id: string) =>
-    /^(gpt-6|gpt-6-luna|gpt-6-astra|gpt-6\.1-sol|gpt-6\.1-terra)$/i.test(id);
+    /^(gpt-6|gpt-6-luna|gpt-6-astra|gpt-6\.1-sol|gpt-6\.1-terra)$/i.test(id) ||
+    forbiddenOpenAiModels.has(id);
 
   // Descubrir y cachear por 5 minutos qué modelos tiene permitidos el proyecto de OpenAI
   let baseCandidates = [
     ...(isUnpublishedAlias(requestedModel) ? [] : [requestedModel]),
-    'gpt-5',
-    'gpt-4.1',
     'gpt-4o',
-    'gpt-5-mini',
-    'gpt-4.1-mini',
     'gpt-4o-mini',
-  ];
+    'gpt-4.1-mini',
+    'gpt-4.1',
+  ].filter((m) => !forbiddenOpenAiModels.has(m));
   try {
     const now = Date.now();
     if (!cachedOpenAiProjectModels || now - cachedOpenAiProjectModelsAt > 5 * 60 * 1000) {
-      const modelsList = await client.models.list();
-      cachedOpenAiProjectModels = (modelsList.data || []).map((m) => m.id);
-      cachedOpenAiProjectModelsAt = now;
+      let listTimer: ReturnType<typeof setTimeout> | undefined;
+      const modelsList = await Promise.race([
+        client.models.list(),
+        new Promise<null>((resolve) => {
+          listTimer = setTimeout(() => resolve(null), 2500);
+        }),
+      ]).finally(() => listTimer && clearTimeout(listTimer));
+      if (modelsList) {
+        cachedOpenAiProjectModels = (modelsList.data || [])
+          .map((m) => m.id)
+          .filter((id) => !forbiddenOpenAiModels.has(id));
+        cachedOpenAiProjectModelsAt = now;
+      }
     }
-    const availableIds = cachedOpenAiProjectModels || [];
+    const availableIds = (cachedOpenAiProjectModels || []).filter(
+      (id) => !forbiddenOpenAiModels.has(id)
+    );
     if (availableIds.length > 0) {
       const exactRequestedAvailable = availableIds.includes(requestedModel);
       // V5.4.2: within each family, full models before "mini"/"nano" ones, so an unavailable
@@ -282,18 +310,18 @@ async function callOpenAiProvider(params: {
         [...ids].sort((a, b) => Number(/mini|nano/i.test(a)) - Number(/mini|nano/i.test(b)));
       const preferredOrder = [
         ...(exactRequestedAvailable ? [requestedModel] : []),
-        ...fullFirst(availableIds.filter((id) => /^gpt-6/i.test(id))),
-        ...fullFirst(
-          availableIds.filter(
-            (id) => /^gpt-5/i.test(id) && !/realtime|audio|transcribe|tts|search/i.test(id)
-          )
-        ),
-        ...fullFirst(availableIds.filter((id) => /^gpt-4\.1/i.test(id))),
         ...fullFirst(
           availableIds.filter(
             (id) => /^gpt-4o/i.test(id) && !/realtime|audio|transcribe|tts|search/i.test(id)
           )
         ),
+        ...fullFirst(availableIds.filter((id) => /^gpt-4\.1/i.test(id))),
+        ...fullFirst(
+          availableIds.filter(
+            (id) => /^gpt-5/i.test(id) && !/realtime|audio|transcribe|tts|search/i.test(id)
+          )
+        ),
+        ...fullFirst(availableIds.filter((id) => /^gpt-6/i.test(id))),
         ...availableIds.filter((id) =>
           /^(o4-mini|o3-mini|o3|gpt-4-turbo|gpt-4|gpt-3\.5-turbo)$/i.test(id)
         ),
@@ -301,13 +329,17 @@ async function callOpenAiProvider(params: {
           ? [requestedModel]
           : []),
       ];
-      baseCandidates = Array.from(new Set([...preferredOrder, ...baseCandidates]));
+      baseCandidates = Array.from(
+        new Set([...preferredOrder, ...baseCandidates].filter((id) => !forbiddenOpenAiModels.has(id)))
+      );
     }
   } catch {
     // Si la clave no tiene permiso de listar modelos, usar baseCandidates
   }
 
-  const candidateModels = Array.from(new Set(baseCandidates));
+  // Limit to at most 2 candidates so we never exceed reverse proxy HTTP timeouts
+  const candidateModels = Array.from(new Set(baseCandidates)).slice(0, 2);
+  const overallDeadline = Date.now() + 18000;
 
   const priorMessages: Array<{ role: 'user' | 'assistant'; content: string }> = (
     params.structuredTurns || []
@@ -322,6 +354,9 @@ async function callOpenAiProvider(params: {
   let lastError: unknown = null;
 
   for (const targetModel of candidateModels) {
+    if (Date.now() > overallDeadline) break;
+    const isReasoningModel = /^(gpt-5|gpt-6|o1|o3|o4)/i.test(targetModel);
+
     // 1. Preferir Responses API oficial de OpenAI con historial multi-turno
     try {
       const responseInput: Array<{ role: 'user' | 'assistant'; content: string }> = [
@@ -333,6 +368,7 @@ async function callOpenAiProvider(params: {
         model: targetModel,
         instructions: params.systemInstructions,
         input: responseInput as any,
+        ...(isReasoningModel ? ({ reasoning: { effort: 'low' } } as any) : {}),
       });
 
       const outputText = (response.output_text || '').trim();
@@ -365,7 +401,14 @@ async function callOpenAiProvider(params: {
       if (/401|invalid_api_key|incorrect api key|insufficient_quota/i.test(errMsg)) {
         throw responsesErr;
       }
+      // If the model itself does not exist or is forbidden, record it and move immediately to the next candidate model
+      if (/does not exist|not have access|model_not_found|404|403/i.test(errMsg)) {
+        forbiddenOpenAiModels.add(targetModel);
+        continue;
+      }
     }
+
+    if (Date.now() > overallDeadline) break;
 
     // 2. Intentar con Chat Completions oficial enviando instrucciones + historial multi-turno completo
     try {
@@ -405,6 +448,9 @@ async function callOpenAiProvider(params: {
       }
       lastError = chatErr;
       const errMsg = String(chatErr?.message || '');
+      if (/does not exist|not have access|model_not_found|404|403/i.test(errMsg)) {
+        forbiddenOpenAiModels.add(targetModel);
+      }
       if (/401|invalid_api_key|incorrect api key|insufficient_quota/i.test(errMsg)) {
         throw chatErr;
       }

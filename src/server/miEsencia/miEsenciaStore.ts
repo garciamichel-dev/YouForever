@@ -5522,6 +5522,164 @@ Respuesta directa en primera persona singular:`;
       pdfDocumentStatus: aiConfig.documentProcessingStatus || 'listo',
     };
   }
+
+  public exportFullStateForBackup(): Record<string, any> {
+    return {
+      exportedAt: new Date().toISOString(),
+      config: this.config,
+      deletedRegistry: this.serializeDeletedRegistry(),
+      plans: Array.from(this.plans.values()),
+      subscriptions: Array.from(this.subscriptions.values()),
+      persons: Array.from(this.persons.values()),
+      compilationPdfs: Array.from(this.compilationPdfs.values()),
+      testimonies: Array.from(this.testimonies.values()),
+      relations: Array.from(this.relations.values()),
+      interlocutors: Array.from(this.interlocutors.values()),
+      credentials: Array.from(this.credentials.values()),
+      memories: Array.from(this.memories.values()),
+      contradictions: Array.from(this.contradictions.values()),
+      payments: Array.from(this.payments.values()),
+      coupons: Array.from(this.coupons.values()),
+      snapshots: Array.from(this.snapshots.values()),
+      conversations: Array.from(this.conversations.values()),
+      notifications: Array.from(this.notifications.values()),
+      promptLibrary: Array.from(this.promptLibrary.values()),
+      avatarPromptVersions: Array.from(this.avatarPromptVersions.values()),
+      fallbackLogs: Array.from(this.fallbackLogs.values()),
+      lastFirestoreSyncAt: this.lastFirestoreSyncAt,
+    };
+  }
+
+  public restoreFullStateFromBackup(raw: any): {
+    personsRestored: number;
+    subscriptionsRestored: number;
+    testimoniesRestored: number;
+    conversationsRestored: number;
+  } {
+    if (!raw || typeof raw !== 'object') {
+      return {
+        personsRestored: this.persons.size,
+        subscriptionsRestored: this.subscriptions.size,
+        testimoniesRestored: this.testimonies.size,
+        conversationsRestored: this.conversations.size,
+      };
+    }
+
+    this.plans.clear();
+    this.subscriptions.clear();
+    this.persons.clear();
+    this.compilationPdfs.clear();
+    this.testimonies.clear();
+    this.personSourceFingerprints.clear();
+    this.relations.clear();
+    this.interlocutors.clear();
+    this.credentials.clear();
+    this.memories.clear();
+    this.contradictions.clear();
+    this.payments.clear();
+    this.coupons.clear();
+    this.snapshots.clear();
+    this.conversations.clear();
+    this.notifications.clear();
+    this.promptLibrary.clear();
+    this.avatarPromptVersions.clear();
+    this.fallbackLogs.clear();
+    this.deletedRegistry.persons.clear();
+    this.deletedRegistry.subscriptions.clear();
+    this.deletedRegistry.pdfs.clear();
+    this.deletedRegistry.credentials.clear();
+
+    for (const p of DEFAULT_MI_ESENCIA_PLANS) {
+      this.plans.set(p.planId, { ...p });
+    }
+
+    if (raw.config) {
+      this.config = { ...DEFAULT_MI_ESENCIA_CONFIG, ...raw.config };
+    }
+    if (raw.deletedRegistry) {
+      if (Array.isArray(raw.deletedRegistry.persons)) {
+        raw.deletedRegistry.persons.forEach((id: string) => this.deletedRegistry.persons.add(id));
+      }
+      if (Array.isArray(raw.deletedRegistry.subscriptions)) {
+        raw.deletedRegistry.subscriptions.forEach((id: string) =>
+          this.deletedRegistry.subscriptions.add(id)
+        );
+      }
+      if (Array.isArray(raw.deletedRegistry.pdfs)) {
+        raw.deletedRegistry.pdfs.forEach((id: string) => this.deletedRegistry.pdfs.add(id));
+      }
+      if (Array.isArray(raw.deletedRegistry.credentials)) {
+        raw.deletedRegistry.credentials.forEach((id: string) =>
+          this.deletedRegistry.credentials.add(id)
+        );
+      }
+    }
+    if (Array.isArray(raw.plans)) {
+      for (const p of raw.plans) if (p?.planId) this.plans.set(p.planId, p);
+    }
+    if (Array.isArray(raw.subscriptions)) {
+      for (const s of raw.subscriptions) if (s?.avatarId) this.subscriptions.set(s.avatarId, s);
+    }
+    if (Array.isArray(raw.persons)) {
+      for (const p of raw.persons) if (p?.personId) this.persons.set(p.personId, p);
+    }
+    if (Array.isArray(raw.compilationPdfs)) {
+      for (const pdf of raw.compilationPdfs) if (pdf?.pdfId) this.compilationPdfs.set(pdf.pdfId, pdf);
+    }
+    if (Array.isArray(raw.testimonies)) {
+      for (const t of raw.testimonies) if (t?.testimonyId) this.testimonies.set(t.testimonyId, t);
+    }
+    if (Array.isArray(raw.relations)) {
+      for (const r of raw.relations) if (r?.relatedPersonId) this.relations.set(r.relatedPersonId, r);
+    }
+    if (Array.isArray(raw.interlocutors)) {
+      for (const i of raw.interlocutors) if (i?.interlocutorId) this.interlocutors.set(i.interlocutorId, i);
+    }
+    if (Array.isArray(raw.credentials)) {
+      for (const c of raw.credentials) if (c?.accessCredentialId) this.credentials.set(c.accessCredentialId, c);
+    }
+    if (Array.isArray(raw.memories)) {
+      for (const m of raw.memories) if (m?.memoryId) this.memories.set(m.memoryId, m);
+    }
+    if (Array.isArray(raw.contradictions)) {
+      for (const c of raw.contradictions) if (c?.contradictionId) this.contradictions.set(c.contradictionId, c);
+    }
+    if (Array.isArray(raw.payments)) {
+      for (const p of raw.payments) if (p?.paymentId) this.payments.set(p.paymentId, p);
+    }
+    if (Array.isArray(raw.coupons)) {
+      for (const c of raw.coupons) if (c?.couponId) this.coupons.set(c.couponId, c);
+    }
+    if (Array.isArray(raw.snapshots)) {
+      for (const s of raw.snapshots) if (s?.snapshotId) this.snapshots.set(s.snapshotId, s);
+    }
+    if (Array.isArray(raw.conversations)) {
+      for (const c of raw.conversations) if (c?.sessionId) this.conversations.set(c.sessionId, c);
+    }
+    if (Array.isArray(raw.notifications)) {
+      for (const n of raw.notifications) if (n?.notificationId) this.notifications.set(n.notificationId, n);
+    }
+    if (Array.isArray(raw.promptLibrary)) {
+      for (const pr of raw.promptLibrary) if (pr?.promptId) this.promptLibrary.set(pr.promptId, pr);
+    }
+    if (Array.isArray(raw.avatarPromptVersions)) {
+      for (const pv of raw.avatarPromptVersions) if (pv?.versionId) this.avatarPromptVersions.set(pv.versionId, pv);
+    }
+    if (Array.isArray(raw.fallbackLogs)) {
+      for (const fl of raw.fallbackLogs) if (fl?.logId) this.fallbackLogs.set(fl.logId, fl);
+    }
+
+    this.seedDefaultPromptLibraryIfNeeded();
+    this.applyDeletedRegistryFilters();
+    this.saveToDisk();
+
+    return {
+      personsRestored: this.persons.size,
+      subscriptionsRestored: this.subscriptions.size,
+      testimoniesRestored: this.testimonies.size,
+      conversationsRestored: this.conversations.size,
+    };
+  }
 }
 
 export const miEsenciaStore = new MiEsenciaStore();

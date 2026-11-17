@@ -41,6 +41,12 @@ import { MiEsenciaAvatarAiConfigPanel } from './MiEsenciaAvatarAiConfigPanel';
 import { MiEsenciaPromptLibraryPanel } from './MiEsenciaPromptLibraryPanel';
 import { MiEsenciaSimulatorPanel } from './MiEsenciaSimulatorPanel';
 import { SystemStatisticsPanel } from '../../components/SystemStatisticsPanel';
+import {
+  AdminProgressModal,
+  AdminProgressState,
+  INITIAL_ADMIN_PROGRESS,
+  executeWithAdminProgress,
+} from '../../components/AdminProgressModal';
 import type {
   MiEsenciaGlobalConfig,
   MiEsenciaPlanRecord,
@@ -131,6 +137,7 @@ export const MiEsenciaAdminSection: React.FC<MiEsenciaAdminSectionProps> = ({ ad
   const [activeSubTab, setActiveSubTab] = useState<MiEsenciaSubTabId>('resumen');
   const [overview, setOverview] = useState<MiEsenciaOverviewPayload | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [adminProgress, setAdminProgress] = useState<AdminProgressState>(INITIAL_ADMIN_PROGRESS);
   const [statusMessage, setStatusMessage] = useState<{ type: 'ok' | 'err'; text: string } | null>(
     null
   );
@@ -325,23 +332,35 @@ export const MiEsenciaAdminSection: React.FC<MiEsenciaAdminSectionProps> = ({ ad
   const fetchOverview = useCallback(async () => {
     setIsLoading(true);
     try {
-      const res = await fetch(
-        `/api/mi-esencia/admin/overview?admin=${encodeURIComponent(adminEmail)}`,
+      await executeWithAdminProgress(
+        setAdminProgress,
         {
-          headers: { 'x-admin-email': adminEmail },
+          kind: 'carga',
+          title: 'Cargando Módulo Mi Esencia',
+          subtitle: 'Perfiles biográficos, PDFs compilados, familiares y suscripciones',
+          initialStage: 'Consultando base de datos de Mi Esencia...',
+        },
+        async (update) => {
+          const res = await fetch(
+            `/api/mi-esencia/admin/overview?admin=${encodeURIComponent(adminEmail)}`,
+            {
+              headers: { 'x-admin-email': adminEmail },
+            }
+          );
+          update(80, 'Procesando avatares, códigos familiares y sesiones...');
+          const json = await res.json();
+          if (res.ok && json.success) {
+            const data: MiEsenciaOverviewPayload = json.data;
+            setOverview(data);
+            if (!selectedInterviewId && data.availableInterviews.length > 0) {
+              setSelectedInterviewId(data.availableInterviews[0].interviewId);
+            }
+            if (!selectedAvatarId && data.subscriptions.length > 0) {
+              setSelectedAvatarId(data.subscriptions[0].avatarId);
+            }
+          }
         }
       );
-      const json = await res.json();
-      if (res.ok && json.success) {
-        const data: MiEsenciaOverviewPayload = json.data;
-        setOverview(data);
-        if (!selectedInterviewId && data.availableInterviews.length > 0) {
-          setSelectedInterviewId(data.availableInterviews[0].interviewId);
-        }
-        if (!selectedAvatarId && data.subscriptions.length > 0) {
-          setSelectedAvatarId(data.subscriptions[0].avatarId);
-        }
-      }
     } catch (err: any) {
       showNotice('err', err?.message || 'Error al cargar datos de Mi Esencia.');
     } finally {
@@ -369,37 +388,49 @@ export const MiEsenciaAdminSection: React.FC<MiEsenciaAdminSectionProps> = ({ ad
   const handleCreateOrSyncAvatar = async () => {
     setIsCreatingAvatar(true);
     try {
-      const res = await fetch('/api/mi-esencia/admin/avatars/create-or-sync', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-admin-email': adminEmail,
+      await executeWithAdminProgress(
+        setAdminProgress,
+        {
+          kind: 'generacion',
+          title: 'Generando Avatar y Compilado Testimonial PDF',
+          subtitle: customAvatarName.trim() || selectedInterviewId || 'Mi Esencia',
+          initialStage: 'Compilando testimonios literales y archivando PDF en el servidor...',
         },
-        body: JSON.stringify({
-          interviewId: selectedInterviewId || undefined,
-          customAvatarName: customAvatarName.trim() || undefined,
-          isCoupleOverride: isCoupleModeOverride || undefined,
-          uploadedPdfFileName: uploadedPdfFileName || undefined,
-          uploadedPdfBase64: uploadedPdfBase64 || undefined,
-          uploadedCompilationText: uploadedCompilationText.trim() || undefined,
-          planId: selectedPlanIdForNew,
-          spontaneityLevel: selectedSpontaneity,
-          initialPrimaryProvider: initialPrimaryProviderForNew,
-          initialLibraryPromptIdForGemini: initialLibraryPromptForGemini || undefined,
-          initialLibraryPromptIdForOpenAi: initialLibraryPromptForOpenAi || undefined,
-        }),
-      });
-      const json = await res.json();
-      if (!res.ok || !json.success) {
-        showNotice('err', json.error || 'No se pudo crear o sincronizar el avatar.');
-        return;
-      }
-      showNotice(
-        'ok',
-        `Avatar «${json.data.subscription.avatarDisplayName}» generado y PDF Compilado Testimonial Fidedigno archivado (${json.data.testimoniesCount} testimonios literales).`
+        async (update) => {
+          const res = await fetch('/api/mi-esencia/admin/avatars/create-or-sync', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-admin-email': adminEmail,
+            },
+            body: JSON.stringify({
+              interviewId: selectedInterviewId || undefined,
+              customAvatarName: customAvatarName.trim() || undefined,
+              isCoupleOverride: isCoupleModeOverride || undefined,
+              uploadedPdfFileName: uploadedPdfFileName || undefined,
+              uploadedPdfBase64: uploadedPdfBase64 || undefined,
+              uploadedCompilationText: uploadedCompilationText.trim() || undefined,
+              planId: selectedPlanIdForNew,
+              spontaneityLevel: selectedSpontaneity,
+              initialPrimaryProvider: initialPrimaryProviderForNew,
+              initialLibraryPromptIdForGemini: initialLibraryPromptForGemini || undefined,
+              initialLibraryPromptIdForOpenAi: initialLibraryPromptForOpenAi || undefined,
+            }),
+          });
+          update(85, 'Sincronizando perfil biográfico y motor IA...');
+          const json = await res.json();
+          if (!res.ok || !json.success) {
+            showNotice('err', json.error || 'No se pudo crear o sincronizar el avatar.');
+            return;
+          }
+          showNotice(
+            'ok',
+            `Avatar «${json.data.subscription.avatarDisplayName}» generado y PDF Compilado Testimonial Fidedigno archivado (${json.data.testimoniesCount} testimonios literales).`
+          );
+          setSelectedAvatarId(json.data.subscription.avatarId);
+          await fetchOverview();
+        }
       );
-      setSelectedAvatarId(json.data.subscription.avatarId);
-      await fetchOverview();
     } catch (err: any) {
       showNotice('err', err?.message || 'Error al crear avatar.');
     } finally {
@@ -409,36 +440,48 @@ export const MiEsenciaAdminSection: React.FC<MiEsenciaAdminSectionProps> = ({ ad
 
   const handleDownloadArchivedPdf = async (pdfId: string, fallbackFileName: string) => {
     try {
-      const res = await fetch(
-        `/api/mi-esencia/admin/pdfs/${encodeURIComponent(pdfId)}/download?admin=${encodeURIComponent(
-          adminEmail
-        )}`,
+      await executeWithAdminProgress(
+        setAdminProgress,
         {
-          headers: { 'x-admin-email': adminEmail },
+          kind: 'generacion',
+          title: 'Generando y Descargando Compilado Testimonial PDF',
+          subtitle: fallbackFileName || pdfId,
+          initialStage: 'Recuperando documento PDF archivado del servidor...',
+        },
+        async (update) => {
+          const res = await fetch(
+            `/api/mi-esencia/admin/pdfs/${encodeURIComponent(pdfId)}/download?admin=${encodeURIComponent(
+              adminEmail
+            )}`,
+            {
+              headers: { 'x-admin-email': adminEmail },
+            }
+          );
+          update(75, 'Preparando archivo PDF para descarga...');
+          const json = await res.json();
+          if (!res.ok || !json.success || !json.data?.pdfBase64) {
+            showNotice('err', json.error || 'No se pudo descargar el PDF del Compilado Testimonial.');
+            return;
+          }
+
+          const byteCharacters = atob(json.data.pdfBase64);
+          const byteNumbers = new Array(byteCharacters.length);
+          for (let i = 0; i < byteCharacters.length; i++) {
+            byteNumbers[i] = byteCharacters.charCodeAt(i);
+          }
+          const byteArray = new Uint8Array(byteNumbers);
+          const blob = new Blob([byteArray], { type: 'application/pdf' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = json.data.fileName || fallbackFileName || 'Compilado_Testimonial_Fidedigno.pdf';
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+          showNotice('ok', 'PDF del Compilado Testimonial Fidedigno descargado correctamente.');
         }
       );
-      const json = await res.json();
-      if (!res.ok || !json.success || !json.data?.pdfBase64) {
-        showNotice('err', json.error || 'No se pudo descargar el PDF del Compilado Testimonial.');
-        return;
-      }
-
-      const byteCharacters = atob(json.data.pdfBase64);
-      const byteNumbers = new Array(byteCharacters.length);
-      for (let i = 0; i < byteCharacters.length; i++) {
-        byteNumbers[i] = byteCharacters.charCodeAt(i);
-      }
-      const byteArray = new Uint8Array(byteNumbers);
-      const blob = new Blob([byteArray], { type: 'application/pdf' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = json.data.fileName || fallbackFileName || 'Compilado_Testimonial_Fidedigno.pdf';
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      showNotice('ok', 'PDF del Compilado Testimonial Fidedigno descargado correctamente.');
     } catch (err: any) {
       showNotice('err', err?.message || 'Error al descargar PDF.');
     }
@@ -1083,6 +1126,7 @@ export const MiEsenciaAdminSection: React.FC<MiEsenciaAdminSectionProps> = ({ ad
 
   return (
     <div className="space-y-6">
+      <AdminProgressModal state={adminProgress} />
       {/* Modal de Advertencia y Confirmación antes de borrar definitivamente un Perfil Biográfico y su PDF */}
       {pendingDeletePerson && (
         <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">

@@ -1098,6 +1098,30 @@ apiRouter.post('/interviews/:id/manuscript', requireAdmin, async (req: Request, 
   }
 });
 
+// Start or attach to an async admin manuscript compilation job with progress polling
+apiRouter.post('/admin/interviews/:id/manuscript-job', requireAdmin, (req: Request, res: Response) => {
+  try {
+    const admin = (req as any).adminUser as string;
+    const job = storage.startAdminManuscriptJob(req.params.id, admin);
+    res.json({ success: true, data: job });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
+apiRouter.get('/admin/manuscript-jobs/:jobId', requireAdmin, (req: Request, res: Response) => {
+  try {
+    const job = storage.getAdminManuscriptJob(req.params.jobId);
+    if (!job) {
+      res.status(404).json({ success: false, error: 'Proceso de compilación no encontrado.' });
+      return;
+    }
+    res.json({ success: true, data: job });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
 apiRouter.get('/interviews/:id/manuscripts', requireAdmin, (req: Request, res: Response) => {
   try {
     const manuscripts = storage.getManuscriptsForInterview(req.params.id);
@@ -1122,6 +1146,131 @@ apiRouter.delete('/manuscripts/:id', requireAdmin, async (req: Request, res: Res
     const admin = (req as any).adminUser as string;
     const result = await storage.deleteManuscript(req.params.id, admin);
     res.json({ success: true, data: result });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
+// Batch delete selected PDF book versions
+apiRouter.post('/admin/book-versions/batch-delete', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const admin = (req as any).adminUser as string;
+    const versionIds = Array.isArray(req.body?.versionIds) ? req.body.versionIds : [];
+    const restoreQuota = Boolean(req.body?.restoreQuota);
+    if (versionIds.length === 0) {
+      res.status(400).json({ success: false, error: 'Selecciona al menos una versión de libro en PDF.' });
+      return;
+    }
+    const result = await storage.deleteParticipantBookVersionsBatch(versionIds, restoreQuota, admin);
+    res.json({
+      success: true,
+      message: `Se eliminaron permanentemente ${result.deletedCount} versión(es) de libro en PDF.`,
+      data: result,
+    });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
+// Batch delete selected text manuscripts
+apiRouter.post('/admin/manuscripts/batch-delete', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const admin = (req as any).adminUser as string;
+    const manuscriptIds = Array.isArray(req.body?.manuscriptIds) ? req.body.manuscriptIds : [];
+    if (manuscriptIds.length === 0) {
+      res.status(400).json({ success: false, error: 'Selecciona al menos un manuscrito para eliminar.' });
+      return;
+    }
+    const result = await storage.deleteManuscriptsBatch(manuscriptIds, admin);
+    res.json({
+      success: true,
+      message: `Se eliminaron permanentemente ${result.deletedCount} manuscrito(s).`,
+      data: result,
+    });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
+// Full Database Backups Management (Configuración Global)
+apiRouter.get('/admin/backups', requireAdmin, (_req: Request, res: Response) => {
+  try {
+    const backups = storage.listDatabaseBackups();
+    res.json({ success: true, data: backups });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
+apiRouter.post('/admin/backups', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const admin = (req as any).adminUser as string;
+    const label = typeof req.body?.label === 'string' ? req.body.label : undefined;
+    const backup = await storage.createDatabaseBackup(label, admin);
+    res.json({
+      success: true,
+      message: 'Respaldo completo de la base de datos creado exitosamente.',
+      data: backup,
+    });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
+apiRouter.get('/admin/backups/:id/download', requireAdmin, (req: Request, res: Response) => {
+  try {
+    const payload = storage.getDatabaseBackupPayload(req.params.id);
+    const serialized = JSON.stringify(payload, null, 2);
+    const safeName = `YouForever_Respaldo_BDD_${req.params.id}.json`;
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${safeName}"`);
+    res.send(serialized);
+  } catch (err: unknown) {
+    res.status(404).json({ success: false, error: (err as Error).message });
+  }
+});
+
+apiRouter.post('/admin/backups/:id/restore', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const admin = (req as any).adminUser as string;
+    const result = await storage.restoreDatabaseBackup(req.params.id, admin);
+    res.json({
+      success: true,
+      message: 'La base de datos ha sido restaurada exitosamente a partir del respaldo seleccionado.',
+      data: result,
+    });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
+apiRouter.post('/admin/backups/import', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const admin = (req as any).adminUser as string;
+    const payload = req.body?.payload || req.body?.backup;
+    const restoreImmediately = Boolean(req.body?.restoreImmediately);
+    const result = await storage.importDatabaseBackupPayload(payload, restoreImmediately, admin);
+    res.json({
+      success: true,
+      message: restoreImmediately
+        ? 'Archivo de respaldo cargado y restaurado exitosamente en la base de datos.'
+        : 'Archivo de respaldo importado y guardado en la lista del servidor.',
+      data: result,
+    });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
+apiRouter.delete('/admin/backups/:id', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const admin = (req as any).adminUser as string;
+    const result = await storage.deleteDatabaseBackup(req.params.id, admin);
+    res.json({
+      success: true,
+      message: 'Respaldo eliminado del servidor.',
+      data: result,
+    });
   } catch (err: unknown) {
     res.status(400).json({ success: false, error: (err as Error).message });
   }

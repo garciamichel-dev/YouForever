@@ -52,6 +52,12 @@ import {
 } from '../logic/demoStoryRules.ts';
 import { generateRealDemoBookPdf, preloadBookResourcesForPdf } from '../utils/demoPdfGenerator.ts';
 import { apiFetch } from '../utils/apiClient.ts';
+import {
+  AdminProgressModal,
+  AdminProgressState,
+  INITIAL_ADMIN_PROGRESS,
+  executeWithAdminProgress,
+} from './AdminProgressModal.tsx';
 
 
 interface EnrichedInterview extends InterviewRecord {
@@ -121,6 +127,7 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
   const [compilingId, setCompilingId] = useState<string | null>(null);
   const [downloadingZipId, setDownloadingZipId] = useState<string | null>(null);
   const [noticeMessage, setNoticeMessage] = useState<string | null>(null);
+  const [adminProgress, setAdminProgress] = useState<AdminProgressState>(INITIAL_ADMIN_PROGRESS);
 
   // New Interview Form
   const [newTitle, setNewTitle] = useState('');
@@ -239,89 +246,31 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
 
       if (resInterviews.ok && resInterviews.data) {
         let finalList = resInterviews.data;
-        try {
-          const cachedRaw = localStorage.getItem('foreveryou_interviews_cache');
-          const cachedBvRaw = localStorage.getItem('foreveryou_book_versions_cache');
-          const deletedBvRaw = localStorage.getItem('foreveryou_deleted_book_version_ids');
-          const cachedList: EnrichedInterview[] = cachedRaw ? JSON.parse(cachedRaw) : [];
-          const cachedBvList: ParticipantBookVersionRecord[] = cachedBvRaw ? JSON.parse(cachedBvRaw) : [];
-          const deletedBvSet = new Set<string>(deletedBvRaw ? JSON.parse(deletedBvRaw) : []);
-
-          const serverMap = new Map(finalList.map((i) => [i.id, i]));
-          const serverBvIds = new Set(
-            finalList.flatMap((i) => (i.bookVersions || []).map((bv) => bv.id))
-          );
-
-          const interviewsToSync = Array.isArray(cachedList)
-            ? cachedList
-                .map((c): EnrichedInterview | null => {
-                  if (!c || !c.id) return null;
-                  const cleanVers = Array.isArray(c.bookVersions)
-                    ? c.bookVersions.filter(
-                        (bv) =>
-                          bv &&
-                          bv.id &&
-                          !deletedBvSet.has(bv.id) &&
-                          !deletedBvSet.has(`pbv_${c.id}_v${bv.versionNumber}`)
-                      )
-                    : [];
-                  return {
-                    ...c,
-                    bookVersions: cleanVers,
-                    bookVersionsCount: cleanVers.length,
-                  };
-                })
-                .filter((c): c is EnrichedInterview => {
-                  if (!c || !c.id) return false;
-                  const s = serverMap.get(c.id);
-                  if (!s) return true;
-                  if (c.userDeclaredComplete && !s.userDeclaredComplete) {
-                    const serverReopenedTime = s.reopenedAt ? new Date(s.reopenedAt).getTime() : 0;
-                    const cachedClosedTime = c.closedAt ? new Date(c.closedAt).getTime() : 0;
-                    if (s.status === 'open' && (serverReopenedTime >= cachedClosedTime || !s.closedAt)) {
-                      return false;
-                    }
-                    return true;
-                  }
-                  const hasDeletedForInterview = Array.from(deletedBvSet).some((id) =>
-                    id.includes(c.id)
-                  );
-                  if (!hasDeletedForInterview) {
-                    if ((c.bookVersions?.length ?? 0) > (s.bookVersions?.length ?? 0)) return true;
-                  }
-                  return false;
-                })
-            : [];
-
-          const bookVersionsToSync = Array.isArray(cachedBvList)
-            ? cachedBvList.filter(
-                (bv) =>
-                  bv &&
-                  bv.id &&
-                  !serverBvIds.has(bv.id) &&
-                  !deletedBvSet.has(bv.id) &&
-                  !deletedBvSet.has(`pbv_${bv.interviewId}_v${bv.versionNumber}`)
-              )
-            : [];
-
-          if (interviewsToSync.length > 0 || bookVersionsToSync.length > 0) {
-            const syncRes = await apiFetch<EnrichedInterview[]>('/api/interviews/restore-cache', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
-              },
-              body: JSON.stringify({
-                interviews: interviewsToSync,
-                bookVersions: bookVersionsToSync,
-              }),
-            });
-            if (syncRes.ok && syncRes.data) {
-              finalList = syncRes.data;
+        // Only recover interviews from localStorage if server returned 0 interviews on an empty cold start;
+        // never re-inject deleted bookVersions from browser localStorage into server state.
+        if (finalList.length === 0) {
+          try {
+            const cachedRaw = localStorage.getItem('foreveryou_interviews_cache');
+            const cachedList: EnrichedInterview[] = cachedRaw ? JSON.parse(cachedRaw) : [];
+            if (Array.isArray(cachedList) && cachedList.length > 0) {
+              const syncRes = await apiFetch<EnrichedInterview[]>('/api/interviews/restore-cache', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
+                },
+                body: JSON.stringify({
+                  interviews: cachedList.map((c) => ({ ...c, bookVersions: [] })),
+                  bookVersions: [],
+                }),
+              });
+              if (syncRes.ok && syncRes.data) {
+                finalList = syncRes.data;
+              }
             }
+          } catch {
+            // Ignore localStorage error
           }
-        } catch {
-          // Ignore localStorage error
         }
         const orderedFinalList = sortInterviewsWithCopies(finalList);
         try {
@@ -605,35 +554,46 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
     setBookStudioAdminTarget(inv);
 
     try {
-      const res = await fetch(`/api/interviews/${inv.id}/book-versions`, {
-        headers: {
-          'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
+      await executeWithAdminProgress({
+        setProgress: setAdminProgress,
+        mode: 'loading',
+        title: `Cargando libros PDF de «${inv.title}»`,
+        stages: [
+          { atPercent: 15, label: 'Consultando versiones de libro en PDF guardadas...' },
+          { atPercent: 60, label: 'Verificando maquetación, portadas y cuotas de edición...' },
+        ],
+        task: async () => {
+          const res = await fetch(`/api/interviews/${inv.id}/book-versions`, {
+            headers: {
+              'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
+            },
+          });
+          const data = await res.json();
+          if (data.success && Array.isArray(data.data)) {
+            const fetchedVersions: ParticipantBookVersionRecord[] = data.data;
+            setBookStudioAdminTarget((prev) =>
+              prev && prev.id === inv.id
+                ? {
+                    ...prev,
+                    bookVersions: fetchedVersions,
+                    bookVersionsCount: fetchedVersions.length,
+                  }
+                : prev
+            );
+            setInterviews((prevList) =>
+              prevList.map((item) =>
+                item.id === inv.id
+                  ? {
+                      ...item,
+                      bookVersions: fetchedVersions,
+                      bookVersionsCount: fetchedVersions.length,
+                    }
+                  : item
+              )
+            );
+          }
         },
       });
-      const data = await res.json();
-      if (data.success && Array.isArray(data.data)) {
-        const fetchedVersions: ParticipantBookVersionRecord[] = data.data;
-        setBookStudioAdminTarget((prev) =>
-          prev && prev.id === inv.id
-            ? {
-                ...prev,
-                bookVersions: fetchedVersions,
-                bookVersionsCount: fetchedVersions.length,
-              }
-            : prev
-        );
-        setInterviews((prevList) =>
-          prevList.map((item) =>
-            item.id === inv.id
-              ? {
-                  ...item,
-                  bookVersions: fetchedVersions,
-                  bookVersionsCount: fetchedVersions.length,
-                }
-              : item
-          )
-        );
-      }
     } catch (_err) {
       // Ignore network errors; fallback to inv.bookVersions
     }
@@ -645,36 +605,50 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
   ) => {
     try {
       setDownloadingPdfVersionId(ver.id);
-      const composed = composeBookPages({
-        manuscript: ver.manuscript,
-        editorialConfig: ver.editorialConfig,
-        coverPhoto: ver.coverPhoto || null,
-        chapterPhotos: ver.chapterPhotos || {},
-        customClosingPageText: ver.closingPageText || inv.participantClosingText || undefined,
-        maxContentPages: 500,
-      });
+      await executeWithAdminProgress({
+        setProgress: setAdminProgress,
+        mode: 'generation',
+        title: `Generando PDF v${ver.versionNumber}: ${ver.title || inv.title}`,
+        stages: [
+          { atPercent: 12, label: 'Componiendo páginas editoriales y capítulos del libro...' },
+          { atPercent: 45, label: 'Cargando recursos tipográficos y fotografías de alta resolución...' },
+          { atPercent: 78, label: 'Renderizando documento PDF listo para impresión y descarga...' },
+        ],
+        task: async (updateStage) => {
+          const composed = composeBookPages({
+            manuscript: ver.manuscript,
+            editorialConfig: ver.editorialConfig,
+            coverPhoto: ver.coverPhoto || null,
+            chapterPhotos: ver.chapterPhotos || {},
+            customClosingPageText: ver.closingPageText || inv.participantClosingText || undefined,
+            maxContentPages: 500,
+          });
 
-      await preloadBookResourcesForPdf(composed);
+          updateStage(50, 'Precargando fotografías e ilustraciones del libro...');
+          await preloadBookResourcesForPdf(composed);
 
-      const { blobUrl } = generateRealDemoBookPdf({
-        composed,
-        profile: {
-          mode: ver.manuscript.mode,
-          fullName: ver.authors || ver.participantName || inv.title,
-          displayName: ver.authors || ver.participantName || inv.title,
-          partner1Name: ver.participantName || '',
-          partner2Name: '',
-          hasAcceptedTemporaryNotice: true,
+          updateStage(82, 'Generando archivo PDF final...');
+          const { blobUrl } = generateRealDemoBookPdf({
+            composed,
+            profile: {
+              mode: ver.manuscript.mode,
+              fullName: ver.authors || ver.participantName || inv.title,
+              displayName: ver.authors || ver.participantName || inv.title,
+              partner1Name: ver.participantName || '',
+              partner2Name: '',
+              hasAcceptedTemporaryNotice: true,
+            },
+          });
+
+          const link = document.createElement('a');
+          link.href = blobUrl;
+          link.download = ver.fileName || `YouForever_${inv.id}_v${ver.versionNumber}.pdf`;
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
         },
       });
-
-      const link = document.createElement('a');
-      link.href = blobUrl;
-      link.download = ver.fileName || `YouForever_${inv.id}_v${ver.versionNumber}.pdf`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
     } catch (err) {
       console.error('Error downloading participant PDF version:', err);
     } finally {
@@ -685,23 +659,35 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
   const handleSeedTestStories = async () => {
     try {
       setSeedingStories(true);
-      const res = await fetch('/api/interviews/seed-test-stories', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
+      await executeWithAdminProgress({
+        setProgress: setAdminProgress,
+        mode: 'loading',
+        title: 'Cargando Historias de Prueba Completas',
+        stages: [
+          { atPercent: 15, label: 'Sembrando entrevistas individuales y compartidas...' },
+          { atPercent: 55, label: 'Registrando respuestas, audios y fotografías de prueba...' },
+          { atPercent: 85, label: 'Actualizando listado de entrevistas...' },
+        ],
+        task: async () => {
+          const res = await fetch('/api/interviews/seed-test-stories', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
+            },
+          });
+          const data = await res.json();
+          if (data.success) {
+            await fetchInterviews();
+            setNoticeMessage(
+              `¡Éxito! Se sembraron 7 historias completas de prueba con al menos 100 respuestas por cada miembro participante (umbral operativo 100) y listas para maquetación.`
+            );
+            setTimeout(() => setNoticeMessage(null), 7000);
+          } else {
+            setNoticeMessage(data.error || 'Error al sembrar historias de prueba.');
+          }
         },
       });
-      const data = await res.json();
-      if (data.success) {
-        await fetchInterviews();
-        setNoticeMessage(
-          `¡Éxito! Se sembraron 7 historias completas de prueba con al menos 100 respuestas por cada miembro participante (umbral operativo 100) y listas para maquetación.`
-        );
-        setTimeout(() => setNoticeMessage(null), 7000);
-      } else {
-        setNoticeMessage(data.error || 'Error al sembrar historias de prueba.');
-      }
     } catch (_err) {
       setNoticeMessage('Error de conexión al sembrar historias de prueba.');
     } finally {
@@ -885,21 +871,35 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
   };
 
   const handleEvaluateSufficiency = async (interviewId: string) => {
+    const targetInv = interviews.find((i) => i.id === interviewId);
     try {
       setEvaluatingId(interviewId);
-      const res = await fetch(`/api/interviews/${interviewId}/evaluate`, {
-        method: 'POST',
-        headers: {
-          'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
+      await executeWithAdminProgress({
+        setProgress: setAdminProgress,
+        mode: 'generation',
+        title: `Evaluando Cobertura Testimonial`,
+        detail: targetInv?.title,
+        stages: [
+          { atPercent: 15, label: 'Recopilando respuestas y etapas biográficas cubiertas...' },
+          { atPercent: 55, label: 'Analizando riqueza narrativa y suficiencia documental...' },
+          { atPercent: 85, label: 'Guardando dictamen de evaluación...' },
+        ],
+        task: async () => {
+          const res = await fetch(`/api/interviews/${interviewId}/evaluate`, {
+            method: 'POST',
+            headers: {
+              'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
+            },
+          });
+          const data = await res.json();
+          if (data.success) {
+            await fetchInterviews();
+            setNoticeMessage(
+              `Evaluación de suficiencia completada: ${data.data.sufficiencyStatus}. ${data.data.rationale}`
+            );
+          }
         },
       });
-      const data = await res.json();
-      if (data.success) {
-        fetchInterviews();
-        setNoticeMessage(
-          `Evaluación de suficiencia completada: ${data.data.sufficiencyStatus}. ${data.data.rationale}`
-        );
-      }
     } catch (err) {
       console.error(err);
     } finally {
@@ -908,48 +908,151 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
   };
 
   const handleCompileManuscript = async (interviewId: string) => {
+    const targetInv = interviews.find((i) => i.id === interviewId);
+    const invTitle = targetInv?.title || interviewId;
     try {
       setCompilingId(interviewId);
-      const res = await fetch(`/api/interviews/${interviewId}/manuscript`, {
+      setAdminProgress({
+        open: true,
+        mode: 'generation',
+        title: `Generando Manuscrito: «${invTitle}»`,
+        stage: 'Iniciando compilador literario y verificando testimonios...',
+        percent: 6,
+        detail: `Entrevista: ${invTitle}`,
+      });
+
+      const startRes = await fetch(`/api/admin/interviews/${encodeURIComponent(interviewId)}/manuscript-job`, {
         method: 'POST',
         headers: {
+          'Content-Type': 'application/json',
           'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
         },
       });
-      const data = await res.json();
-      if (data.success) {
+      const startJson = await startRes.json().catch(() => null);
+
+      if (!startRes.ok || !startJson?.success || !startJson?.data?.jobId) {
+        // Fallback to direct endpoint if job route unavailable
+        setAdminProgress((prev) => ({
+          ...prev,
+          percent: 45,
+          stage: 'Compilando capítulos biográficos a partir de las respuestas...',
+        }));
+        const directRes = await fetch(`/api/interviews/${encodeURIComponent(interviewId)}/manuscript`, {
+          method: 'POST',
+          headers: {
+            'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
+          },
+        });
+        const directData = await directRes.json();
+        if (!directData?.success) {
+          throw new Error(directData?.error || 'No se pudo compilar el manuscrito.');
+        }
+        setAdminProgress((prev) => ({
+          ...prev,
+          percent: 100,
+          stage: 'Manuscrito compilado exitosamente (100%)',
+        }));
+        await new Promise((r) => setTimeout(r, 260));
+        setAdminProgress(INITIAL_ADMIN_PROGRESS);
+        await fetchInterviews();
         onOpenManuscript(interviewId);
+        return;
       }
-    } catch (err) {
+
+      const jobId: string = startJson.data.jobId;
+      let currentPct = Math.max(8, Number(startJson.data.percent) || 10);
+      setAdminProgress((prev) => ({
+        ...prev,
+        percent: currentPct,
+        stage: startJson.data.stage || 'Analizando respuestas y fotografías...',
+      }));
+
+      const maxWaitMs = 60_000;
+      const pollStartedMs = Date.now();
+      while (Date.now() - pollStartedMs < maxWaitMs) {
+        await new Promise((r) => setTimeout(r, 550));
+        const pollRes = await fetch(`/api/admin/manuscript-jobs/${encodeURIComponent(jobId)}`, {
+          headers: {
+            'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
+          },
+        });
+        const pollJson = await pollRes.json().catch(() => null);
+        const job = pollJson?.data;
+        if (!job) continue;
+
+        if (job.status === 'completed') {
+          setAdminProgress((prev) => ({
+            ...prev,
+            percent: 100,
+            stage: 'Manuscrito generado y verificado (100%)',
+          }));
+          await new Promise((r) => setTimeout(r, 260));
+          setAdminProgress(INITIAL_ADMIN_PROGRESS);
+          await fetchInterviews();
+          onOpenManuscript(interviewId);
+          return;
+        }
+
+        if (job.status === 'failed') {
+          throw new Error(job.error || 'Error al generar el manuscrito.');
+        }
+
+        currentPct = Math.min(96, Math.max(currentPct + 3, Number(job.percent) || currentPct));
+        setAdminProgress((prev) => ({
+          ...prev,
+          percent: currentPct,
+          stage: job.stage || prev.stage,
+        }));
+      }
+
+      throw new Error('Tiempo de espera agotado al compilar el manuscrito. Inténtalo de nuevo.');
+    } catch (err: any) {
       console.error(err);
+      setAdminProgress(INITIAL_ADMIN_PROGRESS);
+      setNoticeMessage(err?.message || 'Error al compilar el manuscrito.');
+      setTimeout(() => setNoticeMessage(null), 5000);
     } finally {
       setCompilingId(null);
     }
   };
 
   const handleDownloadBackupZip = async (interviewId: string) => {
+    const targetInv = interviews.find((i) => i.id === interviewId);
     try {
       setDownloadingZipId(interviewId);
-      const res = await fetch(`/api/interviews/${interviewId}/backup/zip`, {
-        headers: {
-          'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
+      await executeWithAdminProgress({
+        setProgress: setAdminProgress,
+        mode: 'generation',
+        title: `Generando Respaldo Integral (ZIP)`,
+        detail: targetInv?.title || interviewId,
+        stages: [
+          { atPercent: 15, label: 'Recopilando respuestas, transcripciones y metadatos...' },
+          { atPercent: 45, label: 'Empaquetando fotografías, grabaciones de voz y manuscritos...' },
+          { atPercent: 80, label: 'Comprimiendo archivo ZIP para descarga directa...' },
+        ],
+        task: async () => {
+          const res = await fetch(`/api/interviews/${interviewId}/backup/zip`, {
+            headers: {
+              'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
+            },
+          });
+          if (!res.ok) throw new Error('Error al generar el respaldo ZIP');
+          const blob = await res.blob();
+          const url = URL.createObjectURL(blob);
+          const link = document.createElement('a');
+          link.href = url;
+          const contentDisposition = res.headers.get('content-disposition');
+          let filename = `respaldo_legado_${interviewId}.zip`;
+          if (contentDisposition && contentDisposition.includes('filename="')) {
+            filename = contentDisposition.split('filename="')[1].split('"')[0];
+          }
+          link.setAttribute('download', filename);
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          URL.revokeObjectURL(url);
         },
       });
-      if (!res.ok) throw new Error('Error al generar el respaldo ZIP');
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      const contentDisposition = res.headers.get('content-disposition');
-      let filename = `respaldo_legado_${interviewId}.zip`;
-      if (contentDisposition && contentDisposition.includes('filename="')) {
-        filename = contentDisposition.split('filename="')[1].split('"')[0];
-      }
-      link.setAttribute('download', filename);
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(url);
     } catch (err) {
       console.error('Error downloading backup zip:', err);
       setNoticeMessage('No se pudo descargar el archivo de respaldo ZIP.');
@@ -1169,41 +1272,53 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
   const handleSyncFirestore = async () => {
     try {
       setSyncingFirestore(true);
-      const res = await fetch('/api/interviews/sync-firestore', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
+      await executeWithAdminProgress({
+        setProgress: setAdminProgress,
+        mode: 'loading',
+        title: 'Sincronizando con Cloud Firestore',
+        stages: [
+          { atPercent: 18, label: 'Conectando con Cloud Firestore y consultando cambios...' },
+          { atPercent: 58, label: 'Descargando entrevistas, respuestas y versiones de libros...' },
+          { atPercent: 85, label: 'Actualizando listado en el Panel Administrador...' },
+        ],
+        task: async () => {
+          const res = await fetch('/api/interviews/sync-firestore', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-admin-user': adminEmail || 'garcia.michel@gmail.com',
+            },
+          });
+          const json = await res.json();
+          if (json?.syncResult?.status) {
+            setFirestoreSyncStatus(json.syncResult.status);
+          }
+          if (json?.success && Array.isArray(json.data)) {
+            const ordered = sortInterviewsWithCopies<EnrichedInterview>(json.data as EnrichedInterview[]);
+            setInterviews(ordered);
+            lastFetchTimestampRef.current = Date.now();
+            setLastUpdatedLabel(
+              new Date().toLocaleTimeString('es-MX', {
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+              })
+            );
+            try {
+              localStorage.setItem('foreveryou_interviews_cache', JSON.stringify(ordered));
+            } catch {
+              // ignore
+            }
+            setNoticeMessage(
+              json.syncResult?.message ||
+                'Sincronización con Cloud Firestore completada sin sobrescribir registros.'
+            );
+            setTimeout(() => setNoticeMessage(null), 6000);
+          } else {
+            setNoticeMessage(json?.error || 'No se pudo completar la sincronización con Firestore.');
+          }
         },
       });
-      const json = await res.json();
-      if (json?.syncResult?.status) {
-        setFirestoreSyncStatus(json.syncResult.status);
-      }
-      if (json?.success && Array.isArray(json.data)) {
-        const ordered = sortInterviewsWithCopies<EnrichedInterview>(json.data as EnrichedInterview[]);
-        setInterviews(ordered);
-        lastFetchTimestampRef.current = Date.now();
-        setLastUpdatedLabel(
-          new Date().toLocaleTimeString('es-MX', {
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit',
-          })
-        );
-        try {
-          localStorage.setItem('foreveryou_interviews_cache', JSON.stringify(ordered));
-        } catch {
-          // ignore
-        }
-        setNoticeMessage(
-          json.syncResult?.message ||
-            'Sincronización con Cloud Firestore completada sin sobrescribir registros.'
-        );
-        setTimeout(() => setNoticeMessage(null), 6000);
-      } else {
-        setNoticeMessage(json?.error || 'No se pudo completar la sincronización con Firestore.');
-      }
     } catch (_err) {
       setNoticeMessage('Error de red al sincronizar con Cloud Firestore.');
     } finally {
@@ -1403,6 +1518,7 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
 
   return (
     <div className="space-y-6">
+      <AdminProgressModal progress={adminProgress} />
       {/* Header */}
       <div className="bg-white p-6 rounded-xl border border-stone-200 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>

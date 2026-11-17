@@ -496,6 +496,21 @@ export class StorageManager {
   private arcoRequests: Map<string, ArcoRequestRecord> = new Map();
   private participantBookVersions: Map<string, ParticipantBookVersionRecord> = new Map();
   private deletedBookVersionIds: Set<string> = new Set();
+  private deletedManuscriptIds: Set<string> = new Set();
+  private adminManuscriptJobs: Map<
+    string,
+    {
+      jobId: string;
+      interviewId: string;
+      status: 'running' | 'completed' | 'failed';
+      percent: number;
+      stage: string;
+      manuscript?: ManuscriptRecord;
+      error?: string;
+      startedAt: string;
+      updatedAt: string;
+    }
+  > = new Map();
 
   private initialized = false;
   private initPromise: Promise<void> | null = null;
@@ -660,6 +675,7 @@ export class StorageManager {
         arcoRequests: Array.from(this.arcoRequests.values()),
         participantBookVersions: Array.from(this.participantBookVersions.values()),
         deletedBookVersionIds: Array.from(this.deletedBookVersionIds),
+        deletedManuscriptIds: Array.from(this.deletedManuscriptIds),
         syncWatermarks: this.syncWatermarks,
         bookDeliveryAuthorizations: Array.from(this.bookDeliveryAuthorizations.values()),
         bookAuditReports: Array.from(this.bookAuditReports.values()),
@@ -741,9 +757,25 @@ export class StorageManager {
           if (aud && aud.id) this.audios.set(aud.id, aud);
         }
       }
+      if (Array.isArray(parsed.deletedBookVersionIds)) {
+        for (const delId of parsed.deletedBookVersionIds) {
+          if (typeof delId === 'string' && delId.trim()) {
+            this.deletedBookVersionIds.add(delId.trim());
+          }
+        }
+      }
+      if (Array.isArray(parsed.deletedManuscriptIds)) {
+        for (const delManuId of parsed.deletedManuscriptIds) {
+          if (typeof delManuId === 'string' && delManuId.trim()) {
+            this.deletedManuscriptIds.add(delManuId.trim());
+          }
+        }
+      }
       if (Array.isArray(parsed.manuscripts)) {
         for (const manu of parsed.manuscripts) {
-          if (manu && manu.id) this.manuscripts.set(manu.id, manu);
+          if (manu && manu.id && !this.deletedManuscriptIds.has(manu.id)) {
+            this.manuscripts.set(manu.id, manu);
+          }
         }
       }
       if (Array.isArray(parsed.auditLogs)) {
@@ -777,13 +809,6 @@ export class StorageManager {
       if (Array.isArray(parsed.arcoRequests)) {
         for (const ar of parsed.arcoRequests) {
           if (ar && ar.id) this.arcoRequests.set(ar.id, ar);
-        }
-      }
-      if (Array.isArray(parsed.deletedBookVersionIds)) {
-        for (const delId of parsed.deletedBookVersionIds) {
-          if (typeof delId === 'string' && delId.trim()) {
-            this.deletedBookVersionIds.add(delId.trim());
-          }
         }
       }
       if (Array.isArray(parsed.participantBookVersions)) {
@@ -2053,7 +2078,7 @@ export class StorageManager {
     if (manuscriptsSnap) {
       manuscriptsSnap.forEach((docSnap: any) => {
         const manu = docSnap.data() as ManuscriptRecord;
-        if (manu && manu.id) {
+        if (manu && manu.id && !this.deletedManuscriptIds.has(manu.id)) {
           this.manuscripts.set(manu.id, manu);
         }
       });
@@ -2168,6 +2193,8 @@ export class StorageManager {
       settingsSnap.forEach((docSnap: any) => {
         if (docSnap.id === 'appConfig') {
           this.applyConfigSnap(docSnap);
+        } else if (docSnap.id === 'deletedRegistry') {
+          this.applyDeletedRegistrySnap(docSnap);
         }
       });
     }
@@ -2307,7 +2334,7 @@ export class StorageManager {
       });
       unwrap(3)?.forEach((d: any) => {
         const m = d.data() as ManuscriptRecord;
-        if (m?.id) this.manuscripts.set(m.id, m);
+        if (m?.id && !this.deletedManuscriptIds.has(m.id)) this.manuscripts.set(m.id, m);
       });
       {
         const rawVersions: any[] = [];
@@ -2424,7 +2451,7 @@ export class StorageManager {
       });
       unwrap(3)?.forEach((d: any) => {
         const m = d.data() as ManuscriptRecord;
-        if (m?.id) this.manuscripts.set(m.id, m);
+        if (m?.id && !this.deletedManuscriptIds.has(m.id)) this.manuscripts.set(m.id, m);
       });
       {
         const rawVersions: any[] = [];
@@ -5604,10 +5631,10 @@ export class StorageManager {
     if (!interview) return;
 
     const existingBookVersions = Array.from(this.participantBookVersions.values()).filter(
-      (v) => v.interviewId === interviewId
+      (v) => v.interviewId === interviewId && !this.deletedBookVersionIds.has(v.id)
     );
     const existingManuscripts = Array.from(this.manuscripts.values())
-      .filter((m) => m.interviewId === interviewId)
+      .filter((m) => m.interviewId === interviewId && !this.deletedManuscriptIds.has(m.id))
       .sort((a, b) => a.version - b.version);
 
     const targetCount = Math.max(
@@ -5783,7 +5810,13 @@ export class StorageManager {
       this.ensureSynthesizedBookVersionsForInterview(interviewId);
     }
     return Array.from(this.participantBookVersions.values())
-      .filter((v) => v.interviewId === interviewId)
+      .filter(
+        (v) =>
+          v.interviewId === interviewId &&
+          !this.deletedBookVersionIds.has(v.id) &&
+          !this.deletedBookVersionIds.has(`pbv_${v.interviewId}_v${v.versionNumber}`) &&
+          !this.isBookVersionClearedByAdmin(v)
+      )
       .map((v) => {
         if (hydratePhotos) {
           return this.hydrateBookVersionPhotos(v);
@@ -5823,6 +5856,12 @@ export class StorageManager {
       this.ensureSynthesizedBookVersionsForInterview(interviewId);
     }
     return Array.from(this.participantBookVersions.values())
+      .filter(
+        (v) =>
+          !this.deletedBookVersionIds.has(v.id) &&
+          !this.deletedBookVersionIds.has(`pbv_${v.interviewId}_v${v.versionNumber}`) &&
+          !this.isBookVersionClearedByAdmin(v)
+      )
       .map((v) => {
         const inv = this.interviews.get(v.interviewId);
         const quota = inv ? computeLayoutEditQuotaStatus(inv) : undefined;
@@ -7046,6 +7085,7 @@ export class StorageManager {
     // never resurrects this deleted version
     const matchingManuId = `manu_${interviewId}_v${version.versionNumber}`;
     if (this.manuscripts.has(matchingManuId)) {
+      this.deletedManuscriptIds.add(matchingManuId);
       this.manuscripts.delete(matchingManuId);
       await this.removeDoc('manuscripts', matchingManuId);
     }
@@ -7065,8 +7105,14 @@ export class StorageManager {
     }
     // V5.3.2: quota-affecting administrative change → new quota revision (other instances' older
     // views can no longer overwrite it), and the deleted version is no longer a replay target.
-    const trackedInterview = interview as QuotaTrackedInterview;
+    const trackedInterview = interview as QuotaTrackedInterview & { bookVersionsClearedUpTo?: number };
     trackedInterview.quotaRevision = (Number(trackedInterview.quotaRevision ?? 0) || 0) + 1;
+    if (remainingDirect.length === 0) {
+      trackedInterview.bookVersionsClearedUpTo = Math.max(
+        Number(trackedInterview.bookVersionsClearedUpTo ?? 0) || 0,
+        Number(version.versionNumber) || 1
+      );
+    }
     if (trackedInterview.lastBookSaveVersionId === versionId) {
       delete trackedInterview.lastBookSaveKey;
       delete trackedInterview.lastBookSaveVersionId;
@@ -7074,6 +7120,7 @@ export class StorageManager {
     interview.lastActivityAt = new Date().toISOString();
     this.interviews.set(interviewId, interview);
     await this.persistDoc('interviews', interviewId, interview);
+    void this.persistDeletedRegistry();
 
     const remainingVersions = this.getBookVersionsForInterview(interviewId);
 
@@ -7114,13 +7161,6 @@ export class StorageManager {
 
   /**
    * V5.4.1 — Administrator: deletes ALL saved PDF book versions of an interview at once.
-   *
-   * - Durable: memory, disk snapshot and Firestore (including the chunk documents of large versions).
-   * - The manuscripts are NOT touched (they have their own bulk delete).
-   * - Legacy versions synthesized from manuscripts can never come back: the interview records up to
-   *   which number the versions were cleared (bookVersionsClearedUpTo, persisted with the interview,
-   *   so every instance respects it), and the next saved book is numbered above them.
-   * - Layout quota (edits used / allowed) is not modified.
    */
   public async deleteAllParticipantBookVersionsForInterview(
     interviewId: string,
@@ -7173,6 +7213,7 @@ export class StorageManager {
     interview.lastActivityAt = new Date().toISOString();
     this.interviews.set(interviewId, interview);
     await this.persistDoc('interviews', interviewId, interview);
+    void this.persistDeletedRegistry();
 
     await this.addAuditLog(
       'DELETE_ALL_PARTICIPANT_BOOK_VERSIONS',
@@ -7188,6 +7229,34 @@ export class StorageManager {
     );
     this.saveStateToDisk();
     return { interview, deletedCount: deletedVersionIds.length, deletedVersionIds };
+  }
+
+  /**
+   * Batch deletion of selected PDF book versions across one or multiple interviews.
+   */
+  public async deleteParticipantBookVersionsBatch(
+    versionIds: string[],
+    restoreQuota: boolean,
+    performedBy: string
+  ): Promise<{ deletedVersionIds: string[]; deletedCount: number }> {
+    const deletedVersionIds: string[] = [];
+    const uniqueIds = Array.from(new Set((versionIds || []).filter(Boolean)));
+    for (const vid of uniqueIds) {
+      if (this.participantBookVersions.has(vid)) {
+        try {
+          await this.deleteParticipantBookVersion(vid, restoreQuota, performedBy);
+          deletedVersionIds.push(vid);
+        } catch (err) {
+          console.warn(`[StorageManager] Could not delete book version ${vid} in batch:`, err);
+        }
+      } else {
+        this.deletedBookVersionIds.add(vid);
+        deletedVersionIds.push(vid);
+      }
+    }
+    this.saveStateToDisk();
+    void this.persistDeletedRegistry();
+    return { deletedVersionIds, deletedCount: deletedVersionIds.length };
   }
 
   /**
@@ -7207,6 +7276,7 @@ export class StorageManager {
     );
     const deletedManuscriptIds: string[] = [];
     for (const m of manuscriptsForInterview) {
+      this.deletedManuscriptIds.add(m.id);
       this.manuscripts.delete(m.id);
       await this.removeDoc('manuscripts', m.id);
       deletedManuscriptIds.push(m.id);
@@ -7214,6 +7284,7 @@ export class StorageManager {
     interview.lastActivityAt = new Date().toISOString();
     this.interviews.set(interviewId, interview);
     await this.persistDoc('interviews', interviewId, interview);
+    void this.persistDeletedRegistry();
     await this.addAuditLog('DELETE_ALL_MANUSCRIPTS', 'manuscript', interviewId, performedBy, {
       interviewId,
       deletedCount: deletedManuscriptIds.length,
@@ -7454,7 +7525,11 @@ export class StorageManager {
   }
 
   // --- Manuscripts ---
-  public async compileManuscript(interviewId: string, performedBy: string): Promise<ManuscriptRecord> {
+  public async compileManuscript(
+    interviewId: string,
+    performedBy: string,
+    onProgress?: (percent: number, stage: string) => void
+  ): Promise<ManuscriptRecord> {
     const interview = this.interviews.get(interviewId);
     if (!interview) throw new Error('Entrevista no encontrada.');
 
@@ -7478,17 +7553,22 @@ export class StorageManager {
       geminiModel: this.config.bookAiGeminiModel,
       openaiModel: this.config.bookAiOpenAiModel,
       bookStructureMode: this.config.bookStructureMode,
+      onProgress,
     });
 
     const existingForInterview = Array.from(this.manuscripts.values()).filter(
-      (m) => m.interviewId === interviewId
+      (m) => m.interviewId === interviewId && !this.deletedManuscriptIds.has(m.id)
     );
     const maxExistingVersion = existingForInterview.reduce(
       (max, m) => (m.version > max ? m.version : max),
       0
     );
-    const versionNumber = maxExistingVersion + 1;
-    const manuscriptId = `manu_${interviewId}_v${versionNumber}`;
+    let versionNumber = maxExistingVersion + 1;
+    let manuscriptId = `manu_${interviewId}_v${versionNumber}`;
+    while (this.deletedManuscriptIds.has(manuscriptId)) {
+      versionNumber++;
+      manuscriptId = `manu_${interviewId}_v${versionNumber}`;
+    }
 
     const manuscriptStatus: ManuscriptRecord['status'] =
       draft.generationStatus === 'approved'
@@ -7515,6 +7595,7 @@ export class StorageManager {
       generatedBy: performedBy,
     };
 
+    this.deletedManuscriptIds.delete(manuscriptId);
     this.manuscripts.set(manuscriptId, manuscript);
     await this.persistDoc('manuscripts', manuscriptId, manuscript);
 
@@ -7532,6 +7613,72 @@ export class StorageManager {
     return manuscript;
   }
 
+  public startAdminManuscriptJob(interviewId: string, performedBy: string) {
+    const interview = this.interviews.get(interviewId);
+    if (!interview) {
+      throw new Error('Entrevista no encontrada.');
+    }
+    // Check if there's already an active running job for this interview
+    for (const existing of this.adminManuscriptJobs.values()) {
+      if (
+        existing.interviewId === interviewId &&
+        existing.status === 'running' &&
+        Date.now() - new Date(existing.updatedAt).getTime() < 45_000
+      ) {
+        return existing;
+      }
+    }
+
+    const nowIso = new Date().toISOString();
+    const jobId = `mjob_${interviewId}_${Date.now()}`;
+    const jobState = {
+      jobId,
+      interviewId,
+      status: 'running' as const,
+      percent: 8,
+      stage: 'Preparando testimonios y contexto biográfico de la entrevista...',
+      startedAt: nowIso,
+      updatedAt: nowIso,
+    };
+    this.adminManuscriptJobs.set(jobId, jobState);
+
+    void (async () => {
+      try {
+        const compiled = await this.compileManuscript(interviewId, performedBy, (pct, stage) => {
+          const current = this.adminManuscriptJobs.get(jobId);
+          if (current && current.status === 'running') {
+            current.percent = Math.max(current.percent, Math.min(98, Math.round(pct)));
+            current.stage = stage;
+            current.updatedAt = new Date().toISOString();
+          }
+        });
+        const current = this.adminManuscriptJobs.get(jobId);
+        if (current) {
+          current.status = 'completed';
+          current.percent = 100;
+          current.stage = 'Manuscrito compilado exitosamente (100%)';
+          current.manuscript = compiled;
+          current.updatedAt = new Date().toISOString();
+        }
+      } catch (err: any) {
+        const current = this.adminManuscriptJobs.get(jobId);
+        if (current) {
+          const errMsg = err?.message || 'Error al compilar el manuscrito.';
+          current.status = 'failed';
+          current.error = errMsg;
+          current.stage = errMsg;
+          current.updatedAt = new Date().toISOString();
+        }
+      }
+    })();
+
+    return jobState;
+  }
+
+  public getAdminManuscriptJob(jobId: string) {
+    return this.adminManuscriptJobs.get(jobId) || null;
+  }
+
   public getManuscriptsForInterview(interviewId: string): Array<
     ManuscriptRecord & { photos?: AnswerPhotoAttachment[] }
   > {
@@ -7540,7 +7687,7 @@ export class StorageManager {
     const interviewPhotos = answers.flatMap((a) => a.photos || []);
 
     return Array.from(this.manuscripts.values())
-      .filter((m) => m.interviewId === interviewId)
+      .filter((m) => m.interviewId === interviewId && !this.deletedManuscriptIds.has(m.id))
       .map((m) => ({
         ...m,
         content: ensurePhotosPlacedInManuscript({
@@ -7562,6 +7709,7 @@ export class StorageManager {
   > {
     const questions = Array.from(this.questions.values());
     return Array.from(this.manuscripts.values())
+      .filter((m) => !this.deletedManuscriptIds.has(m.id))
       .map((m) => {
         const inv = this.interviews.get(m.interviewId);
         const answers = this.getAnswersForInterview(m.interviewId);
@@ -7586,27 +7734,62 @@ export class StorageManager {
     performedBy: string
   ): Promise<{ deletedId: string; interviewId: string }> {
     const manuscript = this.manuscripts.get(manuscriptId);
-    if (!manuscript) {
-      throw new Error('Manuscrito no encontrado.');
-    }
-    const interviewId = manuscript.interviewId;
+    const interviewId =
+      manuscript?.interviewId ||
+      (manuscriptId.startsWith('manu_')
+        ? manuscriptId.replace(/^manu_/, '').replace(/_v\d+$/, '')
+        : '');
+
+    this.deletedManuscriptIds.add(manuscriptId);
     this.manuscripts.delete(manuscriptId);
     await this.removeDoc('manuscripts', manuscriptId);
 
-    const interview = this.interviews.get(interviewId);
+    // If a synthesized book version existed from this manuscript version, mark it deleted too
+    if (manuscript && interviewId) {
+      const synthVersionId = `pbv_${interviewId}_v${manuscript.version}`;
+      this.deletedBookVersionIds.add(synthVersionId);
+      if (this.participantBookVersions.has(synthVersionId)) {
+        this.participantBookVersions.delete(synthVersionId);
+        await this.removeDoc('participantBookVersions', synthVersionId);
+      }
+    }
+
+    const interview = interviewId ? this.interviews.get(interviewId) : undefined;
     if (interview) {
       interview.lastActivityAt = new Date().toISOString();
       this.interviews.set(interviewId, interview);
       await this.persistDoc('interviews', interviewId, interview);
     }
 
+    this.saveStateToDisk();
+    void this.persistDeletedRegistry();
+
     await this.addAuditLog('DELETE_MANUSCRIPT', 'manuscript', manuscriptId, performedBy, {
       interviewId,
-      version: manuscript.version,
-      title: manuscript.title,
+      version: manuscript?.version ?? null,
+      title: manuscript?.title ?? manuscriptId,
     });
 
     return { deletedId: manuscriptId, interviewId };
+  }
+
+  public async deleteManuscriptsBatch(
+    manuscriptIds: string[],
+    performedBy: string
+  ): Promise<{ deletedManuscriptIds: string[]; deletedCount: number }> {
+    const deletedIds: string[] = [];
+    const uniqueIds = Array.from(new Set((manuscriptIds || []).filter(Boolean)));
+    for (const mid of uniqueIds) {
+      try {
+        await this.deleteManuscript(mid, performedBy);
+        deletedIds.push(mid);
+      } catch (err) {
+        console.warn(`[StorageManager] Could not delete manuscript ${mid} in batch:`, err);
+      }
+    }
+    this.saveStateToDisk();
+    void this.persistDeletedRegistry();
+    return { deletedManuscriptIds: deletedIds, deletedCount: deletedIds.length };
   }
 
   // --- Participants & Tokens retrieval ---
@@ -8455,6 +8638,494 @@ export class StorageManager {
       auditLogsCount: auditLogs.length,
       recentAuditLogs: auditLogs.slice(0, 25),
     };
+  }
+
+  // --- DELETED REGISTRY SYNC & FULL DATABASE BACKUP / RESTORE MANAGER ---
+
+  private applyDeletedRegistrySnap(docSnap: any): void {
+    if (!docSnap || !docSnap.exists?.()) return;
+    const data = docSnap.data();
+    if (!data || typeof data !== 'object') return;
+    if (Array.isArray(data.deletedBookVersionIds)) {
+      for (const id of data.deletedBookVersionIds) {
+        if (typeof id === 'string' && id.trim()) {
+          this.deletedBookVersionIds.add(id.trim());
+          this.participantBookVersions.delete(id.trim());
+        }
+      }
+    }
+    if (Array.isArray(data.deletedManuscriptIds)) {
+      for (const id of data.deletedManuscriptIds) {
+        if (typeof id === 'string' && id.trim()) {
+          this.deletedManuscriptIds.add(id.trim());
+          this.manuscripts.delete(id.trim());
+        }
+      }
+    }
+  }
+
+  private async persistDeletedRegistry(): Promise<void> {
+    try {
+      await this.persistRemoteDoc('settings', 'deletedRegistry', {
+        deletedBookVersionIds: Array.from(this.deletedBookVersionIds),
+        deletedManuscriptIds: Array.from(this.deletedManuscriptIds),
+        updatedAt: new Date().toISOString(),
+      });
+    } catch {
+      // ignore remote error
+    }
+  }
+
+  private getBackupsDir(): string {
+    const dir = path.join(process.cwd(), 'data', 'backups');
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    return dir;
+  }
+
+  private getBackupsIndexFilePath(): string {
+    return path.join(this.getBackupsDir(), 'index.json');
+  }
+
+  public listDatabaseBackups(): Array<{
+    id: string;
+    label: string;
+    createdAt: string;
+    createdBy: string;
+    sizeBytes: number;
+    counts: {
+      interviews: number;
+      participants: number;
+      answers: number;
+      photos: number;
+      audios: number;
+      manuscripts: number;
+      bookVersions: number;
+      miEsenciaProfiles: number;
+      miEsenciaSubscriptions: number;
+    };
+  }> {
+    try {
+      const idxPath = this.getBackupsIndexFilePath();
+      if (!fs.existsSync(idxPath)) return [];
+      const parsed = JSON.parse(fs.readFileSync(idxPath, 'utf-8'));
+      if (!Array.isArray(parsed)) return [];
+      return parsed
+        .filter((item) => item && item.id && fs.existsSync(path.join(this.getBackupsDir(), `${item.id}.json`)))
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    } catch (err) {
+      console.warn('[StorageManager] Error listing backups:', err);
+      return [];
+    }
+  }
+
+  private saveBackupsIndex(items: any[]): void {
+    try {
+      fs.writeFileSync(this.getBackupsIndexFilePath(), JSON.stringify(items, null, 2), 'utf-8');
+    } catch (err) {
+      console.warn('[StorageManager] Error saving backups index:', err);
+    }
+  }
+
+  public async createDatabaseBackup(
+    label: string | undefined,
+    performedBy: string
+  ): Promise<{
+    id: string;
+    label: string;
+    createdAt: string;
+    createdBy: string;
+    sizeBytes: number;
+    counts: {
+      interviews: number;
+      participants: number;
+      answers: number;
+      photos: number;
+      audios: number;
+      manuscripts: number;
+      bookVersions: number;
+      miEsenciaProfiles: number;
+      miEsenciaSubscriptions: number;
+    };
+  }> {
+    const { miEsenciaStore } = await import('./miEsencia/miEsenciaStore.ts');
+    const miEsenciaBackup = miEsenciaStore.exportFullStateForBackup();
+
+    const nowIso = new Date().toISOString();
+    const backupId = `bkp_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+    const cleanLabel =
+      (label || '').trim() ||
+      `Respaldo completo ${new Date().toLocaleDateString('es-MX', {
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      })}`;
+
+    const storageSnapshot = {
+      config: this.config,
+      questions: Array.from(this.questions.values()),
+      interviews: Array.from(this.interviews.values()),
+      participants: Array.from(this.participants.values()),
+      tokens: Array.from(this.tokens.values()),
+      answers: Array.from(this.answers.values()),
+      photos: Array.from(this.photos.values()),
+      audios: Array.from(this.audios.values()),
+      manuscripts: Array.from(this.manuscripts.values()).filter(
+        (m) => !this.deletedManuscriptIds.has(m.id)
+      ),
+      auditLogs: this.auditLogs.slice(0, 300),
+      privacyConsents: Array.from(this.privacyConsents.values()),
+      bookShares: Array.from(this.bookShares.values()),
+      scheduledDeliveries: Array.from(this.scheduledDeliveries.values()),
+      secondaryAccess: Array.from(this.secondaryAccess.values()),
+      postMortemInstructions: Array.from(this.postMortemInstructions.values()),
+      arcoRequests: Array.from(this.arcoRequests.values()),
+      participantBookVersions: Array.from(this.participantBookVersions.values()).filter(
+        (v) => !this.deletedBookVersionIds.has(v.id)
+      ),
+      deletedBookVersionIds: Array.from(this.deletedBookVersionIds),
+      deletedManuscriptIds: Array.from(this.deletedManuscriptIds),
+      bookDeliveryAuthorizations: Array.from(this.bookDeliveryAuthorizations.values()),
+      bookAuditReports: Array.from(this.bookAuditReports.values()),
+    };
+
+    const counts = {
+      interviews: storageSnapshot.interviews.length,
+      participants: storageSnapshot.participants.length,
+      answers: storageSnapshot.answers.length,
+      photos: storageSnapshot.photos.length,
+      audios: storageSnapshot.audios.length,
+      manuscripts: storageSnapshot.manuscripts.length,
+      bookVersions: storageSnapshot.participantBookVersions.length,
+      questions: storageSnapshot.questions.length,
+      miEsenciaPersons: Array.isArray(miEsenciaBackup.persons) ? miEsenciaBackup.persons.length : 0,
+      miEsenciaProfiles: Array.isArray(miEsenciaBackup.persons) ? miEsenciaBackup.persons.length : 0,
+      miEsenciaSubscriptions: Array.isArray(miEsenciaBackup.subscriptions)
+        ? miEsenciaBackup.subscriptions.length
+        : 0,
+      miEsenciaConversations: Array.isArray(miEsenciaBackup.conversations)
+        ? miEsenciaBackup.conversations.length
+        : 0,
+    };
+
+    const fullPayload = {
+      backupFormat: 'youforever_full_db_backup_v1',
+      id: backupId,
+      label: cleanLabel,
+      createdAt: nowIso,
+      createdBy: performedBy,
+      counts,
+      storage: storageSnapshot,
+      miEsencia: miEsenciaBackup,
+    };
+
+    const serialized = JSON.stringify(fullPayload, null, 2);
+    const sizeBytes = Buffer.byteLength(serialized, 'utf-8');
+    const filePath = path.join(this.getBackupsDir(), `${backupId}.json`);
+    fs.writeFileSync(filePath, serialized, 'utf-8');
+
+    const meta = {
+      id: backupId,
+      label: cleanLabel,
+      createdAt: nowIso,
+      createdBy: performedBy,
+      sizeBytes,
+      counts,
+    };
+
+    const existingList = this.listDatabaseBackups();
+    this.saveBackupsIndex([meta, ...existingList.filter((i) => i.id !== backupId)]);
+
+    await this.addAuditLog('CREATE_DATABASE_BACKUP', 'system', backupId, performedBy, {
+      label: cleanLabel,
+      sizeBytes,
+      counts,
+    });
+
+    return meta;
+  }
+
+  public getDatabaseBackupPayload(backupId: string): any {
+    const safeId = path.basename(backupId).replace(/[^a-zA-Z0-9_-]/g, '');
+    const filePath = path.join(this.getBackupsDir(), `${safeId}.json`);
+    if (!fs.existsSync(filePath)) {
+      throw new Error('Archivo de respaldo no encontrado en el servidor.');
+    }
+    return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+  }
+
+  public async applyDatabaseBackupObject(
+    payload: any,
+    performedBy: string
+  ): Promise<{
+    restoredAt: string;
+    counts: {
+      interviews: number;
+      participants: number;
+      answers: number;
+      manuscripts: number;
+      bookVersions: number;
+      questions: number;
+      miEsenciaPersons: number;
+      miEsenciaProfiles: number;
+    };
+  }> {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('El archivo de respaldo no tiene un formato JSON válido.');
+    }
+    const storageData = payload.storage || (Array.isArray(payload.interviews) ? payload : null);
+    if (!storageData || !Array.isArray(storageData.interviews)) {
+      throw new Error(
+        'El respaldo no contiene una estructura válida de entrevistas de YouForever.'
+      );
+    }
+
+    // Clear and restore primary storage collections
+    this.interviews.clear();
+    this.participants.clear();
+    this.tokens.clear();
+    this.plainTokenMap.clear();
+    this.accessCodeMap.clear();
+    this.answers.clear();
+    this.photos.clear();
+    this.audios.clear();
+    this.manuscripts.clear();
+    this.participantBookVersions.clear();
+    this.deletedBookVersionIds.clear();
+    this.deletedManuscriptIds.clear();
+    this.privacyConsents.clear();
+    this.bookShares.clear();
+    this.scheduledDeliveries.clear();
+    this.secondaryAccess.clear();
+    this.postMortemInstructions.clear();
+    this.arcoRequests.clear();
+    this.bookDeliveryAuthorizations.clear();
+    this.bookAuditReports.clear();
+
+    if (storageData.config) {
+      this.config = {
+        ...INITIAL_APP_CONFIG,
+        ...storageData.config,
+        literaryPrompts: {
+          ...DEFAULT_LITERARY_PROMPTS_CONFIG,
+          ...(storageData.config.literaryPrompts || {}),
+        },
+      };
+    }
+    if (Array.isArray(storageData.questions) && storageData.questions.length > 0) {
+      this.questions.clear();
+      for (const q of storageData.questions) {
+        if (q?.id) this.questions.set(q.id, q);
+      }
+    }
+    if (Array.isArray(storageData.deletedBookVersionIds)) {
+      for (const id of storageData.deletedBookVersionIds) {
+        if (typeof id === 'string' && id.trim()) this.deletedBookVersionIds.add(id.trim());
+      }
+    }
+    if (Array.isArray(storageData.deletedManuscriptIds)) {
+      for (const id of storageData.deletedManuscriptIds) {
+        if (typeof id === 'string' && id.trim()) this.deletedManuscriptIds.add(id.trim());
+      }
+    }
+    for (const inv of storageData.interviews || []) {
+      if (inv?.id) this.interviews.set(inv.id, inv);
+    }
+    for (const part of storageData.participants || []) {
+      if (part?.id) this.participants.set(part.id, part);
+    }
+    for (const tok of storageData.tokens || []) {
+      if (tok?.tokenHash) this.registerTokenInMemory(tok);
+    }
+    for (const ans of storageData.answers || []) {
+      if (ans?.id) this.answers.set(ans.id, ans);
+    }
+    for (const ph of storageData.photos || []) {
+      if (ph?.id) this.photos.set(ph.id, ph);
+    }
+    for (const aud of storageData.audios || []) {
+      if (aud?.id) this.audios.set(aud.id, aud);
+    }
+    for (const manu of storageData.manuscripts || []) {
+      if (manu?.id && !this.deletedManuscriptIds.has(manu.id)) {
+        this.manuscripts.set(manu.id, manu);
+      }
+    }
+    for (const bv of storageData.participantBookVersions || []) {
+      if (bv?.id && !this.deletedBookVersionIds.has(bv.id)) {
+        this.participantBookVersions.set(bv.id, bv);
+      }
+    }
+    for (const c of storageData.privacyConsents || []) {
+      if (c?.id) this.privacyConsents.set(c.id, c);
+    }
+    for (const s of storageData.bookShares || []) {
+      if (s?.id) this.bookShares.set(s.id, s);
+    }
+    for (const d of storageData.scheduledDeliveries || []) {
+      if (d?.id) this.scheduledDeliveries.set(d.id, d);
+    }
+    for (const sa of storageData.secondaryAccess || []) {
+      if (sa?.id) this.secondaryAccess.set(sa.id, sa);
+    }
+    for (const pmi of storageData.postMortemInstructions || []) {
+      if (pmi?.id) this.postMortemInstructions.set(pmi.id, pmi);
+    }
+    for (const ar of storageData.arcoRequests || []) {
+      if (ar?.id) this.arcoRequests.set(ar.id, ar);
+    }
+    for (const auth of storageData.bookDeliveryAuthorizations || []) {
+      if (auth?.evidenceRef) this.bookDeliveryAuthorizations.set(auth.evidenceRef, auth);
+    }
+    for (const rep of storageData.bookAuditReports || []) {
+      const vid = rep?.identification?.versionId;
+      if (vid) this.bookAuditReports.set(vid, rep);
+    }
+    if (Array.isArray(storageData.auditLogs)) {
+      this.auditLogs = storageData.auditLogs;
+    }
+
+    this.ensureParticipantTokensConsistent();
+    this.saveStateToDisk();
+    void this.persistDeletedRegistry();
+
+    let miEsenciaProfiles = 0;
+    if (payload.miEsencia && typeof payload.miEsencia === 'object') {
+      const { miEsenciaStore } = await import('./miEsencia/miEsenciaStore.ts');
+      const meRes = miEsenciaStore.restoreFullStateFromBackup(payload.miEsencia);
+      miEsenciaProfiles = meRes.personsRestored;
+    }
+
+    const counts = {
+      interviews: this.interviews.size,
+      participants: this.participants.size,
+      answers: this.answers.size,
+      manuscripts: this.manuscripts.size,
+      bookVersions: this.participantBookVersions.size,
+      questions: this.questions.size,
+      miEsenciaPersons: miEsenciaProfiles,
+      miEsenciaProfiles,
+    };
+
+    await this.addAuditLog('RESTORE_DATABASE_BACKUP', 'system', payload.id || 'uploaded_backup', performedBy, {
+      label: payload.label || 'Respaldo restaurado',
+      counts,
+    });
+
+    return {
+      restoredAt: new Date().toISOString(),
+      counts,
+    };
+  }
+
+  public async restoreDatabaseBackup(backupId: string, performedBy: string) {
+    const payload = this.getDatabaseBackupPayload(backupId);
+    return this.applyDatabaseBackupObject(payload, performedBy);
+  }
+
+  public async importDatabaseBackupPayload(
+    payload: any,
+    restoreImmediately: boolean,
+    performedBy: string
+  ) {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('El archivo subido no es un respaldo JSON válido.');
+    }
+    const storageData = payload.storage || (Array.isArray(payload.interviews) ? payload : null);
+    if (!storageData || !Array.isArray(storageData.interviews)) {
+      throw new Error('El archivo no contiene una estructura válida de respaldo de YouForever.');
+    }
+
+    const nowIso = new Date().toISOString();
+    const backupId = `bkp_imp_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+    const cleanLabel =
+      (payload.label || '').trim() ||
+      `Respaldo importado (${new Date().toLocaleDateString('es-MX', {
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      })})`;
+
+    const personsLen = Array.isArray(payload.miEsencia?.persons)
+      ? payload.miEsencia.persons.length
+      : 0;
+    const counts = {
+      interviews: (storageData.interviews || []).length,
+      participants: (storageData.participants || []).length,
+      answers: (storageData.answers || []).length,
+      photos: (storageData.photos || []).length,
+      audios: (storageData.audios || []).length,
+      manuscripts: (storageData.manuscripts || []).length,
+      bookVersions: (storageData.participantBookVersions || []).length,
+      questions: (storageData.questions || []).length,
+      miEsenciaPersons: personsLen,
+      miEsenciaProfiles: personsLen,
+      miEsenciaSubscriptions: Array.isArray(payload.miEsencia?.subscriptions)
+        ? payload.miEsencia.subscriptions.length
+        : 0,
+      miEsenciaConversations: Array.isArray(payload.miEsencia?.conversations)
+        ? payload.miEsencia.conversations.length
+        : 0,
+      ...(payload.counts || {}),
+    };
+
+    const normalizedPayload = {
+      ...payload,
+      backupFormat: 'youforever_full_db_backup_v1',
+      id: backupId,
+      label: cleanLabel,
+      createdAt: payload.createdAt || nowIso,
+      createdBy: performedBy,
+      counts,
+      storage: storageData,
+    };
+
+    const serialized = JSON.stringify(normalizedPayload, null, 2);
+    const sizeBytes = Buffer.byteLength(serialized, 'utf-8');
+    const filePath = path.join(this.getBackupsDir(), `${backupId}.json`);
+    fs.writeFileSync(filePath, serialized, 'utf-8');
+
+    const meta = {
+      id: backupId,
+      label: cleanLabel,
+      createdAt: normalizedPayload.createdAt,
+      createdBy: performedBy,
+      sizeBytes,
+      counts,
+    };
+
+    const existingList = this.listDatabaseBackups();
+    this.saveBackupsIndex([meta, ...existingList.filter((i) => i.id !== backupId)]);
+
+    let restoreResult = null;
+    if (restoreImmediately) {
+      restoreResult = await this.applyDatabaseBackupObject(normalizedPayload, performedBy);
+    }
+
+    return {
+      backup: meta,
+      summary: meta,
+      restored: Boolean(restoreImmediately),
+      restoreResult,
+    };
+  }
+
+  public async deleteDatabaseBackup(backupId: string, performedBy: string): Promise<{ deletedId: string }> {
+    const safeId = path.basename(backupId).replace(/[^a-zA-Z0-9_-]/g, '');
+    const filePath = path.join(this.getBackupsDir(), `${safeId}.json`);
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+    const existingList = this.listDatabaseBackups().filter((i) => i.id !== safeId);
+    this.saveBackupsIndex(existingList);
+
+    await this.addAuditLog('DELETE_DATABASE_BACKUP', 'system', safeId, performedBy, {});
+    return { deletedId: safeId };
   }
 }
 
