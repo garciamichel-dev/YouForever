@@ -1824,31 +1824,17 @@ apiRouter.get('/photos/:photoId', async (req: Request, res: Response) => {
     if (!(await authorizeMediaRequest(req, res, 'photo', req.params.photoId))) return;
     res.setHeader('Vary', 'Cookie, Authorization');
 
-    const photoBuffer = storage.getPhotoBuffer(req.params.photoId);
-    if (photoBuffer) {
-      res.setHeader('Content-Type', photoBuffer.mimeType);
-      res.setHeader('Cache-Control', PRIVATE_MEDIA_CACHE);
-      res.send(photoBuffer.buffer);
-      return;
-    }
-
-    const photo = await storage.getPhotoByIdAsync(req.params.photoId);
-    if (!photo || !photo.dataUrl) {
+    // V5.4.3: local copy first, then Cloud Firestore. Never a synthetic picture: when the image is
+    // nowhere, the answer is a 404 (not cached) so a later request can still find it.
+    const photoBuffer = await storage.getPhotoBufferAsync(req.params.photoId);
+    if (!photoBuffer) {
+      res.setHeader('Cache-Control', 'no-store');
       res.status(404).json({ success: false, error: 'Fotografía no encontrada.' });
       return;
     }
-
-    const match = photo.dataUrl.match(/^data:([^;]+);base64,(.+)$/);
-    if (!match) {
-      res.status(400).json({ success: false, error: 'Formato de imagen inválido.' });
-      return;
-    }
-
-    const mimeType = match[1] || photo.mimeType || 'image/jpeg';
-    const imgBuffer = Buffer.from(match[2], 'base64');
-    res.setHeader('Content-Type', mimeType);
+    res.setHeader('Content-Type', photoBuffer.mimeType);
     res.setHeader('Cache-Control', PRIVATE_MEDIA_CACHE);
-    res.send(imgBuffer);
+    res.send(photoBuffer.buffer);
   } catch (err: unknown) {
     res.status(500).json({ success: false, error: (err as Error).message });
   }

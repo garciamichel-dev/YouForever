@@ -109,6 +109,12 @@ import {
   resolveLocalDiskDurability,
 } from './durableDocs.ts';
 import {
+  decodeImageDataUrl,
+  isArchivalPlaceholderPng,
+  isRealPhotoDataUrl,
+  mergeEditedAnswerPhotos,
+} from './photoIntegrity.ts';
+import {
   PrivacyConsentRecord,
   BookShareRecord,
   ScheduledDeliveryRecord,
@@ -902,9 +908,22 @@ export class StorageManager {
     collectionName: string,
     docId: string,
     data: T,
-    carryFields: string[] = ['interviewId', 'title']
+    carryFields: string[] = ['interviewId', 'title'],
+    /**
+     * V5.4.3: top-level fields written AS THEY ARE even when large (e.g. a photo's `dataUrl`).
+     * `sanitizeDocForFirestore` empties any data URL above 50,000 characters; that is what made
+     * every real photograph reach Firestore without its image. Size is handled here by chunking.
+     */
+    keepLargeFields: string[] = []
   ): Promise<{ status: 'written' | 'failed'; chunked: boolean; bytes: number; chunkCount: number; error?: string }> {
     const sanitized = this.sanitizeDocForFirestore(data) as Record<string, unknown>;
+    for (const field of keepLargeFields) {
+      const original = (data as Record<string, unknown>)?.[field];
+      if (typeof original === 'string') {
+        sanitized[field] = original;
+        delete sanitized[`${field}_storedSeparately`];
+      }
+    }
     sanitized._syncedAt = new Date().toISOString();
     const json = JSON.stringify(sanitized);
     const bytes = Buffer.byteLength(json, 'utf8');
@@ -2054,16 +2073,9 @@ export class StorageManager {
     const bookVersionsSnap = unwrapHeavy(9);
 
     if (photosSnap) {
-      photosSnap.forEach((docSnap: any) => {
-        const photo = docSnap.data() as InterviewPhotoRecord;
-        if (photo && photo.id) {
-          const prevMem = this.photos.get(photo.id);
-          if ((!photo.dataUrl || !photo.dataUrl.startsWith('data:image/')) && prevMem?.dataUrl) {
-            photo.dataUrl = prevMem.dataUrl;
-          }
-          this.photos.set(photo.id, photo);
-        }
-      });
+      const rawPhotos: any[] = [];
+      photosSnap.forEach((docSnap: any) => rawPhotos.push(docSnap.data()));
+      this.ingestRemotePhotoDocs(rawPhotos);
     }
 
     if (audiosSnap) {
@@ -2341,16 +2353,11 @@ export class StorageManager {
         unwrap(4)?.forEach((d: any) => rawVersions.push(d.data()));
         this.ingestRemoteBookVersionDocs(rawVersions);
       }
-      unwrap(5)?.forEach((d: any) => {
-        const ph = d.data() as InterviewPhotoRecord;
-        if (ph?.id) {
-          const prevMem = this.photos.get(ph.id);
-          if ((!ph.dataUrl || !ph.dataUrl.startsWith('data:image/')) && prevMem?.dataUrl) {
-            ph.dataUrl = prevMem.dataUrl;
-          }
-          this.photos.set(ph.id, ph);
-        }
-      });
+      {
+        const rawPhotos: any[] = [];
+        unwrap(5)?.forEach((d: any) => rawPhotos.push(d.data()));
+        this.ingestRemotePhotoDocs(rawPhotos);
+      }
       unwrap(6)?.forEach((d: any) => {
         const aud = d.data() as InterviewAudioRecord;
         if (aud?.id) this.audios.set(aud.id, aud);
@@ -2458,16 +2465,11 @@ export class StorageManager {
         unwrap(4)?.forEach((d: any) => rawVersions.push(d.data()));
         this.ingestRemoteBookVersionDocs(rawVersions);
       }
-      unwrap(5)?.forEach((d: any) => {
-        const ph = d.data() as InterviewPhotoRecord;
-        if (ph?.id) {
-          const prevMem = this.photos.get(ph.id);
-          if ((!ph.dataUrl || !ph.dataUrl.startsWith('data:image/')) && prevMem?.dataUrl) {
-            ph.dataUrl = prevMem.dataUrl;
-          }
-          this.photos.set(ph.id, ph);
-        }
-      });
+      {
+        const rawPhotos: any[] = [];
+        unwrap(5)?.forEach((d: any) => rawPhotos.push(d.data()));
+        this.ingestRemotePhotoDocs(rawPhotos);
+      }
       unwrap(6)?.forEach((d: any) => {
         const aud = d.data() as InterviewAudioRecord;
         if (aud?.id) this.audios.set(aud.id, aud);
@@ -3084,9 +3086,24 @@ export class StorageManager {
       this.saveStateToDisk();
     }
 
-    await this.purgeOrphanedPhotosAndSyncCompilations();
+    // V5.4.3: the start-up "orphan photo purge" was removed. It deleted from Firestore every photo
+    // not referenced by the answers held in memory at that instant — answers that, on an
+    // incremental start, a timeout or an exhausted quota, had simply not been loaded yet. Photos are
+    // only ever deleted by an explicit action of the participant or the administrator.
+    const orphanReport = this.reportOrphanedPhotos();
+    if (orphanReport.count > 0) {
+      console.warn(
+        `[Photos] ${orphanReport.count} fotografía(s) sin respuesta asociada en memoria; se conservan (nunca se borran automáticamente).`
+      );
+    }
 
     this.initialized = true;
+
+    // V5.4.3: copy to Firestore any photo whose image still lives only on this instance's disk
+    // (records written by older versions with `storedOnDisk: true`). Runs in the background.
+    void this.migrateDiskOnlyPhotosToDurableStore().catch((err) =>
+      console.warn('[Photos] Migración de fotografías locales a Firestore no completada:', err?.message || err)
+    );
   }
 
   // --- Configuration ---
@@ -3742,8 +3759,9 @@ export class StorageManager {
       const newPhotoId = `photo_${newInterviewId}_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 6)}`;
       photoIdMap.set(sp.id, newPhotoId);
 
-      const bufObj = this.getPhotoBuffer(sp.id);
-      let clonedDataUrl = sp.dataUrl || '';
+      // V5.4.3: the source image is looked up locally and then in Firestore (never a placeholder).
+      const bufObj = await this.getPhotoBufferAsync(sp.id);
+      let clonedDataUrl = isRealPhotoDataUrl(sp.dataUrl) ? sp.dataUrl : '';
       if (bufObj) {
         try {
           const photoDir = path.join(process.cwd(), 'data', 'photos');
@@ -3751,11 +3769,11 @@ export class StorageManager {
             fs.mkdirSync(photoDir, { recursive: true });
           }
           fs.writeFileSync(path.join(photoDir, `${newPhotoId}.bin`), bufObj.buffer);
-          if (!clonedDataUrl || !clonedDataUrl.startsWith('data:image/')) {
-            clonedDataUrl = `data:${bufObj.mimeType || 'image/jpeg'};base64,${bufObj.buffer.toString('base64')}`;
-          }
         } catch (diskErr) {
           console.warn('Could not duplicate photo binary on disk:', diskErr);
+        }
+        if (!clonedDataUrl) {
+          clonedDataUrl = `data:${bufObj.mimeType || 'image/jpeg'};base64,${bufObj.buffer.toString('base64')}`;
         }
       }
 
@@ -3768,14 +3786,9 @@ export class StorageManager {
         imageUrl: `/api/photos/${newPhotoId}`,
         dataUrl: clonedDataUrl,
       };
+      delete (clonedPhoto as any).storedOnDisk;
       this.photos.set(newPhotoId, clonedPhoto);
-
-      const firestorePhotoRecord: any = { ...clonedPhoto };
-      if (firestorePhotoRecord.dataUrl && firestorePhotoRecord.dataUrl.length > 750_000) {
-        firestorePhotoRecord.dataUrl = '';
-        firestorePhotoRecord.storedOnDisk = true;
-      }
-      await this.persistDoc('interviewPhotos', newPhotoId, firestorePhotoRecord);
+      await this.persistPhotoRecordDurable(clonedPhoto);
     }
 
     // 3. Clone audios & binary buffers
@@ -4188,151 +4201,15 @@ export class StorageManager {
     }
   }
 
-  private buildArchivalSepiaPngBuffer(seedText: string): Buffer {
-    const width = 480;
-    const height = 320;
-    let hash = 2166136261;
-    for (let i = 0; i < seedText.length; i++) {
-      hash ^= seedText.charCodeAt(i);
-      hash = Math.imul(hash, 16777619);
-    }
-    const sunCenterX = 145 + (Math.abs(hash) % 190);
-    const sunCenterY = 108 + (Math.abs(hash >> 8) % 28);
-    const hillPhase = (Math.abs(hash >> 16) % 100) / 100;
-
-    // Each scanline has 1 filter byte (0) + width * 3 RGB bytes
-    const rowSize = 1 + width * 3;
-    const rawData = Buffer.alloc(rowSize * height);
-
-    for (let y = 0; y < height; y++) {
-      const rowOffset = y * rowSize;
-      rawData[rowOffset] = 0; // Filter type 0 (None)
-      const ny = y / height;
-
-      for (let x = 0; x < width; x++) {
-        const nx = x / width;
-        const pxOffset = rowOffset + 1 + x * 3;
-
-        // Outer cream border & inner vintage sepia mat line
-        const isOuterMat = x < 14 || x >= width - 14 || y < 14 || y >= height - 14;
-        const isFrameLine =
-          (x >= 18 && x <= width - 19 && (y === 18 || y === 19 || y === height - 19 || y === height - 20)) ||
-          (y >= 18 && y <= height - 19 && (x === 18 || x === 19 || x === width - 19 || x === width - 20));
-
-        if (isOuterMat) {
-          rawData[pxOffset] = 246;
-          rawData[pxOffset + 1] = 240;
-          rawData[pxOffset + 2] = 228;
-          continue;
-        }
-        if (isFrameLine) {
-          rawData[pxOffset] = 146;
-          rawData[pxOffset + 1] = 112;
-          rawData[pxOffset + 2] = 72;
-          continue;
-        }
-
-        // Base warm sepia sky gradient
-        let r = Math.round(244 - ny * 26);
-        let g = Math.round(233 - ny * 34);
-        let b = Math.round(212 - ny * 44);
-
-        // Soft glowing sun disc
-        const dxSun = x - sunCenterX;
-        const dySun = y - sunCenterY;
-        const distSun = Math.sqrt(dxSun * dxSun + dySun * dySun);
-        if (distSun < 34) {
-          r = 250;
-          g = 241;
-          b = 220;
-        } else if (distSun < 62) {
-          const glow = (62 - distSun) / 28;
-          r = Math.min(252, Math.round(r + glow * 14));
-          g = Math.min(244, Math.round(g + glow * 12));
-          b = Math.min(225, Math.round(b + glow * 10));
-        }
-
-        // Far horizon ridge
-        const ridge1Y =
-          Math.round(height * 0.58 + Math.sin((nx + hillPhase) * Math.PI * 2.2) * 22 + Math.cos(nx * 5.1) * 9);
-        // Midground warm hill
-        const ridge2Y =
-          Math.round(height * 0.69 + Math.cos((nx * 1.8 + hillPhase) * Math.PI * 2) * 18);
-        // Foreground sepia terrace
-        const ridge3Y =
-          Math.round(height * 0.81 + Math.sin((nx * 1.4 - hillPhase) * Math.PI * 2) * 12);
-
-        if (y >= ridge3Y) {
-          r = 126;
-          g = 96;
-          b = 64;
-        } else if (y >= ridge2Y) {
-          r = 158;
-          g = 126;
-          b = 89;
-        } else if (y >= ridge1Y) {
-          r = 188;
-          g = 158;
-          b = 120;
-        }
-
-        // Gentle photographic vignette
-        const vx = nx - 0.5;
-        const vy = ny - 0.5;
-        const vig = Math.max(0, 1 - (vx * vx + vy * vy) * 0.55);
-        rawData[pxOffset] = Math.max(0, Math.min(255, Math.round(r * vig)));
-        rawData[pxOffset + 1] = Math.max(0, Math.min(255, Math.round(g * vig)));
-        rawData[pxOffset + 2] = Math.max(0, Math.min(255, Math.round(b * vig)));
-      }
-    }
-
-    const crcTable = new Uint32Array(256);
-    for (let n = 0; n < 256; n++) {
-      let c = n;
-      for (let k = 0; k < 8; k++) {
-        c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-      }
-      crcTable[n] = c >>> 0;
-    }
-
-    const crc32 = (buf: Buffer): number => {
-      let c = 0xffffffff;
-      for (let i = 0; i < buf.length; i++) {
-        c = crcTable[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
-      }
-      return (c ^ 0xffffffff) >>> 0;
-    };
-
-    const makeChunk = (type: string, data: Buffer): Buffer => {
-      const lenBuf = Buffer.alloc(4);
-      lenBuf.writeUInt32BE(data.length, 0);
-      const typeBuf = Buffer.from(type, 'ascii');
-      const crcInput = Buffer.concat([typeBuf, data]);
-      const crcBuf = Buffer.alloc(4);
-      crcBuf.writeUInt32BE(crc32(crcInput), 0);
-      return Buffer.concat([lenBuf, typeBuf, data, crcBuf]);
-    };
-
-    const ihdr = Buffer.alloc(13);
-    ihdr.writeUInt32BE(width, 0);
-    ihdr.writeUInt32BE(height, 4);
-    ihdr[8] = 8; // 8-bit depth
-    ihdr[9] = 2; // RGB colorType
-    ihdr[10] = 0;
-    ihdr[11] = 0;
-    ihdr[12] = 0;
-
-    const idatData = zlib.deflateSync(rawData, { level: 6 });
-    const pngSignature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
-
-    return Buffer.concat([
-      pngSignature,
-      makeChunk('IHDR', ihdr),
-      makeChunk('IDAT', idatData),
-      makeChunk('IEND', Buffer.alloc(0)),
-    ]);
-  }
-
+  /**
+   * V5.4.3 — Real image bytes of a photo available on THIS instance (disk cache, memory record or an
+   * inline copy in the answer). Returns null when they are not here: callers that can wait use
+   * `getPhotoBufferAsync`, which also reads Firestore. A synthetic picture is never returned.
+   *
+   * Before V5.4.3 a missing image was replaced by a generated 480×320 sepia picture that was then
+   * cached on disk and in the record, and could end up written to Firestore over the real photo.
+   * Any such placeholder still found locally is discarded here.
+   */
   public getPhotoBuffer(photoId: string): { buffer: Buffer; mimeType: string } | null {
     const photo = this.photos.get(photoId);
     const photoDir = path.join(process.cwd(), 'data', 'photos');
@@ -4341,114 +4218,245 @@ export class StorageManager {
     if (fs.existsSync(diskPath)) {
       try {
         const buf = fs.readFileSync(diskPath);
-        const isPng = buf.length > 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47;
-        return { buffer: buf, mimeType: isPng ? 'image/png' : photo?.mimeType || 'image/jpeg' };
+        if (buf.length > 0 && !isArchivalPlaceholderPng(buf)) {
+          const isPng = buf.length > 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47;
+          return { buffer: buf, mimeType: isPng ? 'image/png' : photo?.mimeType || 'image/jpeg' };
+        }
+        // Old synthetic placeholder (or empty file): drop it so the real image can be fetched.
+        fs.unlinkSync(diskPath);
       } catch (err) {
         console.warn('Error reading photo from disk:', err);
       }
     }
 
-    if (
-      photo?.dataUrl &&
-      photo.dataUrl.length > 32 &&
-      !photo.dataUrl.startsWith('data:image/svg')
-    ) {
-      let raw = photo.dataUrl;
-      let resolvedMime = photo.mimeType || 'image/jpeg';
-      if (raw.startsWith('data:')) {
-        const cIdx = raw.indexOf(',');
-        const header = raw.slice(5, cIdx);
-        resolvedMime = header.split(';')[0]?.trim() || resolvedMime;
-        if (cIdx !== -1) raw = raw.substring(cIdx + 1);
-      }
-      return {
-        buffer: Buffer.from(raw.replace(/\s+/g, ''), 'base64'),
-        mimeType: resolvedMime,
-      };
+    const fromRecord = photo?.dataUrl ? decodeImageDataUrl(photo.dataUrl) : null;
+    if (fromRecord) {
+      if (!isArchivalPlaceholderPng(fromRecord.buffer)) return fromRecord;
+      photo!.dataUrl = '';
+      this.photos.set(photoId, photo!);
     }
 
-    // Check if an answer holds an inline raster dataUrl for this photoId
+    // An answer may still hold a small inline copy of the image.
     for (const ans of this.answers.values()) {
       for (const att of ans.photos || []) {
         if (att && att.id === photoId) {
-          const attUrl = (att as any).dataUrl || att.imageUrl;
-          if (
-            typeof attUrl === 'string' &&
-            attUrl.startsWith('data:image/') &&
-            !attUrl.startsWith('data:image/svg')
-          ) {
-            const cIdx = attUrl.indexOf(',');
-            const header = attUrl.slice(5, cIdx);
-            const resolvedMime = header.split(';')[0]?.trim() || 'image/jpeg';
-            if (cIdx !== -1) {
-              const raw = attUrl.substring(cIdx + 1);
-              return {
-                buffer: Buffer.from(raw.replace(/\s+/g, ''), 'base64'),
-                mimeType: resolvedMime,
-              };
-            }
-          }
+          const inline = decodeImageDataUrl((att as any).dataUrl) || decodeImageDataUrl(att.imageUrl);
+          if (inline && !isArchivalPlaceholderPng(inline.buffer)) return inline;
         }
       }
-    }
-
-    // If a legacy photo record exists in metadata but its binary was stripped in an older snapshot,
-    // generate and persist a genuine raster PNG sepia photograph so both browser <img> and jsPDF render it visibly.
-    if (photo || photoId.startsWith('photo_')) {
-      const pngBuffer = this.buildArchivalSepiaPngPngWithCache(photoId, photo?.questionText || photoId);
-      return {
-        buffer: pngBuffer,
-        mimeType: 'image/png',
-      };
     }
 
     return null;
   }
 
-  private buildArchivalSepiaPngPngWithCache(photoId: string, seedText: string): Buffer {
-    const pngBuffer = this.buildArchivalSepiaPngBuffer(seedText);
+  /**
+   * V5.4.3 — Like `getPhotoBuffer`, then Cloud Firestore (the only durable store on Cloud Run).
+   * A remote image is cached in memory and on disk for the next request.
+   */
+  public async getPhotoBufferAsync(photoId: string): Promise<{ buffer: Buffer; mimeType: string } | null> {
+    const local = this.getPhotoBuffer(photoId);
+    if (local) return local;
+    const remote = await this.fetchRemotePhotoRecord(photoId);
+    if (!remote.record || !isRealPhotoDataUrl(remote.record.dataUrl)) return null;
+    const decoded = decodeImageDataUrl(remote.record.dataUrl);
+    if (!decoded) return null;
+    const current = this.photos.get(photoId);
+    this.photos.set(photoId, current ? { ...current, dataUrl: remote.record.dataUrl } : remote.record);
+    this.savePhotoBinaryToDisk(photoId, remote.record.dataUrl);
+    return decoded;
+  }
+
+  /**
+   * V5.4.3 — Reads one photo record straight from Firestore, reassembling it when it was stored as
+   * a manifest plus chunk documents. `failed` distinguishes "could not read" from "does not exist",
+   * so a failed read is never taken as permission to overwrite the remote copy.
+   */
+  private async fetchRemotePhotoRecord(
+    photoId: string
+  ): Promise<{ record: InterviewPhotoRecord | null; failed: boolean }> {
+    const read = async (id: string): Promise<Record<string, any> | null> => {
+      if (this.remoteDocStore.getDoc) return (await this.remoteDocStore.getDoc('interviewPhotos', id)) as any;
+      const snap = await firestoreTelemetry.trackedGetDoc(serverDb, doc(serverDb, 'interviewPhotos', id), 'storage');
+      return snap.exists() ? (snap.data() as Record<string, any>) : null;
+    };
     try {
-      const photoDir = path.join(process.cwd(), 'data', 'photos');
-      if (!fs.existsSync(photoDir)) {
-        fs.mkdirSync(photoDir, { recursive: true });
+      const head = await read(photoId);
+      if (!head) return { record: null, failed: false };
+      const rawDocs: any[] = [head];
+      if (head._chunked === true) {
+        const count = Number(head._chunkCount) || 0;
+        for (let i = 0; i < count; i++) {
+          const part = await read(chunkDocId(photoId, i));
+          if (part) rawDocs.push(part);
+        }
       }
-      fs.writeFileSync(path.join(photoDir, `${photoId}.bin`), pngBuffer);
-      const existing = this.photos.get(photoId);
-      if (existing) {
-        existing.mimeType = 'image/png';
-        existing.dataUrl = `data:image/png;base64,${pngBuffer.toString('base64')}`;
-        this.photos.set(photoId, existing);
-      }
-    } catch (_e) {
-      // Ignore disk write issues
+      const { docs, incomplete } = reassembleChunkedDocs<InterviewPhotoRecord>(rawDocs);
+      if (incomplete.length > 0) return { record: null, failed: true };
+      const record = docs.find((d) => d && d.id === photoId) || null;
+      if (record && record.dataUrl && !isRealPhotoDataUrl(record.dataUrl)) record.dataUrl = '';
+      return { record, failed: false };
+    } catch (err: any) {
+      console.warn(`[Photos] No se pudo leer la fotografía ${photoId} de Firestore:`, err?.message || err);
+      return { record: null, failed: true };
     }
-    return pngBuffer;
+  }
+
+  /**
+   * V5.4.3 — Merges photo documents read from Firestore (manifest + chunks reassembled). A remote
+   * record without its image never erases an image this instance still holds, and the old
+   * synthetic placeholder is never kept as a photo's image.
+   */
+  private ingestRemotePhotoDocs(rawDocs: any[]): void {
+    const { docs } = reassembleChunkedDocs<InterviewPhotoRecord>(rawDocs);
+    for (const remote of docs) {
+      if (!remote || !remote.id) continue;
+      const prevMem = this.photos.get(remote.id);
+      const remoteReal = isRealPhotoDataUrl(remote.dataUrl);
+      if (!remoteReal) {
+        remote.dataUrl = prevMem && isRealPhotoDataUrl(prevMem.dataUrl) ? prevMem.dataUrl : '';
+      }
+      this.photos.set(remote.id, remote);
+    }
+  }
+
+  /**
+   * V5.4.3 — DURABLE write of a photo record WITH its image. Above Firestore's preventive document
+   * limit the record is split into chunk documents (see durableDocs.ts) instead of being written
+   * without its image (which left the image only on Cloud Run's ephemeral disk).
+   *
+   * A record whose image is not available here never overwrites a remote copy that has one: the
+   * remote image is read back first and kept.
+   */
+  private async persistPhotoRecordDurable(record: InterviewPhotoRecord): Promise<void> {
+    this.saveStateToDisk();
+    let toWrite: InterviewPhotoRecord = { ...record };
+    delete (toWrite as any).storedOnDisk;
+
+    if (!isRealPhotoDataUrl(toWrite.dataUrl)) {
+      const local = this.getPhotoBuffer(record.id);
+      if (local) {
+        toWrite.dataUrl = `data:${local.mimeType};base64,${local.buffer.toString('base64')}`;
+      } else {
+        const remote = await this.fetchRemotePhotoRecord(record.id);
+        if (remote.failed) {
+          console.warn(
+            `[Photos] ${record.id}: no se actualizó Firestore porque no se pudo verificar la copia remota (se conserva intacta).`
+          );
+          return;
+        }
+        if (remote.record && isRealPhotoDataUrl(remote.record.dataUrl)) {
+          toWrite = { ...remote.record, ...toWrite, dataUrl: remote.record.dataUrl };
+          delete (toWrite as any).storedOnDisk;
+        } else {
+          toWrite.dataUrl = '';
+        }
+      }
+      if (isRealPhotoDataUrl(toWrite.dataUrl)) {
+        const mem = this.photos.get(record.id);
+        if (mem) this.photos.set(record.id, { ...mem, dataUrl: toWrite.dataUrl });
+      }
+    }
+
+    delete (toWrite as any).dataUrl_storedSeparately;
+    const hasImage = isRealPhotoDataUrl(toWrite.dataUrl);
+    if (hasImage) (toWrite as any).durableImageAt = new Date().toISOString();
+    else delete (toWrite as any).durableImageAt;
+    const result = await this.persistRemoteDocDurable(
+      'interviewPhotos',
+      record.id,
+      toWrite,
+      ['interviewId', 'questionId', 'participantId'],
+      ['dataUrl']
+    );
+    if (result.status !== 'written') {
+      console.warn(`[Photos] ${record.id}: la copia en Firestore no se pudo escribir (${result.error || 'error'}).`);
+      return;
+    }
+    const mem = this.photos.get(record.id);
+    if (mem && hasImage) {
+      (mem as any).durableImageAt = (toWrite as any).durableImageAt;
+      delete (mem as any).storedOnDisk;
+      delete (mem as any).dataUrl_storedSeparately;
+      this.photos.set(record.id, mem);
+    }
+  }
+
+  /** V5.4.3 — Explicit deletion of a photo in Firestore: its record and, if chunked, its chunks. */
+  private async removePhotoRemoteDocs(photoId: string): Promise<void> {
+    let chunkCount = 0;
+    try {
+      const head = this.remoteDocStore.getDoc
+        ? await this.remoteDocStore.getDoc('interviewPhotos', photoId)
+        : null;
+      if (head && (head as any)._chunked === true) chunkCount = Number((head as any)._chunkCount) || 0;
+    } catch {
+      // The record itself is still deleted below.
+    }
+    await this.removeDoc('interviewPhotos', photoId);
+    for (let i = 0; i < chunkCount; i++) {
+      await this.removeDoc('interviewPhotos', chunkDocId(photoId, i));
+    }
+  }
+
+  /**
+   * V5.4.3 — Older versions wrote photos to Firestore WITHOUT their image (emptied above 50,000
+   * characters, or `storedOnDisk: true`). While this instance still holds a photo's real image
+   * (memory, snapshot or disk), it is checked against Firestore once and, if Firestore lacks it,
+   * written durably. Verified photos are marked (`durableImageAt`) so they are not read again.
+   */
+  public async migrateDiskOnlyPhotosToDurableStore(limit = 200): Promise<number> {
+    let migrated = 0;
+    let checked = 0;
+    for (const photo of Array.from(this.photos.values())) {
+      if (checked >= limit) break;
+      if ((photo as any).durableImageAt) continue;
+      const local = this.getPhotoBuffer(photo.id);
+      if (!local) continue;
+      checked++;
+      const remote = await this.fetchRemotePhotoRecord(photo.id);
+      if (remote.failed) continue;
+      if (remote.record && isRealPhotoDataUrl(remote.record.dataUrl)) {
+        (photo as any).durableImageAt = (remote.record as any).durableImageAt || new Date().toISOString();
+        this.photos.set(photo.id, photo);
+        continue;
+      }
+      delete (photo as any).storedOnDisk;
+      delete (photo as any).dataUrl_storedSeparately;
+      photo.dataUrl = `data:${local.mimeType};base64,${local.buffer.toString('base64')}`;
+      this.photos.set(photo.id, photo);
+      await this.persistPhotoRecordDurable(photo);
+      migrated++;
+    }
+    if (checked > 0) this.saveStateToDisk();
+    if (migrated > 0) console.info(`[Photos] ${migrated} fotografía(s) copiadas con su imagen a Firestore.`);
+    return migrated;
+  }
+
+  /** V5.4.3 — Before building a book or a PDF: loads from Firestore any image missing here. */
+  public async ensureInterviewPhotosHydrated(interviewId: string): Promise<void> {
+    for (const p of this.getPhotosForInterview(interviewId, false)) {
+      if (isRealPhotoDataUrl(p.dataUrl)) continue;
+      await this.getPhotoBufferAsync(p.id).catch(() => null);
+    }
   }
 
   public getPhotoById(photoId: string): InterviewPhotoRecord | undefined {
     return this.photos.get(photoId);
   }
 
+  /** V5.4.3: a cached record WITHOUT its image is completed from Firestore. */
   public async getPhotoByIdAsync(photoId: string): Promise<InterviewPhotoRecord | undefined> {
     const cached = this.photos.get(photoId);
-    if (cached) return cached;
-    try {
-      const snap = await firestoreTelemetry.trackedGetDoc(
-        serverDb,
-        doc(serverDb, 'interviewPhotos', photoId),
-        'storage'
-      );
-      if (snap.exists()) {
-        const ph = snap.data() as InterviewPhotoRecord;
-        if (ph) {
-          this.photos.set(photoId, ph);
-          return ph;
-        }
-      }
-    } catch (err) {
-      console.warn(`[getPhotoByIdAsync] Error loading photo ${photoId} from Firestore:`, err);
+    if (cached && isRealPhotoDataUrl(cached.dataUrl)) return cached;
+    await this.getPhotoBufferAsync(photoId).catch(() => null);
+    const after = this.photos.get(photoId);
+    if (after) return after;
+    const remote = await this.fetchRemotePhotoRecord(photoId);
+    if (remote.record) {
+      this.photos.set(photoId, remote.record);
+      return remote.record;
     }
-    return undefined;
+    return cached;
   }
 
   /**
@@ -4471,16 +4479,11 @@ export class StorageManager {
       .filter((p) => p.interviewId === interviewId && activePhotoIds.has(p.id))
       .map((p) => {
         if (!hydrate) return p;
-        if (
-          !p.dataUrl ||
-          !p.dataUrl.startsWith('data:image/') ||
-          p.dataUrl.startsWith('data:image/svg')
-        ) {
+        if (!isRealPhotoDataUrl(p.dataUrl)) {
           const bufObj = this.getPhotoBuffer(p.id);
           if (bufObj) {
-            const hydrated = `data:${bufObj.mimeType || 'image/png'};base64,${bufObj.buffer.toString('base64')}`;
-            p.dataUrl = hydrated;
-            p.mimeType = bufObj.mimeType || 'image/png';
+            p.dataUrl = `data:${bufObj.mimeType || 'image/jpeg'};base64,${bufObj.buffer.toString('base64')}`;
+            p.mimeType = bufObj.mimeType || p.mimeType;
             this.photos.set(p.id, p);
           }
         }
@@ -4514,66 +4517,21 @@ export class StorageManager {
     }
   }
 
-  public async purgeOrphanedPhotosAndSyncCompilations(): Promise<number> {
+  /**
+   * V5.4.3 — Replaces the start-up `purgeOrphanedPhotosAndSyncCompilations`, which deleted (memory,
+   * disk and Firestore) every photo whose answer was not in memory at that instant and rewrote
+   * manuscripts accordingly. Answers can legitimately be missing from memory (incremental start,
+   * timeout, quota), so that purge destroyed real photographs. Now orphans are only reported.
+   */
+  public reportOrphanedPhotos(): { count: number; photoIds: string[] } {
     const activePhotoIds = new Set<string>();
     for (const ans of this.answers.values()) {
-      if (Array.isArray(ans.photos)) {
-        for (const p of ans.photos) {
-          if (p && p.id) {
-            activePhotoIds.add(p.id);
-          }
-        }
+      for (const p of ans.photos || []) {
+        if (p && p.id) activePhotoIds.add(p.id);
       }
     }
-
-    const affectedInterviewIds = new Set<string>();
-    let purgedCount = 0;
-
-    for (const [photoId, photo] of Array.from(this.photos.entries())) {
-      if (!activePhotoIds.has(photoId)) {
-        this.photos.delete(photoId);
-        purgedCount++;
-        if (photo?.interviewId) {
-          affectedInterviewIds.add(photo.interviewId);
-        }
-        try {
-          const photoDir = path.join(process.cwd(), 'data', 'photos');
-          const diskPath = path.join(photoDir, `${photoId}.bin`);
-          if (fs.existsSync(diskPath)) {
-            fs.unlinkSync(diskPath);
-          }
-        } catch (_diskErr) {
-          // ignore
-        }
-        await this.removeDoc('interviewPhotos', photoId);
-      }
-    }
-
-    // Also ensure any existing manuscripts with stale photo references are cleaned
-    const questions = Array.from(this.questions.values());
-    for (const manu of this.manuscripts.values()) {
-      const answers = this.getAnswersForInterview(manu.interviewId);
-      const cleanedContent = ensurePhotosPlacedInManuscript({
-        compiledMarkdown: manu.content,
-        answers,
-        questions,
-      });
-      if (cleanedContent !== manu.content) {
-        manu.content = cleanedContent;
-        this.manuscripts.set(manu.id, manu);
-        affectedInterviewIds.add(manu.interviewId);
-        await this.persistDoc('manuscripts', manu.id, manu);
-      }
-    }
-
-    if (purgedCount > 0 || affectedInterviewIds.size > 0) {
-      this.saveStateToDisk();
-      for (const intId of affectedInterviewIds) {
-        await this.syncInterviewManuscriptsAndCompilationAfterPhotoChange(intId);
-      }
-    }
-
-    return purgedCount;
+    const photoIds = Array.from(this.photos.keys()).filter((id) => !activePhotoIds.has(id));
+    return { count: photoIds.length, photoIds };
   }
 
   public async deletePhotoForParticipant(
@@ -4598,7 +4556,7 @@ export class StorageManager {
       console.warn('Error deleting photo binary from disk:', diskErr);
     }
 
-    await this.removeDoc('interviewPhotos', photoId);
+    await this.removePhotoRemoteDocs(photoId);
 
     // Also remove from any answer record in this interview that references this photoId
     let updatedAnswer: AnswerRecord | undefined;
@@ -5019,18 +4977,14 @@ export class StorageManager {
           existingPhotoRecord.questionText = resolvedQuestionText;
           existingPhotoRecord.lifeStage = resolvedLifeStage;
           existingPhotoRecord.topic = resolvedTopic;
-          if (incomingPhoto.dataUrl && incomingPhoto.dataUrl.startsWith('data:image/')) {
+          if (isRealPhotoDataUrl(incomingPhoto.dataUrl)) {
             existingPhotoRecord.dataUrl = incomingPhoto.dataUrl;
             this.savePhotoBinaryToDisk(existingPhotoRecord.id, incomingPhoto.dataUrl);
           }
           this.photos.set(existingPhotoRecord.id, existingPhotoRecord);
 
-          const firestorePhotoRecord: any = { ...existingPhotoRecord };
-          if (firestorePhotoRecord.dataUrl && firestorePhotoRecord.dataUrl.length > 750_000) {
-            firestorePhotoRecord.dataUrl = '';
-            firestorePhotoRecord.storedOnDisk = true;
-          }
-          await this.persistDoc('interviewPhotos', existingPhotoRecord.id, firestorePhotoRecord);
+          // V5.4.3: durable write that never replaces the remote image with an empty or synthetic one.
+          await this.persistPhotoRecordDurable(existingPhotoRecord);
 
           const { dataUrl: _omit, ...attachmentMeta } = existingPhotoRecord;
           resolvedPhotoAttachments.push(attachmentMeta);
@@ -5060,12 +5014,9 @@ export class StorageManager {
           };
           this.photos.set(photoId, newPhotoRecord);
 
-          const firestorePhotoRecord: any = { ...newPhotoRecord };
-          if (firestorePhotoRecord.dataUrl && firestorePhotoRecord.dataUrl.length > 750_000) {
-            firestorePhotoRecord.dataUrl = '';
-            firestorePhotoRecord.storedOnDisk = true;
-          }
-          await this.persistDoc('interviewPhotos', photoId, firestorePhotoRecord);
+          // V5.4.3: the image always reaches Firestore (chunked above the document limit). Before,
+          // images above ~750 KB were kept only on Cloud Run's ephemeral disk and lost on restart.
+          await this.persistPhotoRecordDurable(newPhotoRecord);
 
           const { dataUrl: _omit, ...attachmentMeta } = newPhotoRecord;
           resolvedPhotoAttachments.push(attachmentMeta);
@@ -5233,29 +5184,14 @@ export class StorageManager {
         existing.branchChoice = params.branchChoice;
       }
       if (resolvedPhotoAttachments !== undefined) {
-        // Delete any photos that were removed during edit
-        const keptIds = new Set(resolvedPhotoAttachments.map((p) => p.id));
-        let removedAnyPhoto = false;
-        for (const oldPhoto of existing.photos || []) {
-          if (!keptIds.has(oldPhoto.id)) {
-            removedAnyPhoto = true;
-            this.photos.delete(oldPhoto.id);
-            try {
-              const photoDir = path.join(process.cwd(), 'data', 'photos');
-              const diskPath = path.join(photoDir, `${oldPhoto.id}.bin`);
-              if (fs.existsSync(diskPath)) {
-                fs.unlinkSync(diskPath);
-              }
-            } catch (_diskErr) {
-              // ignore
-            }
-            await this.removeDoc('interviewPhotos', oldPhoto.id);
-          }
-        }
-        existing.photos = resolvedPhotoAttachments;
-        if (removedAnyPhoto) {
-          this.syncInterviewManuscriptsAndCompilationAfterPhotoChange(interview.id).catch(() => {});
-        }
+        // V5.4.3: an edit never deletes a saved photo. Before, any saved photo missing from the
+        // list sent by the browser (stale list of a background autosave, a skipped question…) was
+        // deleted from memory, disk and Firestore. Participants delete a photo only with its
+        // explicit «Eliminar» action (POST /api/participant/photos/:id/delete).
+        existing.photos = mergeEditedAnswerPhotos({
+          existing: existing.photos,
+          resolvedIncoming: resolvedPhotoAttachments,
+        });
       }
       if (resolvedAudioRecordings.length > 0) {
         existing.audio = resolvedAudioAttachment;
@@ -6033,6 +5969,8 @@ export class StorageManager {
     const participants = Array.from(this.participants.values()).filter(
       (p) => p.interviewId === interview.id
     );
+    // V5.4.3: images not held by this instance are read from Firestore before composing the book.
+    await this.ensureInterviewPhotosHydrated(interview.id);
     const interviewPhotos = this.getPhotosForInterview(interview.id);
 
     // V5.1: generation, job fingerprinting and saving all read the interview through the same
@@ -7394,7 +7332,7 @@ export class StorageManager {
     const photosToDelete = Array.from(this.photos.values()).filter((p) => p.interviewId === interviewId);
     for (const photo of photosToDelete) {
       this.photos.delete(photo.id);
-      await this.removeDoc('interviewPhotos', photo.id);
+      await this.removePhotoRemoteDocs(photo.id);
     }
 
     // 3. Delete all audios
@@ -7464,7 +7402,7 @@ export class StorageManager {
     const photosToDelete = Array.from(this.photos.values()).filter((p) => p.interviewId === interviewId);
     for (const photo of photosToDelete) {
       this.photos.delete(photo.id);
-      await this.removeDoc('interviewPhotos', photo.id);
+      await this.removePhotoRemoteDocs(photo.id);
     }
 
     // 3. Remove all audios for this interview

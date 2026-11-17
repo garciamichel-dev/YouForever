@@ -6,8 +6,8 @@
  * GET /api/admin/version, so a stale deployment (old frontend or old server) is visible at once.
  * Participants never see this label.
  */
-export const APP_VERSION = '5.4.2';
+export const APP_VERSION = '5.4.3';
 export const APP_VERSION_LABEL = `V${APP_VERSION}`;
 export const APP_RELEASE_DATE = '2026-11-16';
 export const APP_RELEASE_SUMMARY =
-  'Mi Esencia: código general por defecto, prompt aplicado igual con ChatGPT, pie de fotos escrito por la IA y acceso mucho más ligero.';
+  'Fotografías: se guardan con su imagen en Firestore (en fragmentos si son grandes), ya no se sustituyen por un dibujo sepia ni se borran al arrancar o al editar una respuesta.';

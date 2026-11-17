@@ -17,6 +17,7 @@ import { GoogleGenAI } from '@google/genai';
 // V5.3.2: server access through the Firebase Admin SDK (service identity, see firestoreAdmin.ts).
 import { getServerFirestore, collection, doc } from '../firestoreAdmin.ts';
 import { storage } from '../storage.ts';
+import { decodeImageDataUrl, isArchivalPlaceholderPng } from '../photoIntegrity.ts';
 import { firestoreTelemetry } from '../firestoreTelemetry.ts';
 import { generateQACompilationMarkdown } from '../backupService.ts';
 import {
@@ -3209,18 +3210,13 @@ class MiEsenciaStore {
     }
     if (!attachment) return null;
 
-    const fromStorage = storage.getPhotoBuffer(photoId);
+    // V5.4.3: local copy, then Firestore; a copy kept in the testimony is used only when it is a
+    // real image (never the synthetic picture older versions generated for a missing photo).
+    const fromStorage = await storage.getPhotoBufferAsync(photoId).catch(() => null);
     if (fromStorage && fromStorage.buffer.length > 0) return fromStorage;
-    const decode = (dataUrl?: string) => {
-      const match = String(dataUrl || '').match(/^data:([^;]+);base64,(.+)$/);
-      return match && !match[1].includes('svg')
-        ? { buffer: Buffer.from(match[2], 'base64'), mimeType: match[1] || 'image/jpeg' }
-        : null;
-    };
-    const fromAttachment = decode(attachment.dataUrl);
-    if (fromAttachment) return fromAttachment;
-    const record = await storage.getPhotoByIdAsync(photoId).catch(() => null);
-    return decode(record?.dataUrl);
+    const fromAttachment = decodeImageDataUrl(attachment.dataUrl);
+    if (fromAttachment && !isArchivalPlaceholderPng(fromAttachment.buffer)) return fromAttachment;
+    return null;
   }
 
   public async converseWithAvatar(params: {
@@ -4626,6 +4622,8 @@ Respuesta directa en primera persona singular:`;
     }
 
     const pdfId = `comp_pdf_int_${interviewId}`;
+    // V5.4.3: images not held by this instance are read from Firestore before building the PDF.
+    await storage.ensureInterviewPhotosHydrated(interviewId).catch(() => undefined);
     const built = this.buildTestimonyBlocksFromInterviewData({
       includePhotoData: true,
       interviewId,
