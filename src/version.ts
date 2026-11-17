@@ -6,8 +6,8 @@
  * GET /api/admin/version, so a stale deployment (old frontend or old server) is visible at once.
  * Participants never see this label.
  */
-export const APP_VERSION = '5.4.3';
+export const APP_VERSION = '5.4.4';
 export const APP_VERSION_LABEL = `V${APP_VERSION}`;
 export const APP_RELEASE_DATE = '2026-11-16';
 export const APP_RELEASE_SUMMARY =
-  'Fotografías: se guardan con su imagen en Firestore (en fragmentos si son grandes), ya no se sustituyen por un dibujo sepia ni se borran al arrancar o al editar una respuesta.';
+  'Notas de voz: se guardan con su grabación en Firestore (en fragmentos si son largas) y ya no se pierden al reiniciar ni al editar una respuesta. Incluye la corrección de fotografías de V5.4.3.';

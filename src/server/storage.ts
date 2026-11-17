@@ -109,8 +109,10 @@ import {
   resolveLocalDiskDurability,
 } from './durableDocs.ts';
 import {
+  decodeAudioDataUrl,
   decodeImageDataUrl,
   isArchivalPlaceholderPng,
+  isRealAudioDataUrl,
   isRealPhotoDataUrl,
   mergeEditedAnswerPhotos,
 } from './photoIntegrity.ts';
@@ -2079,12 +2081,10 @@ export class StorageManager {
     }
 
     if (audiosSnap) {
-      audiosSnap.forEach((docSnap: any) => {
-        const aud = docSnap.data() as InterviewAudioRecord;
-        if (aud && aud.id) {
-          this.audios.set(aud.id, aud);
-        }
-      });
+      // V5.4.4: chunked records reassembled; a remote record never erases a local recording.
+      const rawAudios: any[] = [];
+      audiosSnap.forEach((docSnap: any) => rawAudios.push(docSnap.data()));
+      this.ingestRemoteAudioDocs(rawAudios);
     }
 
     if (manuscriptsSnap) {
@@ -2358,10 +2358,11 @@ export class StorageManager {
         unwrap(5)?.forEach((d: any) => rawPhotos.push(d.data()));
         this.ingestRemotePhotoDocs(rawPhotos);
       }
-      unwrap(6)?.forEach((d: any) => {
-        const aud = d.data() as InterviewAudioRecord;
-        if (aud?.id) this.audios.set(aud.id, aud);
-      });
+      {
+        const rawAudios: any[] = [];
+        unwrap(6)?.forEach((d: any) => rawAudios.push(d.data()));
+        this.ingestRemoteAudioDocs(rawAudios);
+      }
       return bulkOutcome.results.some((r) => r.status === 'fulfilled');
     }
 
@@ -2470,10 +2471,11 @@ export class StorageManager {
         unwrap(5)?.forEach((d: any) => rawPhotos.push(d.data()));
         this.ingestRemotePhotoDocs(rawPhotos);
       }
-      unwrap(6)?.forEach((d: any) => {
-        const aud = d.data() as InterviewAudioRecord;
-        if (aud?.id) this.audios.set(aud.id, aud);
-      });
+      {
+        const rawAudios: any[] = [];
+        unwrap(6)?.forEach((d: any) => rawAudios.push(d.data()));
+        this.ingestRemoteAudioDocs(rawAudios);
+      }
       unwrap(7)?.forEach((d: any) => {
         const s = d.data() as BookShareRecord;
         if (s?.id) this.bookShares.set(s.id, s);
@@ -3101,9 +3103,15 @@ export class StorageManager {
 
     // V5.4.3: copy to Firestore any photo whose image still lives only on this instance's disk
     // (records written by older versions with `storedOnDisk: true`). Runs in the background.
-    void this.migrateDiskOnlyPhotosToDurableStore().catch((err) =>
-      console.warn('[Photos] Migración de fotografías locales a Firestore no completada:', err?.message || err)
-    );
+    // V5.4.4: the same for voice notes, after the photos.
+    void this.migrateDiskOnlyPhotosToDurableStore()
+      .catch((err) =>
+        console.warn('[Photos] Migración de fotografías locales a Firestore no completada:', err?.message || err)
+      )
+      .then(() => this.migrateLocalAudiosToDurableStore())
+      .catch((err) =>
+        console.warn('[Audio] Migración de notas de voz locales a Firestore no completada:', err?.message || err)
+      );
   }
 
   // --- Configuration ---
@@ -3799,18 +3807,9 @@ export class StorageManager {
       const newAudioId = `audio_${newInterviewId}_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 6)}`;
       audioIdMap.set(sa.id, newAudioId);
 
-      const audioBuf = this.getAudioBuffer(sa.id);
-      if (audioBuf) {
-        try {
-          const audioDir = path.join(process.cwd(), 'data', 'audios');
-          if (!fs.existsSync(audioDir)) {
-            fs.mkdirSync(audioDir, { recursive: true });
-          }
-          fs.writeFileSync(path.join(audioDir, `${newAudioId}.bin`), audioBuf.buffer);
-        } catch (diskErr) {
-          console.warn('Could not duplicate audio binary on disk:', diskErr);
-        }
-      }
+      // V5.4.4: the source recording is looked up locally and then in Firestore.
+      const audioBuf = await this.getAudioBufferAsync(sa.id);
+      if (audioBuf) this.saveAudioBinaryToDisk(newAudioId, audioBuf.buffer);
 
       const newParticipantId = participantIdMap.get(sa.participantId) || sa.participantId;
       const clonedAudio: InterviewAudioRecord = {
@@ -3818,16 +3817,15 @@ export class StorageManager {
         id: newAudioId,
         interviewId: newInterviewId,
         participantId: newParticipantId,
-        audioUrl: `/api/audios/${newAudioId}`,
+        audioUrl: `/api/audio/${newAudioId}`,
+        ...(audioBuf && !isRealAudioDataUrl(sa.audioDataUrl)
+          ? { audioDataUrl: `data:${audioBuf.mimeType};base64,${audioBuf.buffer.toString('base64')}` }
+          : {}),
       };
+      delete (clonedAudio as any).storedOnDisk;
+      delete (clonedAudio as any).durableAudioAt;
       this.audios.set(newAudioId, clonedAudio);
-
-      const firestoreAudioRecord: any = { ...clonedAudio };
-      if (firestoreAudioRecord.audioDataUrl && firestoreAudioRecord.audioDataUrl.length > 50_000) {
-        firestoreAudioRecord.audioDataUrl = '';
-        firestoreAudioRecord.storedOnDisk = true;
-      }
-      await this.persistDoc('interviewAudio', newAudioId, firestoreAudioRecord);
+      await this.persistAudioRecordDurable(clonedAudio);
     }
 
     // 4. Clone answers with remapped participantId, photoIds, and audioIds
@@ -3860,7 +3858,7 @@ export class StorageManager {
           id: mappedAid,
           interviewId: newInterviewId,
           participantId: participantIdMap.get(a.participantId) || remappedParticipantId,
-          audioUrl: `/api/audios/${mappedAid}`,
+          audioUrl: `/api/audio/${mappedAid}`,
         };
       };
 
@@ -4274,30 +4272,57 @@ export class StorageManager {
   private async fetchRemotePhotoRecord(
     photoId: string
   ): Promise<{ record: InterviewPhotoRecord | null; failed: boolean }> {
+    const result = await this.fetchRemoteChunkedRecord<InterviewPhotoRecord>('interviewPhotos', photoId);
+    const record = result.record;
+    if (record && record.dataUrl && !isRealPhotoDataUrl(record.dataUrl)) record.dataUrl = '';
+    return result;
+  }
+
+  /**
+   * V5.4.3 / V5.4.4 — One record of a media collection (photos, voice notes) read straight from
+   * Firestore, reassembled when it was stored as a manifest plus chunk documents.
+   */
+  private async fetchRemoteChunkedRecord<T extends { id: string }>(
+    collectionName: string,
+    docId: string
+  ): Promise<{ record: T | null; failed: boolean }> {
     const read = async (id: string): Promise<Record<string, any> | null> => {
-      if (this.remoteDocStore.getDoc) return (await this.remoteDocStore.getDoc('interviewPhotos', id)) as any;
-      const snap = await firestoreTelemetry.trackedGetDoc(serverDb, doc(serverDb, 'interviewPhotos', id), 'storage');
+      if (this.remoteDocStore.getDoc) return (await this.remoteDocStore.getDoc(collectionName, id)) as any;
+      const snap = await firestoreTelemetry.trackedGetDoc(serverDb, doc(serverDb, collectionName, id), 'storage');
       return snap.exists() ? (snap.data() as Record<string, any>) : null;
     };
     try {
-      const head = await read(photoId);
+      const head = await read(docId);
       if (!head) return { record: null, failed: false };
       const rawDocs: any[] = [head];
       if (head._chunked === true) {
         const count = Number(head._chunkCount) || 0;
         for (let i = 0; i < count; i++) {
-          const part = await read(chunkDocId(photoId, i));
+          const part = await read(chunkDocId(docId, i));
           if (part) rawDocs.push(part);
         }
       }
-      const { docs, incomplete } = reassembleChunkedDocs<InterviewPhotoRecord>(rawDocs);
+      const { docs, incomplete } = reassembleChunkedDocs<T>(rawDocs);
       if (incomplete.length > 0) return { record: null, failed: true };
-      const record = docs.find((d) => d && d.id === photoId) || null;
-      if (record && record.dataUrl && !isRealPhotoDataUrl(record.dataUrl)) record.dataUrl = '';
-      return { record, failed: false };
+      return { record: docs.find((d) => d && d.id === docId) || null, failed: false };
     } catch (err: any) {
-      console.warn(`[Photos] No se pudo leer la fotografía ${photoId} de Firestore:`, err?.message || err);
+      console.warn(`[Media] No se pudo leer ${collectionName}/${docId} de Firestore:`, err?.message || err);
       return { record: null, failed: true };
+    }
+  }
+
+  /** V5.4.3 / V5.4.4 — Explicit deletion of a media record in Firestore and of its chunks. */
+  private async removeChunkedRemoteDocs(collectionName: string, docId: string): Promise<void> {
+    let chunkCount = 0;
+    try {
+      const head = this.remoteDocStore.getDoc ? await this.remoteDocStore.getDoc(collectionName, docId) : null;
+      if (head && (head as any)._chunked === true) chunkCount = Number((head as any)._chunkCount) || 0;
+    } catch {
+      // The record itself is still deleted below.
+    }
+    await this.removeDoc(collectionName, docId);
+    for (let i = 0; i < chunkCount; i++) {
+      await this.removeDoc(collectionName, chunkDocId(docId, i));
     }
   }
 
@@ -4383,19 +4408,7 @@ export class StorageManager {
 
   /** V5.4.3 — Explicit deletion of a photo in Firestore: its record and, if chunked, its chunks. */
   private async removePhotoRemoteDocs(photoId: string): Promise<void> {
-    let chunkCount = 0;
-    try {
-      const head = this.remoteDocStore.getDoc
-        ? await this.remoteDocStore.getDoc('interviewPhotos', photoId)
-        : null;
-      if (head && (head as any)._chunked === true) chunkCount = Number((head as any)._chunkCount) || 0;
-    } catch {
-      // The record itself is still deleted below.
-    }
-    await this.removeDoc('interviewPhotos', photoId);
-    for (let i = 0; i < chunkCount; i++) {
-      await this.removeDoc('interviewPhotos', chunkDocId(photoId, i));
-    }
+    await this.removeChunkedRemoteDocs('interviewPhotos', photoId);
   }
 
   /**
@@ -4586,26 +4599,166 @@ export class StorageManager {
     return this.audios.get(audioId);
   }
 
+  /** V5.4.4: a cached record WITHOUT its recording is completed from Firestore. */
   public async getAudioByIdAsync(audioId: string): Promise<InterviewAudioRecord | undefined> {
     const cached = this.audios.get(audioId);
-    if (cached) return cached;
-    try {
-      const snap = await firestoreTelemetry.trackedGetDoc(
-        serverDb,
-        doc(serverDb, 'interviewAudio', audioId),
-        'storage'
-      );
-      if (snap.exists()) {
-        const aud = snap.data() as InterviewAudioRecord;
-        if (aud) {
-          this.audios.set(audioId, aud);
-          return aud;
+    if (cached && isRealAudioDataUrl(cached.audioDataUrl)) return cached;
+    await this.getAudioBufferAsync(audioId).catch(() => null);
+    const after = this.audios.get(audioId);
+    if (after) return after;
+    const remote = await this.fetchRemoteChunkedRecord<InterviewAudioRecord>('interviewAudio', audioId);
+    if (remote.record) {
+      this.audios.set(audioId, remote.record);
+      return remote.record;
+    }
+    return cached;
+  }
+
+  /**
+   * V5.4.4 — Same causes as the photos (V5.4.3): voice notes above 50,000 characters reached
+   * Firestore WITHOUT their recording (`sanitizeDocForFirestore` emptied `audioDataUrl`, and the
+   * record was marked `storedOnDisk`), so the recording lived only on Cloud Run's ephemeral disk and
+   * vanished on every restart. Recordings are now written durably (chunked when large).
+   */
+  private async persistAudioRecordDurable(record: InterviewAudioRecord): Promise<void> {
+    this.saveStateToDisk();
+    let toWrite: InterviewAudioRecord = { ...record };
+    delete (toWrite as any).storedOnDisk;
+
+    if (!isRealAudioDataUrl(toWrite.audioDataUrl)) {
+      const local = this.getAudioBuffer(record.id);
+      if (local) {
+        toWrite.audioDataUrl = `data:${local.mimeType};base64,${local.buffer.toString('base64')}`;
+      } else {
+        const remote = await this.fetchRemoteChunkedRecord<InterviewAudioRecord>('interviewAudio', record.id);
+        if (remote.failed) {
+          console.warn(
+            `[Audio] ${record.id}: no se actualizó Firestore porque no se pudo verificar la copia remota (se conserva intacta).`
+          );
+          return;
+        }
+        if (remote.record && isRealAudioDataUrl(remote.record.audioDataUrl)) {
+          toWrite = { ...remote.record, ...toWrite, audioDataUrl: remote.record.audioDataUrl };
+          delete (toWrite as any).storedOnDisk;
+        } else {
+          toWrite.audioDataUrl = '';
         }
       }
-    } catch (err) {
-      console.warn(`[getAudioByIdAsync] Error loading audio ${audioId} from Firestore:`, err);
     }
-    return undefined;
+
+    delete (toWrite as any).audioDataUrl_storedSeparately;
+    const hasRecording = isRealAudioDataUrl(toWrite.audioDataUrl);
+    if (hasRecording) (toWrite as any).durableAudioAt = new Date().toISOString();
+    else delete (toWrite as any).durableAudioAt;
+    const result = await this.persistRemoteDocDurable(
+      'interviewAudio',
+      record.id,
+      toWrite,
+      ['interviewId', 'questionId', 'participantId'],
+      ['audioDataUrl']
+    );
+    if (result.status !== 'written') {
+      console.warn(`[Audio] ${record.id}: la copia en Firestore no se pudo escribir (${result.error || 'error'}).`);
+      return;
+    }
+    const mem = this.audios.get(record.id);
+    if (mem && hasRecording) {
+      (mem as any).durableAudioAt = (toWrite as any).durableAudioAt;
+      delete (mem as any).storedOnDisk;
+      delete (mem as any).audioDataUrl_storedSeparately;
+      this.audios.set(record.id, mem);
+    }
+  }
+
+  /**
+   * V5.4.4 — Merges voice-note documents read from Firestore (manifest + chunks reassembled). A
+   * remote record without its recording never erases a recording this instance still holds.
+   */
+  private ingestRemoteAudioDocs(rawDocs: any[]): void {
+    const { docs } = reassembleChunkedDocs<InterviewAudioRecord>(rawDocs);
+    for (const remote of docs) {
+      if (!remote || !remote.id) continue;
+      const prevMem = this.audios.get(remote.id);
+      if (!isRealAudioDataUrl(remote.audioDataUrl)) {
+        remote.audioDataUrl = prevMem && isRealAudioDataUrl(prevMem.audioDataUrl) ? prevMem.audioDataUrl : '';
+      }
+      this.audios.set(remote.id, remote);
+    }
+  }
+
+  /**
+   * V5.4.4 — Like `getAudioBuffer`, then Cloud Firestore (the only durable store on Cloud Run).
+   * A remote recording is cached in memory and on disk for the next request.
+   */
+  public async getAudioBufferAsync(audioId: string): Promise<{ buffer: Buffer; mimeType: string } | null> {
+    const local = this.getAudioBuffer(audioId);
+    if (local) return local;
+    const remote = await this.fetchRemoteChunkedRecord<InterviewAudioRecord>('interviewAudio', audioId);
+    const decoded = remote.record ? decodeAudioDataUrl(remote.record.audioDataUrl) : null;
+    if (!remote.record || !decoded) return null;
+    const current = this.audios.get(audioId);
+    this.audios.set(audioId, current ? { ...current, audioDataUrl: remote.record.audioDataUrl } : remote.record);
+    this.saveAudioBinaryToDisk(audioId, decoded.buffer);
+    return { buffer: decoded.buffer, mimeType: remote.record.mimeType || decoded.mimeType || 'audio/webm' };
+  }
+
+  private saveAudioBinaryToDisk(audioId: string, buffer: Buffer): void {
+    try {
+      const audioDir = path.join(process.cwd(), 'data', 'audios');
+      if (!fs.existsSync(audioDir)) fs.mkdirSync(audioDir, { recursive: true });
+      fs.writeFileSync(path.join(audioDir, `${audioId}.bin`), buffer);
+    } catch (diskErr) {
+      console.warn('[Disk Audio Storage Note]:', diskErr);
+    }
+  }
+
+  /**
+   * V5.4.4 — Voice notes older versions wrote to Firestore without their recording: while this
+   * instance still holds the recording, it is checked against Firestore once and written durably
+   * if Firestore lacks it. Verified notes are marked (`durableAudioAt`).
+   */
+  public async migrateLocalAudiosToDurableStore(limit = 200): Promise<number> {
+    let migrated = 0;
+    let checked = 0;
+    for (const audio of Array.from(this.audios.values())) {
+      if (checked >= limit) break;
+      if ((audio as any).durableAudioAt) continue;
+      const local = this.getAudioBuffer(audio.id);
+      if (!local) continue;
+      checked++;
+      const remote = await this.fetchRemoteChunkedRecord<InterviewAudioRecord>('interviewAudio', audio.id);
+      if (remote.failed) continue;
+      if (remote.record && isRealAudioDataUrl(remote.record.audioDataUrl)) {
+        (audio as any).durableAudioAt = (remote.record as any).durableAudioAt || new Date().toISOString();
+        this.audios.set(audio.id, audio);
+        continue;
+      }
+      delete (audio as any).storedOnDisk;
+      delete (audio as any).audioDataUrl_storedSeparately;
+      audio.audioDataUrl = `data:${local.mimeType};base64,${local.buffer.toString('base64')}`;
+      this.audios.set(audio.id, audio);
+      await this.persistAudioRecordDurable(audio);
+      migrated++;
+    }
+    if (checked > 0) this.saveStateToDisk();
+    if (migrated > 0) console.info(`[Audio] ${migrated} nota(s) de voz copiadas con su grabación a Firestore.`);
+    return migrated;
+  }
+
+  /** V5.4.4 — Before a backup ZIP: recordings and images missing here are read from Firestore. */
+  public async ensureInterviewMediaHydrated(interviewId: string): Promise<void> {
+    await this.ensureInterviewPhotosHydrated(interviewId);
+    for (const a of this.getAudiosForInterview(interviewId)) {
+      if (isRealAudioDataUrl(a.audioDataUrl)) continue;
+      const buf = await this.getAudioBufferAsync(a.id).catch(() => null);
+      if (buf && !isRealAudioDataUrl(this.audios.get(a.id)?.audioDataUrl)) {
+        const mem = this.audios.get(a.id);
+        if (mem) {
+          mem.audioDataUrl = `data:${buf.mimeType};base64,${buf.buffer.toString('base64')}`;
+          this.audios.set(a.id, mem);
+        }
+      }
+    }
   }
 
   /**
@@ -4751,14 +4904,10 @@ export class StorageManager {
 
     this.audios.set(audioId, audioRecord);
 
-    // If audio is large (> 50KB), omit the heavy base64 payload from the Firestore document
-    // to strictly prevent Firestore 1MB document limit and gRPC stream rejections.
-    const firestoreRecord: any = { ...audioRecord };
-    if (firestoreRecord.audioDataUrl && firestoreRecord.audioDataUrl.length > 50_000) {
-      firestoreRecord.audioDataUrl = '';
-      firestoreRecord.storedOnDisk = true;
-    }
-    await this.persistDoc('interviewAudio', audioId, firestoreRecord);
+    // V5.4.4: the recording always reaches Firestore (chunked above the document limit). Before,
+    // any recording above 50 KB was written without its audio and lived only on Cloud Run's
+    // ephemeral disk, so it was lost on the next restart.
+    await this.persistAudioRecordDurable(audioRecord);
 
     await this.addAuditLog('UPLOAD_VOICE_RECORDING', 'audio', audioId, participant.name, {
       interviewId: interview.id,
@@ -4785,16 +4934,25 @@ export class StorageManager {
       }
     }
 
-    if (audio?.audioDataUrl) {
-      let raw = audio.audioDataUrl;
-      if (raw.startsWith('data:')) {
-        const cIdx = raw.indexOf(',');
-        if (cIdx !== -1) raw = raw.substring(cIdx + 1);
-      }
+    const fromRecord = decodeAudioDataUrl(audio?.audioDataUrl);
+    if (fromRecord) return { buffer: fromRecord.buffer, mimeType: audio?.mimeType || fromRecord.mimeType || 'audio/webm' };
+    if (audio?.audioDataUrl && audio.audioDataUrl.length > 32 && !audio.audioDataUrl.startsWith('data:')) {
+      // Legacy records holding raw base64 without the data: prefix.
       return {
-        buffer: Buffer.from(raw.replace(/\s+/g, ''), 'base64'),
+        buffer: Buffer.from(audio.audioDataUrl.replace(/\s+/g, ''), 'base64'),
         mimeType: audio.mimeType || 'audio/webm',
       };
+    }
+
+    // V5.4.4: an answer may still hold a small inline copy of the recording.
+    for (const ans of this.answers.values()) {
+      const atts = [ans.audio, ...(ans.audioRecordings || [])];
+      for (const att of atts) {
+        if (att && att.id === audioId) {
+          const inline = decodeAudioDataUrl((att as any).audioDataUrl);
+          if (inline) return { buffer: inline.buffer, mimeType: att.mimeType || inline.mimeType || 'audio/webm' };
+        }
+      }
     }
     return null;
   }
@@ -4811,7 +4969,7 @@ export class StorageManager {
     }
 
     this.audios.delete(audioId);
-    await this.removeDoc('interviewAudio', audioId);
+    await this.removeChunkedRemoteDocs('interviewAudio', audioId);
 
     // Also remove reference from any answer record in this interview
     let updatedAnswer: AnswerRecord | undefined;
@@ -5066,12 +5224,8 @@ export class StorageManager {
         if (editedTranscription && editedTranscription !== stored.transcription) {
           stored.transcription = editedTranscription;
           this.audios.set(stored.id, stored);
-          const firestoreAudio: any = { ...stored };
-          if (firestoreAudio.audioDataUrl && firestoreAudio.audioDataUrl.length > 50_000) {
-            firestoreAudio.audioDataUrl = '';
-            firestoreAudio.storedOnDisk = true;
-          }
-          await this.persistDoc('interviewAudio', stored.id, firestoreAudio);
+          // V5.4.4: durable write that never replaces the remote recording with an empty one.
+          await this.persistAudioRecordDurable(stored);
         }
 
         resolvedAudioRecordings.push({
@@ -5194,8 +5348,14 @@ export class StorageManager {
         });
       }
       if (resolvedAudioRecordings.length > 0) {
+        // V5.4.4: an edit never detaches a saved voice note the browser did not resend (stale list
+        // of a background autosave); voice notes are removed only with their explicit delete action.
+        const incomingAudioIds = new Set(resolvedAudioRecordings.map((a) => a.id));
+        const preservedAudios = (existing.audioRecordings || (existing.audio ? [existing.audio] : [])).filter(
+          (a) => a && a.id && !incomingAudioIds.has(a.id)
+        );
         existing.audio = resolvedAudioAttachment;
-        existing.audioRecordings = resolvedAudioRecordings;
+        existing.audioRecordings = [...preservedAudios, ...resolvedAudioRecordings];
       }
       existing.editHistory = history;
       existing.updatedAt = now.toISOString();
@@ -7339,7 +7499,7 @@ export class StorageManager {
     const audiosToDelete = Array.from(this.audios.values()).filter((a) => a.interviewId === interviewId);
     for (const audio of audiosToDelete) {
       this.audios.delete(audio.id);
-      await this.removeDoc('interviewAudio', audio.id);
+      await this.removeChunkedRemoteDocs('interviewAudio', audio.id);
     }
 
     // 4. Delete all manuscripts
@@ -7409,7 +7569,7 @@ export class StorageManager {
     const audiosToDelete = Array.from(this.audios.values()).filter((a) => a.interviewId === interviewId);
     for (const audio of audiosToDelete) {
       this.audios.delete(audio.id);
-      await this.removeDoc('interviewAudio', audio.id);
+      await this.removeChunkedRemoteDocs('interviewAudio', audio.id);
     }
 
     // 4. Reset participants progression

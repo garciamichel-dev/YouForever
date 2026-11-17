@@ -1739,18 +1739,10 @@ apiRouter.get('/audio/:audioId', async (req: Request, res: Response) => {
   try {
     if (!(await authorizeMediaRequest(req, res, 'audio', req.params.audioId))) return;
     res.setHeader('Vary', 'Cookie, Authorization');
-    const audioPayload = storage.getAudioBuffer(req.params.audioId);
-    if (!audioPayload) {
-      // Fallback try loading from Firestore
-      const audio = await storage.getAudioByIdAsync(req.params.audioId);
-      if (!audio || !audio.audioDataUrl) {
-        res.status(404).json({ success: false, error: 'Archivo de voz no encontrado.' });
-        return;
-      }
-    }
-
-    const audioData = audioPayload || storage.getAudioBuffer(req.params.audioId);
+    // V5.4.4: local copy first, then Cloud Firestore (reassembling chunked recordings).
+    const audioData = await storage.getAudioBufferAsync(req.params.audioId);
     if (!audioData) {
+      res.setHeader('Cache-Control', 'no-store');
       res.status(404).json({ success: false, error: 'Archivo de voz no encontrado.' });
       return;
     }

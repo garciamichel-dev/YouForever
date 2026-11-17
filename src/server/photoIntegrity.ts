@@ -17,6 +17,9 @@
  * 4. Editing an answer removed (and deleted from Firestore) any saved photo the browser did not
  *    resend, e.g. a background autosave with a stale photo list.
  *
+ * V5.4.4 — Voice notes had causes 1 and 4 as well (recordings above 50,000 characters reached
+ * Firestore without their audio); the audio helpers below serve the same fix.
+ *
  * This module holds the pure helpers used by the fix: recognising a real image, recognising the
  * old synthetic placeholder (so it is never served or written again) and merging the photo list
  * of an edited answer without ever dropping a saved photo implicitly.
@@ -100,6 +103,31 @@ export function isArchivalPlaceholderPng(buffer: Buffer | null | undefined): boo
 export function isRealPhotoDataUrl(dataUrl: unknown): dataUrl is string {
   const decoded = decodeImageDataUrl(dataUrl);
   return Boolean(decoded && !isArchivalPlaceholderPng(decoded.buffer));
+}
+
+/**
+ * V5.4.4 — Decodes a base64 voice-note data URL (`data:audio/webm;codecs=opus;base64,...`).
+ * Images and empty/non-base64 values → null.
+ */
+export function decodeAudioDataUrl(dataUrl: unknown): DecodedImage | null {
+  if (typeof dataUrl !== 'string' || dataUrl.length <= 32 || !dataUrl.startsWith('data:')) return null;
+  const comma = dataUrl.indexOf(',');
+  if (comma === -1) return null;
+  const header = dataUrl.slice(5, comma);
+  if (!header.includes('base64') || header.startsWith('image/')) return null;
+  const mimeType = header.replace(/;base64$/, '').trim() || 'audio/webm';
+  const buffer = Buffer.from(dataUrl.substring(comma + 1).replace(/\s+/g, ''), 'base64');
+  return buffer.length > 0 ? { buffer, mimeType } : null;
+}
+
+/** V5.4.4 — A voice note's real recording (a non-empty base64 audio data URL). */
+export function isRealAudioDataUrl(dataUrl: unknown): dataUrl is string {
+  // Cheap check (recordings can be several MB): base64 data URL with a payload, not an image.
+  if (typeof dataUrl !== 'string' || dataUrl.length <= 32 || !dataUrl.startsWith('data:')) return false;
+  const comma = dataUrl.indexOf(',');
+  if (comma === -1 || comma >= dataUrl.length - 4) return false;
+  const header = dataUrl.slice(5, comma);
+  return header.includes('base64') && !header.startsWith('image/');
 }
 
 /**

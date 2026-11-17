@@ -17,6 +17,8 @@ interface StorageReader {
   getPhotosForInterview(interviewId: string): InterviewPhotoRecord[];
   getAudiosForInterview(interviewId: string): InterviewAudioRecord[];
   getManuscriptsForInterview(interviewId: string): ManuscriptRecord[];
+  /** V5.4.4: loads from Firestore the images and recordings this instance does not hold. */
+  ensureInterviewMediaHydrated?(interviewId: string): Promise<void>;
 }
 
 const STAGE_LABELS: Record<string, string> = {
@@ -880,6 +882,11 @@ export async function buildInterviewBackupZip(
   const interview = storage.getInterview(interviewId);
   if (!interview) {
     throw new Error('Entrevista no encontrada para exportación de respaldo.');
+  }
+
+  // V5.4.4: the backup must contain every photo and voice note, also those held only in Firestore.
+  if (storage.ensureInterviewMediaHydrated) {
+    await storage.ensureInterviewMediaHydrated(interviewId).catch(() => undefined);
   }
 
   const participants = storage.getParticipantsForInterview(interviewId);
