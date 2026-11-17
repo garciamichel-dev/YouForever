@@ -1,17 +1,20 @@
 import fs from 'fs';
 import path from 'path';
 import zlib from 'zlib';
-import { initializeApp, getApps, getApp } from 'firebase/app';
+import { isPendingAutosavedAnswer, type AutosavableAnswerRecord } from '../logic/answerAutosave.ts';
+// V5.3.2: the server reaches Firestore only through the Firebase Admin SDK with its service
+// identity (Application Default Credentials). See firestoreAdmin.ts.
 import {
-  getFirestore,
+  getServerFirestore,
   collection,
   doc,
   getDocs,
   query,
   where,
   setLogLevel,
-} from 'firebase/firestore';
-import firebaseConfig from '../../firebase-applet-config.json';
+  runTransaction,
+} from './firestoreAdmin.ts';
+import { createHash as sha256Hash } from 'node:crypto';
 import { firestoreTelemetry } from './firestoreTelemetry.ts';
 import {
   detectChangedInterviewIds,
@@ -62,9 +65,11 @@ import {
   mergeAnswerRecordNonDestructive,
 } from '../logic/interviewRules.ts';
 import {
+  MiEsenciaArchivedCompilationPdf,
   validateCompilationPdfRecord,
 } from '../logic/miEsenciaRules.ts';
 import {
+  BookFailureCategory,
   BookGenerationReasonCode,
   ComposedChapterSectionBlock,
   DemoEditorialConfig,
@@ -73,12 +78,36 @@ import {
   DemoNarrativeStyleId,
   ParticipantBookVersionRecord,
   auditAndApproveBookManuscript,
+  buildIncompleteDraftUserNotice,
   buildSafeDemoPdfFilename,
   buildParticipantInitialManuscriptFromAnswers,
   composeBookPages,
   hasUpdatedAnswersSinceBookVersion,
   repairManuscriptOmissions,
+  BookApprovalEvidence,
+  BookDeliveryDecision,
+  DocumentaryAuditReport,
+  EditorialQualityAuditReport,
+  classifyCoverageCounts,
+  evaluateBookDeliveryEligibility,
+  isBookApprovalEvidenceRef,
+  isFullBookApprovalEvidence,
+  validateManuscriptTechnicalIntegrity,
 } from '../logic/demoStoryRules.ts';
+import {
+  BookAuditIncidentStatus,
+  BookAuditReport,
+  buildBookAuditReport,
+  refreshBookAuditReportCounters,
+} from '../logic/bookAuditReport.ts';
+import {
+  FIRESTORE_SAFE_DOC_BYTES,
+  LocalDiskDurability,
+  chunkDocId,
+  planChunkedDoc,
+  reassembleChunkedDocs,
+  resolveLocalDiskDurability,
+} from './durableDocs.ts';
 import {
   PrivacyConsentRecord,
   BookShareRecord,
@@ -115,8 +144,18 @@ import {
   AudioQualityStatus,
   BookBatchCheckpointPayload,
   BookGenerationProgressEvent,
+  auditWithHybridSemantics,
   classifyBookFailureReasonCode,
+  ParsedAiManuscriptBatchResponse,
+  SemanticJudgeFunction,
 } from './geminiService.ts';
+import {
+  computeBookGenerationFingerprint,
+  computeBookSourceFingerprint,
+  computeManuscriptContentHash,
+  issueBookApprovalEvidence,
+  verifyBookApprovalEvidence,
+} from './bookApproval.ts';
 import {
   bookJobManager,
   BookGenerationJobRecord,
@@ -128,8 +167,7 @@ try {
   // Ignore in case setLogLevel is not supported in current environment
 }
 
-const firebaseApp = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
-export const serverDb = getFirestore(firebaseApp, firebaseConfig.firestoreDatabaseId);
+export const serverDb = getServerFirestore();
 
 function sanitizeForFirestore<T>(obj: T): T {
   return JSON.parse(JSON.stringify(obj));
@@ -173,7 +211,264 @@ interface QuestionnaireVersionDoc {
   createdAt: string;
 }
 
-class StorageManager {
+/**
+ * V5.2 — Remote document store behind `persistDoc` / `removeDoc` (Cloud Firestore in production).
+ * The local snapshot on disk remains the primary copy; remote writes stay best-effort.
+ */
+export interface StorageRemoteDocStore {
+  setDoc(collectionName: string, docId: string, data: Record<string, unknown>): Promise<void>;
+  deleteDoc(collectionName: string, docId: string): Promise<void>;
+  /** V5.3: single-document read (used to recover an audit report not held in memory). */
+  getDoc?(collectionName: string, docId: string): Promise<Record<string, unknown> | null>;
+  /**
+   * V5.3.2 — Atomic commit of a book version with the interview quota counters (one Firestore
+   * transaction). Optimistic concurrency on `quotaRevision` / counters prevents duplicate versions
+   * and double quota consumption across instances; `saveKey` makes a retry idempotent.
+   */
+  commitBookVersion?(request: BookVersionCommitRequest): Promise<BookVersionCommitResult>;
+}
+
+/** V5.3.2 — Quota fields guarded across instances. */
+export type QuotaTrackedInterview = InterviewRecord & {
+  quotaRevision?: number;
+  lastBookSaveKey?: string;
+  lastBookSaveVersionId?: string;
+  /** Highest version number ever committed for this interview (never reused, even after deletes). */
+  lastBookVersionNumber?: number;
+  /** V5.4.1: an administrator deleted every book version up to this number (never shown again). */
+  bookVersionsClearedUpTo?: number;
+};
+
+export interface BookVersionCommitRequest {
+  interviewId: string;
+  versionId: string;
+  saveKey: string;
+  /** Quota state this save was computed from (local view before the save). */
+  expected: { quotaRevision: number; bookGeneratedCount: number; layoutEditsUsed: number };
+  interviewDoc: Record<string, unknown>;
+  /** Single version document, or the manifest of a chunked one. */
+  versionDoc: Record<string, unknown>;
+  /** Chunk documents (written BEFORE the transaction: inert until their manifest exists). */
+  chunkDocs: Array<{ id: string; data: Record<string, unknown> }>;
+}
+
+export type BookVersionCommitResult =
+  | { status: 'committed' }
+  | {
+      status: 'already_committed';
+      versionId: string;
+      versionDocs: Record<string, unknown>[];
+      interviewDoc: Record<string, unknown>;
+    }
+  | { status: 'conflict'; interviewDoc: Record<string, unknown> | null };
+
+/**
+ * V5.3.2 — Decides, from the REMOTE interview document, whether a book commit may proceed.
+ * Exported for tests. Remote ahead of the local view (another instance saved or an administrator
+ * restored quota in between) → conflict. Remote behind (an earlier best-effort write was lost) →
+ * proceed: this commit writes the newer state.
+ */
+export function evaluateBookCommitPrecondition(
+  remote: Record<string, any> | null,
+  request: Pick<BookVersionCommitRequest, 'saveKey' | 'expected'>
+): 'already_committed' | 'conflict' | 'proceed' {
+  if (!remote) return 'proceed';
+  if (remote.lastBookSaveKey && remote.lastBookSaveKey === request.saveKey) return 'already_committed';
+  const remoteRevision = Number(remote.quotaRevision ?? 0) || 0;
+  if (remoteRevision > request.expected.quotaRevision) return 'conflict';
+  if (remoteRevision === request.expected.quotaRevision) {
+    if ((Number(remote.bookGeneratedCount ?? 0) || 0) > request.expected.bookGeneratedCount) return 'conflict';
+    if ((Number(remote.layoutEditsUsed ?? 0) || 0) > request.expected.layoutEditsUsed) return 'conflict';
+  }
+  return 'proceed';
+}
+
+/** Quota fields only the book commit / admin quota actions may change (see quotaRevision). */
+const GUARDED_QUOTA_FIELDS = [
+  'bookGeneratedCount',
+  'layoutEditsUsed',
+  'quotaRevision',
+  'lastBookSaveKey',
+  'lastBookSaveVersionId',
+  'lastBookVersionNumber',
+  'bookVersionsClearedUpTo',
+];
+
+const firestoreRemoteDocStore: StorageRemoteDocStore = {
+  async setDoc(collectionName, docId, data) {
+    if (collectionName === 'interviews') {
+      // V5.3.2: an interview written by an instance with an older quota view must never roll back
+      // the quota counters committed by another instance (lost update). Fields other than the quota
+      // keep last-writer-wins semantics, exactly as before.
+      const ref = doc(serverDb, collectionName, docId);
+      await runTransaction(serverDb, async (tx) => {
+        const remote = (await tx.get(ref)).data() as Record<string, any> | undefined;
+        const payload: Record<string, any> = { ...data };
+        if (remote && (Number(remote.quotaRevision ?? 0) || 0) > (Number(payload.quotaRevision ?? 0) || 0)) {
+          for (const field of GUARDED_QUOTA_FIELDS) {
+            if (remote[field] === undefined) delete payload[field];
+            else payload[field] = remote[field];
+          }
+        }
+        tx.set(ref, payload);
+      });
+      firestoreTelemetry.recordWrites('storage', 1, serverDb);
+      return;
+    }
+    await firestoreTelemetry.trackedSetDoc(serverDb, doc(serverDb, collectionName, docId), data, 'storage');
+  },
+  async commitBookVersion(request) {
+    const versionsRef = (id: string) => doc(serverDb, 'participantBookVersions', id);
+    for (const chunk of request.chunkDocs) {
+      await firestoreTelemetry.trackedSetDoc(serverDb, versionsRef(chunk.id), chunk.data, 'storage');
+    }
+    const interviewRef = doc(serverDb, 'interviews', request.interviewId);
+    const result = await runTransaction<BookVersionCommitResult>(serverDb, async (tx) => {
+      const remoteSnap = await tx.get(interviewRef);
+      const remote = remoteSnap.exists() ? (remoteSnap.data() as Record<string, any>) : null;
+      const decision = evaluateBookCommitPrecondition(remote, request);
+      if (decision === 'already_committed') {
+        const committedId = String(remote!.lastBookSaveVersionId || request.versionId);
+        const manifest = await tx.get(versionsRef(committedId));
+        const versionDocs: Record<string, unknown>[] = [];
+        if (manifest.exists()) {
+          const data = manifest.data() as Record<string, any>;
+          versionDocs.push(data);
+          for (let i = 0; i < (Number(data._chunkCount) || 0); i++) {
+            const part = await tx.get(versionsRef(chunkDocId(committedId, i)));
+            if (part.exists()) versionDocs.push(part.data() as Record<string, unknown>);
+          }
+        }
+        return { status: 'already_committed', versionId: committedId, versionDocs, interviewDoc: remote! };
+      }
+      if (decision === 'conflict') return { status: 'conflict', interviewDoc: remote };
+      tx.set(versionsRef(request.versionId), request.versionDoc);
+      tx.set(interviewRef, request.interviewDoc);
+      return { status: 'committed' };
+    });
+    if (result.status !== 'committed') {
+      // Chunks written for a commit that did not happen are inert; remove them (best effort).
+      for (const chunk of request.chunkDocs) {
+        await firestoreTelemetry.trackedDeleteDoc(serverDb, versionsRef(chunk.id), 'storage').catch(() => undefined);
+      }
+    } else {
+      firestoreTelemetry.recordWrites('storage', 2, serverDb);
+    }
+    return result;
+  },
+  async getDoc(collectionName, docId) {
+    const snap = await firestoreTelemetry.trackedGetDoc(serverDb, doc(serverDb, collectionName, docId), 'storage');
+    return snap.exists() ? (snap.data() as Record<string, unknown>) : null;
+  },
+  async deleteDoc(collectionName, docId) {
+    await firestoreTelemetry.trackedDeleteDoc(serverDb, doc(serverDb, collectionName, docId), 'storage');
+  },
+};
+
+/**
+ * V5.2 — Optional injection points for the book engine's AI calls. Production never sets them;
+ * automated tests use them to run the REAL generation, audit and save code with simulated
+ * providers (no Gemini/OpenAI calls, no tokens).
+ */
+export interface StorageBookAiOverrides {
+  draftBatch?: (ctx: {
+    batchIdx: number;
+    totalBatches: number;
+    batchChapters: any[];
+    narrativeStyle: DemoNarrativeStyleId;
+  }) => Promise<BookBatchCheckpointPayload>;
+  aiJudge?: SemanticJudgeFunction;
+  repairBatchCaller?: (
+    batchPrompt: string,
+    systemPrompt: string,
+    batchTaskIds: string[]
+  ) => Promise<ParsedAiManuscriptBatchResponse | null>;
+  skipDiskCache?: boolean;
+  /**
+   * Supplies the Compilado Testimonial Fidedigno record instead of Mi Esencia's store, which
+   * reads and writes Cloud Firestore. Only for isolated tests.
+   */
+  compilationPdfProvider?: (interviewId: string) => Promise<MiEsenciaArchivedCompilationPdf>;
+}
+
+export interface StorageManagerOptions {
+  remoteDocStore?: StorageRemoteDocStore;
+  bookAiOverrides?: StorageBookAiOverrides;
+  /** V5.3.1 (tests only): declares whether the local snapshot disk survives restarts. */
+  localDiskDurable?: boolean;
+}
+
+/**
+ * V5.3 — A delivery authorization issued by this server for one exact manuscript, kept SERVER-SIDE
+ * with the real audit results that justified it. Participants only hold `evidenceRef` (the HMAC
+ * signature); at save time the server resolves it here, so neither the coverage figures nor the
+ * audit details travel to the browser, and the browser can never supply its own audit.
+ */
+export interface BookDeliveryAuthorizationRecord {
+  evidenceRef: string;
+  interviewId: string;
+  narrativeStyle: DemoNarrativeStyleId;
+  evidence: BookApprovalEvidence;
+  documentaryAudit?: DocumentaryAuditReport;
+  editorialAudit?: EditorialQualityAuditReport;
+  deliveryDecision?: BookDeliveryDecision;
+  generation?: {
+    provider?: string;
+    model?: string;
+    generatedAt?: string;
+    jobId?: string;
+    metrics?: Record<string, unknown> | null;
+    repairSummary?: Record<string, unknown> | null;
+  };
+  createdAt: string;
+}
+
+/** Compact, admin-only indicator stored with each version (stripped from participant responses). */
+export interface BookVersionAuditSummary {
+  band: ReturnType<typeof classifyCoverageCounts>;
+  coverageExactPercent: number;
+  verifiedUnits: number;
+  eligibleUnits: number;
+  verificationLevel: BookDeliveryDecision['verificationLevel'];
+  deliveryStatus: BookDeliveryDecision['deliveryStatus'];
+  contradictions: number;
+  reportAvailable: boolean;
+}
+
+export class StorageManager {
+  private remoteDocStore: StorageRemoteDocStore;
+  private bookAiOverrides?: StorageBookAiOverrides;
+  /** V5.3: server-side delivery authorizations, keyed by evidence signature. */
+  private bookDeliveryAuthorizations: Map<string, BookDeliveryAuthorizationRecord> = new Map();
+  /** V5.3: administrative audit report of each saved version, keyed by version id. */
+  private bookAuditReports: Map<string, BookAuditReport> = new Map();
+
+  /**
+   * V5.2 — Puts this instance in isolated test mode: remote writes go to `remoteDocStore` and the
+   * book engine's AI calls to `bookAiOverrides`. Refused unless the process explicitly opts in with
+   * `YOUFOREVER_ALLOW_TEST_DOUBLES=1`, so production can never be switched to simulated providers.
+   */
+  public configureTestDoubles(options: StorageManagerOptions): void {
+    if (process.env.YOUFOREVER_ALLOW_TEST_DOUBLES !== '1') {
+      throw new Error('configureTestDoubles solo está permitido en pruebas automatizadas.');
+    }
+    if (options.remoteDocStore) this.remoteDocStore = options.remoteDocStore;
+    if ('bookAiOverrides' in options) this.bookAiOverrides = options.bookAiOverrides;
+    if (typeof options.localDiskDurable === 'boolean') {
+      this.localDiskDurability = { durable: options.localDiskDurable, reason: 'test_override' };
+    }
+  }
+
+  /**
+   * V5.3.1 — Whether the local snapshot survives restarts. On Cloud Run (this app's deployment) it
+   * does not, so a book version is durable only once Firestore holds it (see durableDocs.ts).
+   */
+  private localDiskDurability: LocalDiskDurability = resolveLocalDiskDurability();
+
+  public getPersistenceStatus(): LocalDiskDurability {
+    return { ...this.localDiskDurability };
+  }
+
   private config: AppConfig = { ...INITIAL_APP_CONFIG };
   private questions: Map<string, QuestionRecord> = new Map();
   private questionnaireVersions: Map<string, QuestionRecord[]> = new Map();
@@ -267,7 +562,9 @@ class StorageManager {
     return Array.from(this.admins);
   }
 
-  constructor() {
+  constructor(options: StorageManagerOptions = {}) {
+    this.remoteDocStore = options.remoteDocStore || firestoreRemoteDocStore;
+    this.bookAiOverrides = options.bookAiOverrides;
     this.initDefaultDataInMemory();
   }
 
@@ -316,7 +613,12 @@ class StorageManager {
     return path.join(dataDir, 'storage_state.json');
   }
 
-  private saveStateToDisk(): void {
+  /**
+   * Writes the local snapshot. V5.2: written to a temporary file and renamed, so a crash or a
+   * full disk can never leave a half-written (corrupt) snapshot, and returns whether it succeeded
+   * so callers that need an all-or-nothing save can roll back.
+   */
+  private saveStateToDisk(): boolean {
     try {
       const filePath = this.getSnapshotFilePath();
       const snapshot = {
@@ -359,10 +661,25 @@ class StorageManager {
         participantBookVersions: Array.from(this.participantBookVersions.values()),
         deletedBookVersionIds: Array.from(this.deletedBookVersionIds),
         syncWatermarks: this.syncWatermarks,
+        bookDeliveryAuthorizations: Array.from(this.bookDeliveryAuthorizations.values()),
+        bookAuditReports: Array.from(this.bookAuditReports.values()),
       };
-      fs.writeFileSync(filePath, JSON.stringify(snapshot, null, 2), 'utf-8');
+      const tempPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
+      try {
+        fs.writeFileSync(tempPath, JSON.stringify(snapshot, null, 2), 'utf-8');
+        fs.renameSync(tempPath, filePath);
+      } catch (writeErr) {
+        try {
+          if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+        } catch {
+          // ignore cleanup errors
+        }
+        throw writeErr;
+      }
+      return true;
     } catch (err) {
       console.warn('[StorageManager] Could not save state snapshot to disk:', err);
+      return false;
     }
   }
 
@@ -481,6 +798,17 @@ class StorageManager {
           }
         }
       }
+      if (Array.isArray(parsed.bookDeliveryAuthorizations)) {
+        for (const auth of parsed.bookDeliveryAuthorizations) {
+          if (auth?.evidenceRef) this.bookDeliveryAuthorizations.set(auth.evidenceRef, auth);
+        }
+      }
+      if (Array.isArray(parsed.bookAuditReports)) {
+        for (const rep of parsed.bookAuditReports) {
+          const vid = rep?.identification?.versionId;
+          if (vid) this.bookAuditReports.set(vid, rep);
+        }
+      }
       if (parsed.syncWatermarks && typeof parsed.syncWatermarks === 'object') {
         this.syncWatermarks = {
           fullBaselineSyncedAt: parsed.syncWatermarks.fullBaselineSyncedAt || null,
@@ -499,6 +827,11 @@ class StorageManager {
 
   private async persistDoc<T>(collectionName: string, docId: string, data: T): Promise<void> {
     this.saveStateToDisk();
+    await this.persistRemoteDoc(collectionName, docId, data);
+  }
+
+  /** Best-effort remote write (the local snapshot is the primary copy). */
+  private async persistRemoteDoc<T>(collectionName: string, docId: string, data: T): Promise<void> {
     try {
       const sanitized = this.sanitizeDocForFirestore(data);
       (sanitized as Record<string, unknown>)._syncedAt = new Date().toISOString();
@@ -514,11 +847,10 @@ class StorageManager {
         return;
       }
 
-      const setPromise = firestoreTelemetry.trackedSetDoc(
-        serverDb,
-        doc(serverDb, collectionName, docId),
-        sanitized as Record<string, unknown>,
-        'storage'
+      const setPromise = this.remoteDocStore.setDoc(
+        collectionName,
+        docId,
+        sanitized as Record<string, unknown>
       );
       const timeoutPromise = new Promise((_, reject) =>
         setTimeout(() => reject(new Error('Firestore write timed out (retained on disk)')), 2500)
@@ -535,14 +867,447 @@ class StorageManager {
     }
   }
 
+  /**
+   * V5.3.1 — DURABLE remote write. Unlike the best-effort writers it never skips a large document:
+   * above the preventive 800 KB limit the document is split into chunk documents (same collection,
+   * so the existing security rules apply) written BEFORE their manifest, so a reader never sees a
+   * manifest without its chunks. Each write is retried once. The result says what really happened.
+   */
+  private async persistRemoteDocDurable<T>(
+    collectionName: string,
+    docId: string,
+    data: T,
+    carryFields: string[] = ['interviewId', 'title']
+  ): Promise<{ status: 'written' | 'failed'; chunked: boolean; bytes: number; chunkCount: number; error?: string }> {
+    const sanitized = this.sanitizeDocForFirestore(data) as Record<string, unknown>;
+    sanitized._syncedAt = new Date().toISOString();
+    const json = JSON.stringify(sanitized);
+    const bytes = Buffer.byteLength(json, 'utf8');
+    const writeOnce = (id: string, payload: Record<string, unknown>) =>
+      Promise.race([
+        this.remoteDocStore.setDoc(collectionName, id, payload),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Firestore write timed out')), 8000)),
+      ]);
+    const writeWithRetry = async (id: string, payload: Record<string, unknown>) => {
+      try {
+        await writeOnce(id, payload);
+      } catch {
+        await writeOnce(id, payload);
+      }
+    };
+    try {
+      if (bytes <= FIRESTORE_SAFE_DOC_BYTES) {
+        await writeWithRetry(docId, sanitized);
+        return { status: 'written', chunked: false, bytes, chunkCount: 0 };
+      }
+      const carry: Record<string, unknown> = {};
+      for (const field of carryFields) if (sanitized[field] !== undefined) carry[field] = sanitized[field];
+      const plan = planChunkedDoc(docId, json, carry);
+      for (const chunk of plan.chunks) await writeWithRetry(chunk.id, chunk.data);
+      await writeWithRetry(docId, plan.manifest);
+      return { status: 'written', chunked: true, bytes, chunkCount: plan.chunks.length };
+    } catch (err: any) {
+      console.warn(`[Firestore Durable Write] ${collectionName}/${docId} NOT written:`, err?.message || err);
+      return { status: 'failed', chunked: bytes > FIRESTORE_SAFE_DOC_BYTES, bytes, chunkCount: 0, error: String(err?.message || err) };
+    }
+  }
+
+  /** V5.3.1 — Remote copy of a book version: the version WITH its administrative audit report. */
+  private persistBookVersionDurable(versionId: string) {
+    const version = this.participantBookVersions.get(versionId);
+    if (!version) {
+      return Promise.resolve({ status: 'failed' as const, chunked: false, bytes: 0, chunkCount: 0, error: 'version_not_found' });
+    }
+    const report = this.bookAuditReports.get(versionId);
+    return this.persistRemoteDocDurable('participantBookVersions', versionId, {
+      ...version,
+      ...(report ? { adminAuditReport: report } : {}),
+    });
+  }
+
+  /**
+   * V5.3.2 — Remote documents of a book version (with its embedded report) as written by the atomic
+   * commit: one document, or a manifest plus chunk documents above the preventive 800 KB limit.
+   */
+  private planBookVersionRemoteDocs(versionId: string): {
+    versionDoc: Record<string, unknown>;
+    chunkDocs: Array<{ id: string; data: Record<string, unknown> }>;
+    bytes: number;
+  } {
+    const version = this.participantBookVersions.get(versionId);
+    const report = this.bookAuditReports.get(versionId);
+    const sanitized = this.sanitizeDocForFirestore({
+      ...version,
+      ...(report ? { adminAuditReport: report } : {}),
+    }) as Record<string, unknown>;
+    sanitized._syncedAt = new Date().toISOString();
+    const json = JSON.stringify(sanitized);
+    const bytes = Buffer.byteLength(json, 'utf8');
+    if (bytes <= FIRESTORE_SAFE_DOC_BYTES) return { versionDoc: sanitized, chunkDocs: [], bytes };
+    const plan = planChunkedDoc(versionId, json, { interviewId: sanitized.interviewId });
+    return { versionDoc: plan.manifest, chunkDocs: plan.chunks, bytes };
+  }
+
+  /**
+   * V5.3.1 — Single entry point for book-version documents loaded from Firestore: reassembles chunked
+   * documents, moves the embedded administrative report into the server-side map (it never stays on
+   * the version record) and skips incomplete documents instead of loading half a book.
+   */
+  private ingestRemoteBookVersionDocs(rawDocs: any[]): void {
+    const { docs, incomplete } = reassembleChunkedDocs<any>(rawDocs);
+    if (incomplete.length > 0) {
+      console.warn(`[StorageManager] Incomplete chunked book versions skipped (kept local copies): ${incomplete.join(', ')}`);
+    }
+    for (const raw of docs) {
+      if (
+        !raw?.id ||
+        this.deletedBookVersionIds.has(raw.id) ||
+        this.deletedBookVersionIds.has(`pbv_${raw.interviewId}_v${raw.versionNumber}`) ||
+        this.isBookVersionClearedByAdmin(raw)
+      ) {
+        continue;
+      }
+      const { adminAuditReport, _syncedAt: _s, ...bv } = raw;
+      this.participantBookVersions.set(bv.id, bv as ParticipantBookVersionRecord);
+      if (adminAuditReport?.identification?.versionId === bv.id) {
+        const local = this.bookAuditReports.get(bv.id);
+        // Admin changes only ever append history: the longer history is the newer report.
+        if (!local || (adminAuditReport.history?.length || 0) > (local.history?.length || 0)) {
+          this.bookAuditReports.set(bv.id, {
+            ...adminAuditReport,
+            durability: {
+              ...(adminAuditReport.durability || {}),
+              remoteStatus: 'written',
+              checkedAt: new Date().toISOString(),
+            },
+          });
+        }
+      }
+    }
+  }
+
+  /**
+   * V5.3.1 — A book version coming from a BROWSER cache (recovery path) is never trusted for audit
+   * data: administrative fields are dropped, so its report is rebuilt server-side and labelled.
+   */
+  private sanitizeClientRestoredBookVersion(bv: any): ParticipantBookVersionRecord {
+    const { auditSummary: _a, auditReport: _r, adminAuditReport: _ar, ...rest } = bv || {};
+    const manuscript = rest.manuscript ? { ...rest.manuscript } : rest.manuscript;
+    if (manuscript) {
+      for (const field of ['documentaryAudit', 'editorialAudit', 'deliveryDecision', 'internalReasonCode', 'diagnosticSummary', 'previewFidelity']) {
+        delete manuscript[field];
+      }
+    }
+    return { ...rest, manuscript, restoredFromClientCache: true } as ParticipantBookVersionRecord;
+  }
+
+  /**
+   * V5.3 — Records, server-side, the delivery authorization of a generated manuscript together with
+   * the audit that justified it. Keeps the most recent authorizations per interview.
+   */
+  private registerBookDeliveryAuthorization(params: {
+    interviewId: string;
+    narrativeStyle: DemoNarrativeStyleId;
+    manuscript: DemoManuscript | undefined;
+    generation?: BookDeliveryAuthorizationRecord['generation'];
+  }): void {
+    const evidence = params.manuscript?.approvalEvidence;
+    if (!params.manuscript || !isFullBookApprovalEvidence(evidence)) return;
+    const existing = this.bookDeliveryAuthorizations.get(evidence.signature);
+    this.bookDeliveryAuthorizations.set(evidence.signature, {
+      evidenceRef: evidence.signature,
+      interviewId: params.interviewId,
+      narrativeStyle: params.narrativeStyle,
+      evidence,
+      documentaryAudit: params.manuscript.documentaryAudit || existing?.documentaryAudit,
+      editorialAudit: params.manuscript.editorialAudit || existing?.editorialAudit,
+      deliveryDecision: params.manuscript.deliveryDecision || existing?.deliveryDecision,
+      generation: { ...(existing?.generation || {}), ...(params.generation || {}) },
+      createdAt: existing?.createdAt || new Date().toISOString(),
+    });
+    const forInterview = Array.from(this.bookDeliveryAuthorizations.values())
+      .filter((a) => a.interviewId === params.interviewId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    for (const stale of forInterview.slice(12)) this.bookDeliveryAuthorizations.delete(stale.evidenceRef);
+  }
+
+  private buildVersionAuditSummary(report: BookAuditReport): BookVersionAuditSummary {
+    return {
+      band: report.coverage.band,
+      coverageExactPercent: report.coverage.exactPercent,
+      verifiedUnits: report.coverage.verifiedUnits,
+      eligibleUnits: report.coverage.eligibleUnits,
+      verificationLevel: report.delivery.verificationLevel,
+      deliveryStatus: report.delivery.deliveryStatus,
+      contradictions: report.coverage.contradictions,
+      reportAvailable: true,
+    };
+  }
+
+  /**
+   * V5.3 — When a new version of the same interview and style verifies a unit that an earlier
+   * version's report listed as an incident, that earlier incident is marked "corrected in a later
+   * version" (with the version id and a history entry). Nothing is deleted.
+   */
+  private markIncidentsCorrectedByVersion(
+    newReport: BookAuditReport,
+    newVersion: ParticipantBookVersionRecord
+  ): void {
+    const verifiedUnitIds = new Set(
+      (newVersion.manuscript?.documentaryAudit?.traceabilityMatrix || [])
+        .filter((t) => t.verified)
+        .map((t) => t.unitId)
+    );
+    if (verifiedUnitIds.size === 0) return;
+    const now = new Date().toISOString();
+    for (const [versionId, report] of this.bookAuditReports.entries()) {
+      if (versionId === newVersion.id) continue;
+      if (report.identification.interviewId !== newVersion.interviewId) continue;
+      if (report.identification.narrativeStyle !== newVersion.narrativeStyle) continue;
+      let changed = false;
+      for (const incident of report.incidents) {
+        if (
+          incident.unitId &&
+          verifiedUnitIds.has(incident.unitId) &&
+          incident.adminStatus !== 'corrected_in_later_version' &&
+          incident.adminStatus !== 'reviewed_by_admin'
+        ) {
+          incident.adminStatus = 'corrected_in_later_version';
+          incident.correctedInVersionId = newVersion.id;
+          incident.statusHistory.push({
+            status: 'corrected_in_later_version',
+            by: 'sistema',
+            at: now,
+            note: `Verificada en la versión ${newVersion.versionNumber}.`,
+          });
+          changed = true;
+        }
+      }
+      if (changed) {
+        refreshBookAuditReportCounters(report);
+        report.history.push({ event: 'incidents_corrected_by_later_version', by: 'sistema', at: now, detail: newVersion.id });
+        // The older version's remote copy carries its report: refresh it (the change can be
+        // derived again from the new version if this write fails).
+        void this.persistBookVersionDurable(versionId);
+      }
+    }
+  }
+
+  // ------------------------------------------------------------------------------------------
+  // V5.3 — Administrative book audit (callers MUST be authorized administrators; the API layer
+  // enforces it with `requireAdmin`). Participants never reach these methods.
+  // ------------------------------------------------------------------------------------------
+
+  /** Admin-only list of saved versions with their coverage indicator. */
+  public listBookAuditSummaries(interviewId?: string): Array<{
+    versionId: string;
+    interviewId: string;
+    versionNumber: number;
+    participantName: string;
+    narrativeStyle: DemoNarrativeStyleId;
+    createdAt: string;
+    summary: BookVersionAuditSummary | null;
+  }> {
+    return Array.from(this.participantBookVersions.values())
+      .filter((v) => !interviewId || v.interviewId === interviewId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .map((v) => {
+        const report = this.bookAuditReports.get(v.id);
+        return {
+          versionId: v.id,
+          interviewId: v.interviewId,
+          versionNumber: v.versionNumber,
+          participantName: v.participantName,
+          narrativeStyle: v.narrativeStyle,
+          createdAt: v.createdAt,
+          summary: report
+            ? this.buildVersionAuditSummary(report)
+            : ((v as any).auditSummary as BookVersionAuditSummary | undefined) || null,
+        };
+      });
+  }
+
+  /**
+   * Admin-only audit report of one version: memory (which includes reports loaded from Firestore,
+   * where V5.3.1 stores each report inside its version document), then — for versions saved before
+   * V5.3 or restored from a browser cache — a reconstruction from the audit stored with the version
+   * or, if none was stored, from the deterministic rules. Reconstructions are labelled as such.
+   */
+  public async getBookAuditReport(versionId: string): Promise<BookAuditReport | null> {
+    const version = this.participantBookVersions.get(versionId);
+    const inMemory = this.bookAuditReports.get(versionId);
+    if (inMemory) return inMemory;
+    if (!version) return null;
+    let manuscript = version.manuscript;
+    let source: BookAuditReport['identification']['source'] = 'reconstructed_from_saved_version';
+    const interview = this.interviews.get(version.interviewId);
+    if (!manuscript.documentaryAudit && interview) {
+      const ctx = this.resolveParticipantBookAuditContext(interview, version.narrativeStyle);
+      const det = auditAndApproveBookManuscript({
+        manuscript: { ...manuscript, approvalEvidence: undefined },
+        answers: ctx.answers,
+        questions: ctx.questions,
+      });
+      manuscript = { ...manuscript, documentaryAudit: det.report, editorialAudit: det.editorialAudit };
+    } else if (!manuscript.documentaryAudit) {
+      source = 'restored_without_audit';
+    }
+    const report = buildBookAuditReport({
+      versionId,
+      versionNumber: version.versionNumber,
+      interviewId: version.interviewId,
+      protagonistName: version.participantName,
+      manuscript,
+      savedAt: version.createdAt,
+      source,
+    });
+    report.history.push({
+      event: 'report_reconstructed',
+      by: 'sistema',
+      at: new Date().toISOString(),
+      detail:
+        source === 'restored_without_audit'
+          ? 'La versión no conservaba resultados de auditoría.'
+          : version.manuscript.documentaryAudit
+          ? 'Reconstruido con la auditoría guardada en la versión.'
+          : 'Reconstruido con reglas deterministas y las fuentes actuales (sin IA).',
+    });
+    this.bookAuditReports.set(versionId, report);
+    this.saveStateToDisk();
+    // Best effort: a reconstruction can always be rebuilt from the saved version.
+    void this.persistBookVersionDurable(versionId);
+    return report;
+  }
+
+  /** V5.3.1: admin actions work on a copy, committed only once it is durably stored. */
+  private async loadBookAuditReportForChange(versionId: string): Promise<BookAuditReport> {
+    const report = await this.getBookAuditReport(versionId);
+    if (!report) throw new Error('Informe de auditoría no encontrado.');
+    return JSON.parse(JSON.stringify(report)) as BookAuditReport;
+  }
+
+  /**
+   * V5.3.1 — Commits an administrative change to a report. The report travels inside its version
+   * document; if Firestore cannot store it and the local disk is not durable, the change is NOT
+   * applied (the previous report stays in place) and the administrator is asked to retry. History
+   * entries are only ever appended, never removed.
+   */
+  private async saveAdminBookAuditChange(versionId: string, report: BookAuditReport): Promise<BookAuditReport> {
+    refreshBookAuditReportCounters(report);
+    const previous = this.bookAuditReports.get(versionId);
+    this.bookAuditReports.set(versionId, report);
+    const remote = await this.persistBookVersionDurable(versionId);
+    if (remote.status !== 'written' && !this.localDiskDurability.durable) {
+      if (previous) this.bookAuditReports.set(versionId, previous);
+      else this.bookAuditReports.delete(versionId);
+      throw new Error(
+        'No se pudo guardar el cambio de forma duradera (almacenamiento remoto no disponible). No se aplicó ningún cambio: inténtalo de nuevo.'
+      );
+    }
+    report.durability = {
+      ...(report.durability || {}),
+      remoteStatus: remote.status === 'written' ? 'written' : 'local_only',
+      checkedAt: new Date().toISOString(),
+      durable: true,
+      localDisk: this.localDiskDurability.reason,
+    };
+    this.saveStateToDisk();
+    return report;
+  }
+
+  /** Admin note on the whole report or on one incident. Never removes earlier notes. */
+  public async addBookAuditNote(params: {
+    versionId: string;
+    note: string;
+    performedBy: string;
+    incidentId?: string;
+  }): Promise<BookAuditReport> {
+    const report = await this.loadBookAuditReportForChange(params.versionId);
+    const note = String(params.note || '').trim().slice(0, 4000);
+    if (!note) throw new Error('La observación no puede estar vacía.');
+    const entry = { note, by: params.performedBy, at: new Date().toISOString() };
+    if (params.incidentId) {
+      const incident = report.incidents.find((i) => i.incidentId === params.incidentId);
+      if (!incident) throw new Error('Incidencia no encontrada.');
+      incident.adminNotes.push(entry);
+    } else {
+      report.adminNotes.push(entry);
+    }
+    report.history.push({ event: 'admin_note', by: params.performedBy, at: entry.at, detail: params.incidentId });
+    const saved = await this.saveAdminBookAuditChange(params.versionId, report);
+    await this.addAuditLog('BOOK_AUDIT_NOTE', 'participantBookVersion', params.versionId, params.performedBy, {
+      incidentId: params.incidentId || null,
+    });
+    return saved;
+  }
+
+  /** Admin status change of an incident; the previous status stays in its history. */
+  public async updateBookAuditIncidentStatus(params: {
+    versionId: string;
+    incidentId: string;
+    status: BookAuditIncidentStatus;
+    performedBy: string;
+    note?: string;
+  }): Promise<BookAuditReport> {
+    const allowed: BookAuditIncidentStatus[] = [
+      'possible_contradiction',
+      'confirmed_by_audit',
+      'inconclusive',
+      'pending',
+      'reviewed_by_admin',
+      'corrected_in_later_version',
+    ];
+    if (!allowed.includes(params.status)) throw new Error('Estado administrativo no válido.');
+    const report = await this.loadBookAuditReportForChange(params.versionId);
+    const incident = report.incidents.find((i) => i.incidentId === params.incidentId);
+    if (!incident) throw new Error('Incidencia no encontrada.');
+    const at = new Date().toISOString();
+    incident.adminStatus = params.status;
+    incident.statusHistory.push({ status: params.status, by: params.performedBy, at, note: params.note });
+    report.history.push({ event: 'incident_status', by: params.performedBy, at, detail: `${params.incidentId}:${params.status}` });
+    const saved = await this.saveAdminBookAuditChange(params.versionId, report);
+    await this.addAuditLog('BOOK_AUDIT_INCIDENT_STATUS', 'participantBookVersion', params.versionId, params.performedBy, {
+      incidentId: params.incidentId,
+      status: params.status,
+    });
+    return saved;
+  }
+
+  /**
+   * Records an administrator's request for a focused correction of specific incidents. The saved
+   * version is not modified: a corrected book is a NEW version, saved under the existing rules.
+   */
+  public async requestBookAuditCorrection(params: {
+    versionId: string;
+    incidentIds: string[];
+    note: string;
+    performedBy: string;
+  }): Promise<BookAuditReport> {
+    const report = await this.loadBookAuditReportForChange(params.versionId);
+    const known = new Set(report.incidents.map((i) => i.incidentId));
+    const incidentIds = (params.incidentIds || []).filter((id) => known.has(id));
+    if (incidentIds.length === 0) throw new Error('Selecciona al menos una incidencia del informe.');
+    const at = new Date().toISOString();
+    report.correctionRequests.push({
+      requestId: `corr_${Date.now().toString(36)}`,
+      incidentIds,
+      note: String(params.note || '').slice(0, 4000),
+      by: params.performedBy,
+      at,
+      status: 'requested',
+    });
+    report.history.push({ event: 'correction_requested', by: params.performedBy, at, detail: incidentIds.join(',') });
+    const saved = await this.saveAdminBookAuditChange(params.versionId, report);
+    await this.addAuditLog('BOOK_AUDIT_CORRECTION_REQUESTED', 'participantBookVersion', params.versionId, params.performedBy, {
+      incidents: incidentIds.length,
+    });
+    return saved;
+  }
+
   private async removeDoc(collectionName: string, docId: string): Promise<void> {
     this.saveStateToDisk();
     try {
-      const delPromise = firestoreTelemetry.trackedDeleteDoc(
-        serverDb,
-        doc(serverDb, collectionName, docId),
-        'storage'
-      );
+      const delPromise = this.remoteDocStore.deleteDoc(collectionName, docId);
       const timeoutPromise = new Promise((_, reject) =>
         setTimeout(() => reject(new Error('Firestore delete timed out (removed from disk)')), 2500)
       );
@@ -1088,9 +1853,10 @@ class StorageManager {
               bv.manuscript &&
               !this.participantBookVersions.has(bv.id) &&
               !this.deletedBookVersionIds.has(bv.id) &&
-              !this.deletedBookVersionIds.has(`pbv_${bv.interviewId}_v${bv.versionNumber}`)
+              !this.deletedBookVersionIds.has(`pbv_${bv.interviewId}_v${bv.versionNumber}`) &&
+              !this.isBookVersionClearedByAdmin(bv)
             ) {
-              this.participantBookVersions.set(bv.id, bv as ParticipantBookVersionRecord);
+              this.participantBookVersions.set(bv.id, this.sanitizeClientRestoredBookVersion(bv));
               restoredCount++;
             }
           }
@@ -1166,9 +1932,10 @@ class StorageManager {
           bv.manuscript &&
           !this.participantBookVersions.has(bv.id) &&
           !this.deletedBookVersionIds.has(bv.id) &&
-          !this.deletedBookVersionIds.has(`pbv_${bv.interviewId}_v${bv.versionNumber}`)
+          !this.deletedBookVersionIds.has(`pbv_${bv.interviewId}_v${bv.versionNumber}`) &&
+          !this.isBookVersionClearedByAdmin(bv)
         ) {
-          this.participantBookVersions.set(bv.id, bv);
+          this.participantBookVersions.set(bv.id, this.sanitizeClientRestoredBookVersion(bv));
           const inv = this.interviews.get(bv.interviewId);
           if (inv) {
             inv.bookGeneratedCount = Math.max(inv.bookGeneratedCount ?? 0, bv.versionNumber || 1);
@@ -1359,17 +2126,9 @@ class StorageManager {
     }
 
     if (bookVersionsSnap) {
-      bookVersionsSnap.forEach((docSnap: any) => {
-        const bv = docSnap.data() as ParticipantBookVersionRecord;
-        if (
-          bv &&
-          bv.id &&
-          !this.deletedBookVersionIds.has(bv.id) &&
-          !this.deletedBookVersionIds.has(`pbv_${bv.interviewId}_v${bv.versionNumber}`)
-        ) {
-          this.participantBookVersions.set(bv.id, bv);
-        }
-      });
+      const rawVersions: any[] = [];
+      bookVersionsSnap.forEach((docSnap: any) => rawVersions.push(docSnap.data()));
+      this.ingestRemoteBookVersionDocs(rawVersions);
     }
   }
 
@@ -1550,16 +2309,11 @@ class StorageManager {
         const m = d.data() as ManuscriptRecord;
         if (m?.id) this.manuscripts.set(m.id, m);
       });
-      unwrap(4)?.forEach((d: any) => {
-        const bv = d.data() as ParticipantBookVersionRecord;
-        if (
-          bv?.id &&
-          !this.deletedBookVersionIds.has(bv.id) &&
-          !this.deletedBookVersionIds.has(`pbv_${bv.interviewId}_v${bv.versionNumber}`)
-        ) {
-          this.participantBookVersions.set(bv.id, bv);
-        }
-      });
+      {
+        const rawVersions: any[] = [];
+        unwrap(4)?.forEach((d: any) => rawVersions.push(d.data()));
+        this.ingestRemoteBookVersionDocs(rawVersions);
+      }
       unwrap(5)?.forEach((d: any) => {
         const ph = d.data() as InterviewPhotoRecord;
         if (ph?.id) {
@@ -1672,16 +2426,11 @@ class StorageManager {
         const m = d.data() as ManuscriptRecord;
         if (m?.id) this.manuscripts.set(m.id, m);
       });
-      unwrap(4)?.forEach((d: any) => {
-        const bv = d.data() as ParticipantBookVersionRecord;
-        if (
-          bv?.id &&
-          !this.deletedBookVersionIds.has(bv.id) &&
-          !this.deletedBookVersionIds.has(`pbv_${bv.interviewId}_v${bv.versionNumber}`)
-        ) {
-          this.participantBookVersions.set(bv.id, bv);
-        }
-      });
+      {
+        const rawVersions: any[] = [];
+        unwrap(4)?.forEach((d: any) => rawVersions.push(d.data()));
+        this.ingestRemoteBookVersionDocs(rawVersions);
+      }
       unwrap(5)?.forEach((d: any) => {
         const ph = d.data() as InterviewPhotoRecord;
         if (ph?.id) {
@@ -1896,16 +2645,9 @@ class StorageManager {
       const allBvSnap = await firestoreTelemetry
         .trackedGetDocs(serverDb, collection(serverDb, 'participantBookVersions'), 'storage')
         .catch(() => null);
-      allBvSnap?.forEach((docSnap: any) => {
-        const bv = docSnap.data() as ParticipantBookVersionRecord;
-        if (
-          bv?.id &&
-          !this.deletedBookVersionIds.has(bv.id) &&
-          !this.deletedBookVersionIds.has(`pbv_${bv.interviewId}_v${bv.versionNumber}`)
-        ) {
-          this.participantBookVersions.set(bv.id, bv);
-        }
-      });
+      const rawVersions: any[] = [];
+      allBvSnap?.forEach((docSnap: any) => rawVersions.push(docSnap.data()));
+      this.ingestRemoteBookVersionDocs(rawVersions);
     }
 
     if (logsSnap) {
@@ -3682,7 +4424,11 @@ class StorageManager {
     return undefined;
   }
 
-  public getPhotosForInterview(interviewId: string): InterviewPhotoRecord[] {
+  /**
+   * @param hydrate V5.4.2: false returns the photo records WITHOUT loading their image from disk
+   * (ids, descriptions and links only) — for routine syncs that never need the image itself.
+   */
+  public getPhotosForInterview(interviewId: string, hydrate: boolean = true): InterviewPhotoRecord[] {
     const activePhotoIds = new Set<string>();
     for (const ans of this.answers.values()) {
       if (ans.interviewId === interviewId && Array.isArray(ans.photos)) {
@@ -3697,6 +4443,7 @@ class StorageManager {
     return Array.from(this.photos.values())
       .filter((p) => p.interviewId === interviewId && activePhotoIds.has(p.id))
       .map((p) => {
+        if (!hydrate) return p;
         if (
           !p.dataUrl ||
           !p.dataUrl.startsWith('data:image/') ||
@@ -3874,6 +4621,37 @@ class StorageManager {
       console.warn(`[getAudioByIdAsync] Error loading audio ${audioId} from Firestore:`, err);
     }
     return undefined;
+  }
+
+  /**
+   * V5.3.2 — Interview that owns a photo or a voice recording (used to authorize `/api/photos/:id`
+   * and `/api/audio/:id`). Looks at the media records, then at the answers that embed them, then at
+   * Firestore. Unknown owner → null (access is then restricted to administrators).
+   */
+  public async resolveMediaInterviewId(kind: 'photo' | 'audio', mediaId: string): Promise<string | null> {
+    if (!mediaId) return null;
+    if (kind === 'photo') {
+      const photo = this.photos.get(mediaId);
+      if (photo?.interviewId) return photo.interviewId;
+      for (const answer of this.answers.values()) {
+        if ((answer.photos || []).some((p) => p?.id === mediaId)) return answer.interviewId;
+      }
+      for (const version of this.participantBookVersions.values()) {
+        const refs = [version.coverPhoto, ...Object.values(version.chapterPhotos || {})] as Array<{ id?: string } | null>;
+        if (refs.some((p) => p?.id === mediaId)) return version.interviewId;
+      }
+      const remote = await this.getPhotoByIdAsync(mediaId).catch(() => undefined);
+      return remote?.interviewId || null;
+    }
+    const audio = this.audios.get(mediaId);
+    if (audio?.interviewId) return audio.interviewId;
+    for (const answer of this.answers.values()) {
+      if (answer.audio?.id === mediaId || (answer.audioRecordings || []).some((a) => a?.id === mediaId)) {
+        return answer.interviewId;
+      }
+    }
+    const remote = await this.getAudioByIdAsync(mediaId).catch(() => undefined);
+    return remote?.interviewId || null;
   }
 
   public getAudiosForInterview(interviewId: string): InterviewAudioRecord[] {
@@ -4126,6 +4904,8 @@ class StorageManager {
     audioRecordings?: Array<IncomingAudioInput | AnswerVoiceAttachment>;
     audios?: Array<IncomingAudioInput | AnswerVoiceAttachment>;
     idempotencyKey: string;
+    /** V5.3.6: automatic save while the participant writes (no counter, no follow-up question). */
+    autosave?: boolean;
   }): Promise<{
     answer: AnswerRecord;
     interview: InterviewRecord;
@@ -4388,13 +5168,37 @@ class StorageManager {
         ? resolvedAudioRecordings[resolvedAudioRecordings.length - 1]
         : undefined;
 
+    // V5.3.6 — Autosave. An answer created by autosave stays "pending" (it does not count as
+    // answered and does not trigger the follow-up question) until the participant confirms it with
+    // «Guardar y Continuar», which then behaves exactly like a first submission.
+    const isAutosave = Boolean(params.autosave);
+    const completesPendingSubmission = Boolean(
+      evalResult.isEdit && isPendingAutosavedAnswer(evalResult.existingAnswer) && !isAutosave
+    );
+    const isFirstSubmission = (!evalResult.isEdit && !isAutosave) || completesPendingSubmission;
+
     if (evalResult.isEdit && evalResult.existingAnswer) {
-      const existing = evalResult.existingAnswer;
+      const existing = evalResult.existingAnswer as AutosavableAnswerRecord;
       const history = existing.editHistory || [];
-      history.push({
-        text: existing.answerText,
-        editedAt: existing.updatedAt || existing.createdAt,
-      });
+      // Consecutive autosaves of the same text session share one history entry (10 min window).
+      const lastAutosaveMs = existing.lastAutosavedAt ? new Date(existing.lastAutosavedAt).getTime() : 0;
+      const isContinuingAutosave =
+        isAutosave && !Number.isNaN(lastAutosaveMs) && now.getTime() - lastAutosaveMs < 10 * 60 * 1000;
+      if (!isContinuingAutosave && !existing.pendingSubmission) {
+        history.push({
+          text: existing.answerText,
+          editedAt: existing.updatedAt || existing.createdAt,
+        });
+      }
+      if (isAutosave) {
+        existing.lastAutosavedAt = now.toISOString();
+      } else {
+        delete existing.lastAutosavedAt;
+      }
+      if (completesPendingSubmission) {
+        delete existing.pendingSubmission;
+        interview.completedQuestionCount += 1;
+      }
 
       existing.answerText = params.notRecalled ? '' : params.answerText.trim();
       existing.notRecalled = params.notRecalled;
@@ -4457,10 +5261,11 @@ class StorageManager {
         idempotencyKey: params.idempotencyKey,
         createdAt: now.toISOString(),
         updatedAt: now.toISOString(),
+        ...(isAutosave ? { pendingSubmission: true, lastAutosavedAt: now.toISOString() } : {}),
       };
       this.answers.set(answerId, savedAnswer);
 
-      if (evalResult.shouldIncrementCounter) {
+      if (evalResult.shouldIncrementCounter && !isAutosave) {
         interview.completedQuestionCount += 1;
       }
       interview.lastActivityAt = now.toISOString();
@@ -4475,8 +5280,8 @@ class StorageManager {
     // 3. Check sufficiency evaluation trigger (only for newly incremented answers)
     let sufficiencyEvaluated = false;
     if (
-      !evalResult.isEdit &&
-      evalResult.shouldIncrementCounter &&
+      isFirstSubmission &&
+      (evalResult.shouldIncrementCounter || completesPendingSubmission) &&
       isSufficiencyThresholdMet(interview.completedQuestionCount, interview.sufficiencyThreshold)
     ) {
       try {
@@ -4509,7 +5314,7 @@ class StorageManager {
       | undefined;
 
     if (
-      !evalResult.isEdit &&
+      isFirstSubmission &&
       !params.notRecalled &&
       !params.isAdditionalMemory &&
       params.branchChoice !== 'no' &&
@@ -4575,7 +5380,7 @@ class StorageManager {
     return {
       answer: savedAnswer,
       interview,
-      counterIncremented: evalResult.shouldIncrementCounter,
+      counterIncremented: (evalResult.shouldIncrementCounter && !isAutosave) || completesPendingSubmission,
       sufficiencyEvaluated,
       adaptiveQuestion,
     };
@@ -4862,10 +5667,15 @@ class StorageManager {
       },
     ];
 
+    // V5.4.1: the administrator deleted every version up to this number (persisted with the
+    // interview, so every server instance respects it): never synthesize them again.
+    const clearedUpTo =
+      Number((interview as { bookVersionsClearedUpTo?: number }).bookVersionsClearedUpTo ?? 0) || 0;
+
     let createdAny = false;
     for (let vNum = 1; vNum <= targetCount; vNum++) {
       const versionId = `pbv_${interviewId}_v${vNum}`;
-      if (this.deletedBookVersionIds.has(versionId)) {
+      if (vNum <= clearedUpTo || this.deletedBookVersionIds.has(versionId)) {
         continue;
       }
       const existingRealOrSynth = existingBookVersions.find((v) => v.versionNumber === vNum);
@@ -5028,6 +5838,112 @@ class StorageManager {
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   }
 
+  /**
+   * V5.1 — Single resolver of the testimony a book is generated from, audited against and
+   * fingerprinted with. Photo captions fall back to the stored photo record exactly as generation
+   * always did; `includePhotoData` only controls whether image bytes are attached (needed to
+   * write the book, irrelevant to auditing or fingerprinting it).
+   */
+  private resolveBookSourceAnswers(
+    interviewId: string,
+    options: { includePhotoData: boolean }
+  ): AnswerRecord[] {
+    return this.getAnswersForInterview(interviewId).map((a) => {
+      const mergedPhotoIds = new Set<string>();
+      const mergedPhotos: any[] = [];
+      for (const p of a.photos || []) {
+        if (!p || !p.id || mergedPhotoIds.has(p.id)) continue;
+        mergedPhotoIds.add(p.id);
+        const fullPhoto = this.photos.get(p.id);
+        const merged: any = {
+          ...p,
+          caption: p.caption || fullPhoto?.caption || '',
+        };
+        if (options.includePhotoData) {
+          const bufObj =
+            !fullPhoto?.dataUrl || fullPhoto.dataUrl.startsWith('data:image/svg')
+              ? this.getPhotoBuffer(p.id)
+              : null;
+          merged.dataUrl = bufObj
+            ? `data:${bufObj.mimeType};base64,${bufObj.buffer.toString('base64')}`
+            : fullPhoto?.dataUrl || (p as any).dataUrl || p.imageUrl || `/api/photos/${p.id}`;
+        }
+        mergedPhotos.push(merged);
+      }
+      return {
+        ...a,
+        photos: mergedPhotos,
+      };
+    });
+  }
+
+  /**
+   * V5.1 — Everything that defines "the correct book" for an interview and style right now:
+   * testimony, questions, active literary prompt, structure mode, closing text, AI settings and
+   * the cryptographic fingerprint of all of it.
+   */
+  private resolveParticipantBookAuditContext(
+    interview: InterviewRecord,
+    narrativeStyle: DemoNarrativeStyleId
+  ): {
+    answers: AnswerRecord[];
+    questions: QuestionRecord[];
+    closingPageText: string;
+    literaryPromptText: string;
+    bookStructureMode: BookStructureMode;
+    configuredProvider: BookAiProvider;
+    primaryModel: string;
+    alternateProvider: BookAiProvider;
+    alternateModel: string;
+    sourceFingerprint: string;
+    generationFingerprint: string;
+  } {
+    const answers = this.resolveBookSourceAnswers(interview.id, { includePhotoData: false });
+    const questions = this.getQuestionsForVersion(interview.questionnaireVersionId);
+    const closingPageText = (interview.participantClosingText || '').trim();
+    const stylePromptConfig = this.config.literaryPrompts?.[narrativeStyle];
+    const literaryPromptText =
+      stylePromptConfig?.promptText && stylePromptConfig.promptText.trim().length > 0
+        ? stylePromptConfig.promptText.trim()
+        : DEFAULT_LITERARY_PROMPTS_TEXT[narrativeStyle];
+    const bookStructureMode: BookStructureMode =
+      this.config.bookStructureMode === 'fixed_five_stages'
+        ? 'fixed_five_stages'
+        : 'prompt_autonomous';
+    const configuredProvider: BookAiProvider =
+      this.config.bookAiProvider === 'openai' ? 'openai' : 'gemini';
+    const geminiModel = this.config.bookAiGeminiModel || 'gemini-3-flash-preview';
+    const openaiModel = this.config.bookAiOpenAiModel || 'gpt-4o';
+    const alternateProvider: BookAiProvider = configuredProvider === 'openai' ? 'gemini' : 'openai';
+    const sourceFingerprint = computeBookSourceFingerprint({
+      interviewId: interview.id,
+      narrativeStyle,
+      closingDedicationText: closingPageText,
+      answers,
+      questions,
+    });
+    const primaryModel = configuredProvider === 'openai' ? openaiModel : geminiModel;
+    return {
+      answers,
+      questions,
+      closingPageText,
+      literaryPromptText,
+      bookStructureMode,
+      configuredProvider,
+      primaryModel,
+      alternateProvider,
+      alternateModel: alternateProvider === 'openai' ? openaiModel : geminiModel,
+      sourceFingerprint,
+      generationFingerprint: computeBookGenerationFingerprint({
+        sourceFingerprint,
+        provider: configuredProvider,
+        model: primaryModel,
+        bookStructureMode,
+        literaryPromptText,
+      }),
+    };
+  }
+
   public async generateParticipantBookManuscript(params: {
     plainToken: string;
     narrativeStyle: DemoNarrativeStyleId;
@@ -5040,6 +5956,8 @@ class StorageManager {
     onBatchCheckpoint?: (batchIdx: number, checkpoint: BookBatchCheckpointPayload) => void;
     isCancelled?: () => boolean;
     maxRepairPasses?: number;
+    /** V5.3: background job that runs this generation (recorded in the admin report). */
+    generationJobId?: string;
   }): Promise<{
     manuscript: DemoManuscript;
     chapterPhotos: Record<string, DemoInMemoryPhoto | null>;
@@ -5055,8 +5973,15 @@ class StorageManager {
     activePromptVersionId?: string;
     internalReasonCode?: BookGenerationReasonCode;
     diagnosticSummary?: string;
+    failureCategory?: BookFailureCategory;
+    sourceFingerprint?: string;
+    invalidatedBatchIndexes?: number[];
     batchesCompleted?: number;
     totalBatches?: number;
+    /** V5.3: admin-only data (removed from every participant response). */
+    deliveryDecision?: BookDeliveryDecision;
+    generationMetrics?: Record<string, unknown>;
+    repairSummary?: Record<string, unknown>;
   }> {
     const { interview } = this.resolveToken(params.plainToken);
     if (!interview.userDeclaredComplete) {
@@ -5071,38 +5996,22 @@ class StorageManager {
     );
     const interviewPhotos = this.getPhotosForInterview(interview.id);
 
-    const answers = this.getAnswersForInterview(interview.id).map((a) => {
-      const mergedPhotoIds = new Set<string>();
-      const mergedPhotos: any[] = [];
-      for (const p of a.photos || []) {
-        if (!p || !p.id || mergedPhotoIds.has(p.id)) continue;
-        mergedPhotoIds.add(p.id);
-        const fullPhoto = this.photos.get(p.id);
-        const bufObj = (!fullPhoto?.dataUrl || fullPhoto.dataUrl.startsWith('data:image/svg'))
-          ? this.getPhotoBuffer(p.id)
-          : null;
-        const resolvedDataUrl = bufObj
-          ? `data:${bufObj.mimeType};base64,${bufObj.buffer.toString('base64')}`
-          : fullPhoto?.dataUrl || (p as any).dataUrl || p.imageUrl || `/api/photos/${p.id}`;
-        mergedPhotos.push({
-          ...p,
-          caption: p.caption || fullPhoto?.caption || '',
-          dataUrl: resolvedDataUrl,
-        });
-      }
-      return {
-        ...a,
-        photos: mergedPhotos,
-      };
-    });
+    // V5.1: generation, job fingerprinting and saving all read the interview through the same
+    // resolver, so the three of them audit and fingerprint exactly the same testimony.
+    const answers = this.resolveBookSourceAnswers(interview.id, { includePhotoData: true });
 
     const questions = this.getQuestionsForVersion(interview.questionnaireVersionId);
     const closingPageText = (interview.participantClosingText || '').trim();
 
     // Step 2: Generate or retrieve the updated PDF of the Compilado Testimonial Fidedigno
-    const { miEsenciaStore } = await import('./miEsencia/miEsenciaStore.ts');
-    const compilationBundle = await miEsenciaStore.ensureInterviewCompilationPdf(interview.id);
-    const compilationPdfRecord = compilationBundle.pdfRecord;
+    let compilationPdfRecord: MiEsenciaArchivedCompilationPdf;
+    if (this.bookAiOverrides?.compilationPdfProvider) {
+      compilationPdfRecord = await this.bookAiOverrides.compilationPdfProvider(interview.id);
+    } else {
+      const { miEsenciaStore } = await import('./miEsencia/miEsenciaStore.ts');
+      const compilationBundle = await miEsenciaStore.ensureInterviewCompilationPdf(interview.id);
+      compilationPdfRecord = compilationBundle.pdfRecord;
+    }
 
     // Step 3: Verify that the PDF exists, is valid, and contains all available information
     const pdfValidation = validateCompilationPdfRecord(compilationPdfRecord);
@@ -5163,12 +6072,37 @@ class StorageManager {
       onBatchCheckpoint: params.onBatchCheckpoint,
       isCancelled: params.isCancelled,
       maxRepairPasses: params.maxRepairPasses,
+      pipelineOverrides: this.bookAiOverrides
+        ? {
+            draftBatch: this.bookAiOverrides.draftBatch,
+            aiJudge: this.bookAiOverrides.aiJudge,
+            repairBatchCaller: this.bookAiOverrides.repairBatchCaller,
+            skipDiskCache: this.bookAiOverrides.skipDiskCache,
+          }
+        : undefined,
     });
 
     const reasonCode =
       result.internalReasonCode || result.manuscript?.internalReasonCode || null;
     const diagnosticSummary =
       result.diagnosticSummary || result.manuscript?.diagnosticSummary || null;
+
+    // V5.3: keep the delivery authorization and the real audit that justified it on the server.
+    this.registerBookDeliveryAuthorization({
+      interviewId: interview.id,
+      narrativeStyle: selectedStyle,
+      manuscript: result.manuscript,
+      generation: {
+        provider: result.providerUsed,
+        model: result.modelUsed,
+        generatedAt: result.manuscript?.generatedAt,
+        jobId: params.generationJobId,
+        metrics: (result as any).generationMetrics || null,
+        repairSummary: (result as any).repairSummary || null,
+      },
+    });
+    const deliveryDecision: BookDeliveryDecision | undefined =
+      (result as any).deliveryDecision || result.manuscript?.deliveryDecision;
 
     await this.addAuditLog(
       'GENERATE_BOOK_MANUSCRIPT_FROM_COMPILATION_PDF',
@@ -5192,6 +6126,29 @@ class StorageManager {
         totalBatches: result.totalBatches ?? null,
         internalReasonCode: reasonCode,
         diagnosticSummary,
+        failureCategory: result.failureCategory || null,
+        auditPolicy: result.manuscript?.documentaryAudit?.auditPolicy || null,
+        judgeResolvedUnits:
+          result.manuscript?.documentaryAudit?.semanticAudit?.judgeResolvedUnitIds?.length ?? null,
+        approvalEvidenceIssued: Boolean(result.manuscript?.approvalEvidence),
+        invalidatedBatches: result.invalidatedBatchIndexes?.length ?? 0,
+        deliveryEligible: deliveryDecision?.eligible ?? null,
+        deliveryStatus: deliveryDecision?.deliveryStatus ?? null,
+        coverageBand: deliveryDecision?.band ?? null,
+        coverageExactPercent: deliveryDecision?.coverageExactPercent ?? null,
+        contradictionsObserved: deliveryDecision?.observations?.contradictions ?? null,
+        judgeCasesSent: (result as any).generationMetrics?.judgeCasesSent ?? null,
+        judgeCasesDeferred: (result as any).generationMetrics?.judgeCasesDeferred ?? null,
+        repairRounds: (result as any).repairSummary?.roundsExecuted ?? null,
+        durationMs: (result as any).generationMetrics?.totalMs ?? null,
+        // V5.3.3 (admin only): whether the sample came from the model or from the faithful
+        // rule-based fallback, and the technical errors observed (never shown to participants).
+        previewSource:
+          result.scope === 'preview'
+            ? (result as any).generationMetrics?.previewSource || ((result as any).generationMetrics?.servedFromCache ? 'cache' : 'model')
+            : null,
+        draftCalls: (result as any).generationMetrics?.draftCalls ?? null,
+        technicalErrors: ((result as any).generationMetrics?.technicalErrors || []).slice(0, 5),
       }
     );
 
@@ -5222,8 +6179,15 @@ class StorageManager {
       activePromptVersionId: activeStylePromptConfig?.activeVersionId || 'default',
       internalReasonCode: reasonCode || undefined,
       diagnosticSummary: diagnosticSummary || undefined,
+      failureCategory: result.failureCategory || result.manuscript?.failureCategory,
+      sourceFingerprint: result.sourceFingerprint,
+      invalidatedBatchIndexes: result.invalidatedBatchIndexes,
       batchesCompleted: result.batchesCompleted,
       totalBatches: result.totalBatches,
+      // V5.3: server-side only (stripped by `sanitizeBookResultForParticipant`).
+      deliveryDecision,
+      generationMetrics: (result as any).generationMetrics,
+      repairSummary: (result as any).repairSummary,
     };
   }
 
@@ -5245,25 +6209,61 @@ class StorageManager {
     const selectedStyle: DemoNarrativeStyleId = params.narrativeStyle || 'first_person_literary';
     const scope: 'preview' | 'full' = params.scope === 'preview' ? 'preview' : 'full';
 
+    // V5.1: the job is bound to the exact testimony and configuration it will work on. A running
+    // job or saved batches from different answers, style, prompt or settings are never reused.
+    const { sourceFingerprint, generationFingerprint } = this.resolveParticipantBookAuditContext(
+      interview,
+      selectedStyle
+    );
+
     return bookJobManager.startOrResumeJob({
       interviewId: interview.id,
       participantId: participant.id,
       narrativeStyle: selectedStyle,
       scope,
       forceRefresh: Boolean(params.forceRefresh),
+      sourceFingerprint,
+      generationFingerprint,
       executor: async (hooks) => {
-        return this.generateParticipantBookManuscript({
-          plainToken: params.plainToken,
-          narrativeStyle: selectedStyle,
-          scope,
-          forceRefresh: Boolean(params.forceRefresh),
-          lockedPreviewManuscript: params.lockedPreviewManuscript || null,
-          lockedPreviewGroups: params.lockedPreviewGroups || null,
-          onProgress: hooks.onProgress,
-          initialBatchCheckpoints: hooks.initialBatchCheckpoints,
-          onBatchCheckpoint: hooks.onBatchCheckpoint,
-          isCancelled: hooks.isCancelled,
-        });
+        const run = (forceRefresh: boolean, lockedPreview: DemoManuscript | null) =>
+          this.generateParticipantBookManuscript({
+            plainToken: params.plainToken,
+            narrativeStyle: selectedStyle,
+            scope,
+            forceRefresh,
+            lockedPreviewManuscript: lockedPreview,
+            lockedPreviewGroups: params.lockedPreviewGroups || null,
+            onProgress: hooks.onProgress,
+            initialBatchCheckpoints: hooks.initialBatchCheckpoints,
+            onBatchCheckpoint: hooks.onBatchCheckpoint,
+            isCancelled: hooks.isCancelled,
+            generationJobId: hooks.jobId,
+          });
+        let result = await run(Boolean(params.forceRefresh), params.lockedPreviewManuscript || null);
+        // V5.3.3 — The participant never receives an unfinished book because of a transient problem
+        // (provider timeout, a batch below the minimum): the server continues on its own, reusing
+        // every valid batch and redrafting only the invalidated ones. Each continuation is recorded
+        // for administrators only.
+        const maxContinuations = Math.max(0, Math.min(3, Number(process.env.BOOK_FULL_AUTO_CONTINUE_ATTEMPTS ?? 2)));
+        for (
+          let attempt = 1;
+          scope === 'full' &&
+          attempt <= maxContinuations &&
+          !hooks.isCancelled?.() &&
+          result?.manuscript?.generationStatus === 'incomplete_draft';
+          attempt++
+        ) {
+          await this.addAuditLog('BOOK_GENERATION_AUTO_CONTINUE', 'interview', interview.id, participant.name || interview.title, {
+            jobId: hooks.jobId,
+            attempt,
+            narrativeStyle: selectedStyle,
+            previousReasonCode: result.internalReasonCode || null,
+            previousDiagnostic: result.diagnosticSummary || null,
+          });
+          hooks.onProgress?.({ phase: 'drafting_batches', userMessage: 'Dando los últimos toques a tu libro...' } as any);
+          result = await run(false, null);
+        }
+        return result;
       },
       onJobSettled: async (job) => {
         if (job.status === 'failed' && job.internalReasonCode) {
@@ -5301,10 +6301,22 @@ class StorageManager {
       }
       return job;
     }
+    // V5.1: a finished or interrupted job is only offered while it still corresponds to the
+    // interview as it is now; jobs built from answers that were edited afterwards are ignored.
+    const fingerprintByStyle = new Map<DemoNarrativeStyleId, string>();
     return bookJobManager.findLatestJobForInterview({
       interviewId: interview.id,
       narrativeStyle: params.narrativeStyle,
       scope: params.scope,
+      resolveCurrentSourceFingerprint: (job) => {
+        if (!fingerprintByStyle.has(job.narrativeStyle)) {
+          fingerprintByStyle.set(
+            job.narrativeStyle,
+            this.resolveParticipantBookAuditContext(interview, job.narrativeStyle).sourceFingerprint
+          );
+        }
+        return fingerprintByStyle.get(job.narrativeStyle);
+      },
     });
   }
 
@@ -5351,6 +6363,48 @@ class StorageManager {
     this.inFlightBookSaves.add(interview.id);
     try {
       const existingVersions = this.getBookVersionsForInterview(interview.id);
+
+      // V5.2 — Accidental duplicates. A retry after a lost response (or a double click) sends
+      // exactly the same approved text and layout a few seconds later; creating a second version
+      // would consume a layout modification for nothing. When the latest version holds the same
+      // audited content, style, editorial configuration and photos and was saved recently, it is
+      // returned as the result of this request instead of creating another one.
+      const latestVersion = existingVersions[0];
+      if (latestVersion && latestVersion.manuscript && Array.isArray(params.manuscript?.chapters)) {
+        const photoRefId = (p: DemoInMemoryPhoto | null | undefined) => (p ? p.id || '' : '');
+        const chapterPhotoIds = (map?: Record<string, DemoInMemoryPhoto | null>) =>
+          JSON.stringify(
+            Object.entries(map || {})
+              .map(([k, p]) => [k, photoRefId(p)])
+              .sort()
+          );
+        const isRecent =
+          Date.now() - new Date(latestVersion.createdAt).getTime() <= 10 * 60 * 1000;
+        const isSameBook =
+          isRecent &&
+          latestVersion.narrativeStyle === params.narrativeStyle &&
+          computeManuscriptContentHash(latestVersion.manuscript) ===
+            computeManuscriptContentHash(params.manuscript) &&
+          JSON.stringify(latestVersion.editorialConfig || {}) ===
+            JSON.stringify(params.editorialConfig || {}) &&
+          photoRefId(latestVersion.coverPhoto) === photoRefId(params.coverPhoto) &&
+          chapterPhotoIds(latestVersion.chapterPhotos) === chapterPhotoIds(params.chapterPhotos);
+        if (isSameBook) {
+          await this.addAuditLog(
+            'SAVE_BOOK_VERSION_DEDUPLICATED',
+            'participantBookVersion',
+            latestVersion.id,
+            participant.name || interview.title,
+            { interviewId: interview.id, versionNumber: latestVersion.versionNumber }
+          );
+          return {
+            bookVersion: latestVersion,
+            interview,
+            allVersions: existingVersions,
+          };
+        }
+      }
+
       const hasExistingBook = existingVersions.length > 0 || (interview.bookGeneratedCount ?? 0) > 0;
       const quota = computeLayoutEditQuotaStatus(interview);
       const answers = this.getAnswersForInterview(interview.id);
@@ -5366,9 +6420,42 @@ class StorageManager {
         );
       }
 
+      // V5.3 — Technical integrity: the document must really be storable and composable, and it
+      // must be the style being saved (a style-A text relabelled as a style-C book is tampering;
+      // since editorial findings no longer block delivery, the label is checked explicitly).
+      const integrityProblems = validateManuscriptTechnicalIntegrity(params.manuscript);
+      if (
+        params.manuscript?.narrativeStyle &&
+        params.narrativeStyle &&
+        params.manuscript.narrativeStyle !== params.narrativeStyle
+      ) {
+        integrityProblems.push('El manuscrito recibido no corresponde al estilo narrativo que se guarda.');
+      }
+      if (integrityProblems.length > 0) {
+        await this.addAuditLog(
+          'SAVE_BOOK_VERSION_BLOCKED',
+          'interview',
+          interview.id,
+          participant.name || interview.title,
+          {
+            narrativeStyle: params.narrativeStyle,
+            failureCategory: 'technical',
+            internalReasonCode: integrityProblems.some((p) => p.includes('estilo narrativo'))
+              ? 'STYLE_MISMATCH'
+              : 'MANUSCRIPT_TECHNICALLY_INVALID',
+            integrityProblems: integrityProblems.slice(0, 5),
+          }
+        );
+        throw new Error(
+          'No pudimos guardar tu libro porque el documento recibido está incompleto o dañado. Vuelve a preparar tu libro e inténtalo de nuevo.'
+        );
+      }
+
       if (
         params.manuscript.generationStatus === 'incomplete_draft' ||
         params.manuscript.status === 'incomplete_draft' ||
+        params.manuscript.generationStatus === 'preview_sample' ||
+        (params.manuscript as any).isPreviewSample === true ||
         params.manuscript.generationStatus === 'failed_ai' ||
         params.manuscript.generationStatus === 'failed_audit' ||
         params.manuscript.generationStatus === 'error' ||
@@ -5381,52 +6468,202 @@ class StorageManager {
         );
       }
 
-      const questionsList = Array.from(this.questions.values());
       const participants = Array.from(this.participants.values()).filter(
         (p) => p.interviewId === interview.id
       );
       const isCouple = interview.storyMode === 'compartida' && participants.length >= 2;
 
-      // Strip any client-side forged approval status and perform mandatory server-side Dual Audit (Documentary + Editorial)
-      const candidateForServerAudit: DemoManuscript = {
+      // V5.1 — UNIFIED APPROVAL POLICY.
+      // Generation and saving used to approve with two different rule sets (hybrid vs.
+      // deterministic-only), so a book approved a minute earlier could be rejected here. Saving
+      // now accepts a manuscript through exactly one of two equivalent doors, both server-side:
+      //   (a) the approval evidence signed by this server when the hybrid audit approved this very
+      //       text for the testimony as it is right now; or
+      //   (b) when there is no valid evidence (older manuscript, server key rotated, edited text),
+      //       the SAME hybrid audit used during generation, run again here.
+      // Nothing the browser declares (status flags, audit reports) is trusted in either door.
+      const saveStyle: DemoNarrativeStyleId = params.narrativeStyle || 'first_person_literary';
+      const auditContext = this.resolveParticipantBookAuditContext(interview, saveStyle);
+      // V5.2: the style being SAVED is the style audited. Keeping the manuscript's own style here
+      // let a style-A text be re-audited as A and stored as a style-C book; with the declared style
+      // its evidence no longer matches and the hybrid audit judges it against the right rules.
+      const candidateForSave: DemoManuscript = {
         ...params.manuscript,
-        generationStatus: 'generated',
+        narrativeStyle: saveStyle,
       };
 
-      const auditedForSave = auditAndApproveBookManuscript({
-        manuscript: candidateForServerAudit,
-        answers,
-        questions: questionsList,
+      // V5.3 — Audit results are never taken from the browser. The participant only holds an
+      // opaque reference to the server's delivery authorization; it is resolved here. Whatever
+      // audit, coverage or status the request carries is discarded.
+      delete (candidateForSave as any).documentaryAudit;
+      delete (candidateForSave as any).auditReport;
+      delete (candidateForSave as any).editorialAudit;
+      delete (candidateForSave as any).deliveryDecision;
+      delete (candidateForSave as any).previewFidelity;
+      const submittedEvidence = params.manuscript.approvalEvidence;
+      const authorization = isBookApprovalEvidenceRef(submittedEvidence)
+        ? this.bookDeliveryAuthorizations.get(submittedEvidence.evidenceRef)
+        : isFullBookApprovalEvidence(submittedEvidence)
+        ? this.bookDeliveryAuthorizations.get(submittedEvidence.signature)
+        : undefined;
+      const evidenceToVerify: BookApprovalEvidence | undefined =
+        authorization?.evidence || (isFullBookApprovalEvidence(submittedEvidence) ? submittedEvidence : undefined);
+      candidateForSave.approvalEvidence = evidenceToVerify;
+
+      const evidenceCheck = verifyBookApprovalEvidence({
+        manuscript: candidateForSave,
+        interviewId: interview.id,
+        narrativeStyle: saveStyle,
+        currentSourceFingerprint: auditContext.sourceFingerprint,
       });
 
-      if (!auditedForSave.report.passed || !auditedForSave.editorialAudit.passed) {
-        const blockDiag = classifyBookFailureReasonCode({
-          report: auditedForSave.report,
-          editorialAudit: auditedForSave.editorialAudit,
-          repairPassesAttempted: auditedForSave.report.repairAttemptsUsed || 0,
+      let approvedManuscriptForSave: DemoManuscript;
+      let approvalPath: 'signed_evidence' | 'hybrid_reaudit';
+      let reportSource: BookAuditReport['identification']['source'] = 'generated_on_save';
+      let generationInfo: BookDeliveryAuthorizationRecord['generation'] | undefined = authorization?.generation;
+
+      if (evidenceCheck.valid) {
+        approvalPath = 'signed_evidence';
+        let documentaryAudit = authorization?.documentaryAudit;
+        let editorialAudit = authorization?.editorialAudit;
+        let deliveryDecision = authorization?.deliveryDecision;
+        if (!documentaryAudit) {
+          // Evidence signed before V5.3 (or whose server-side record was lost): the signature
+          // already authorized this exact text. For the admin report only, the audit is
+          // reconstructed with the deterministic rules (no AI call) and labelled as such.
+          const reconstructed = auditAndApproveBookManuscript({
+            manuscript: { ...candidateForSave, approvalEvidence: undefined },
+            answers: auditContext.answers,
+            questions: auditContext.questions,
+          });
+          documentaryAudit = reconstructed.report;
+          editorialAudit = reconstructed.editorialAudit;
+          deliveryDecision = evaluateBookDeliveryEligibility({
+            report: reconstructed.report,
+            editorialAudit: reconstructed.editorialAudit,
+            manuscript: candidateForSave,
+          });
+          reportSource = 'reconstructed_from_saved_version';
+        }
+        approvedManuscriptForSave = {
+          ...candidateForSave,
+          documentaryAudit,
+          editorialAudit,
+          deliveryDecision,
+          generationStatus: 'approved',
+          status: 'approved',
+        };
+      } else {
+        approvalPath = 'hybrid_reaudit';
+        generationInfo = {
+          provider: auditContext.configuredProvider,
+          model: auditContext.primaryModel,
+          generatedAt: params.manuscript.generatedAt,
+        };
+        const hybridSaveAudit = await auditWithHybridSemantics({
+          manuscript: {
+            ...candidateForSave,
+            generationStatus: 'generated',
+            status: 'generated',
+            approvalEvidence: undefined,
+          },
+          answers: auditContext.answers,
+          questions: auditContext.questions,
+          provider: auditContext.configuredProvider,
+          model: auditContext.primaryModel,
+          alternateProvider: auditContext.alternateProvider,
+          alternateModel: auditContext.alternateModel,
+          aiJudgeOverride: this.bookAiOverrides?.aiJudge,
         });
-        await this.addAuditLog(
-          'SAVE_BOOK_VERSION_BLOCKED',
-          'interview',
-          interview.id,
-          participant.name || interview.title,
-          {
-            narrativeStyle: params.narrativeStyle,
-            internalReasonCode: blockDiag.code,
-            diagnosticSummary: blockDiag.summary,
-            coveragePercentage: auditedForSave.report.coveragePercentage,
-          }
-        );
-        throw new Error(
-          'Tu manuscrito todavía tiene detalles pendientes de revisión para quedar completo. Por favor presiona nuevamente el botón para volver a intentarlo antes de guardarlo como versión final.'
-        );
+        // V5.3: the SAME delivery policy as generation (>= 60 % and technical safeguards).
+        const saveDecision = evaluateBookDeliveryEligibility({
+          report: hybridSaveAudit.report,
+          editorialAudit: hybridSaveAudit.editorialAudit,
+          manuscript: hybridSaveAudit.manuscript,
+        });
+
+        if (!saveDecision.eligible) {
+          const classified = classifyBookFailureReasonCode({
+            report: hybridSaveAudit.report,
+            editorialAudit: hybridSaveAudit.editorialAudit,
+            repairPassesAttempted: hybridSaveAudit.report.repairAttemptsUsed || 0,
+          });
+          // The testimony changed after this manuscript was approved: say so precisely instead of
+          // reporting the resulting coverage gap as if the book had been written incorrectly.
+          const blockDiag =
+            evidenceCheck.reason === 'source_changed' && classified.category !== 'technical'
+              ? {
+                  code: 'SOURCE_CHANGED_SINCE_APPROVAL' as BookGenerationReasonCode,
+                  category: 'source_changed' as const,
+                  summary: `Las respuestas o la configuración cambiaron después de aprobar el manuscrito. ${classified.summary}`,
+                }
+              : classified;
+          await this.addAuditLog(
+            'SAVE_BOOK_VERSION_BLOCKED',
+            'interview',
+            interview.id,
+            participant.name || interview.title,
+            {
+              narrativeStyle: saveStyle,
+              approvalPath,
+              evidenceStatus: evidenceCheck.reason || 'valid',
+              failureCategory: blockDiag.category,
+              internalReasonCode: blockDiag.code,
+              diagnosticSummary: blockDiag.summary,
+              coveragePercentage: hybridSaveAudit.report.coveragePercentage,
+              coverageExactPercent: saveDecision.coverageExactPercent,
+              coverageBand: saveDecision.band,
+              deliveryBlockers: saveDecision.blockers.map((b) => b.code),
+            }
+          );
+          const privacyBlocked = saveDecision.blockers.some((b) => b.code === 'PRIVACY_EXCLUSION_LEAK');
+          throw new Error(
+            privacyBlocked
+              ? buildIncompleteDraftUserNotice('privacy')
+              : blockDiag.category === 'technical'
+              ? 'No pudimos completar la verificación final de tu libro por un inconveniente técnico temporal. Tu libro no se perdió: vuelve a presionar el botón en unos momentos para guardarlo.'
+              : buildIncompleteDraftUserNotice(blockDiag.category)
+          );
+        }
+
+        const reauditedApproved: DemoManuscript = {
+          ...hybridSaveAudit.manuscript,
+          deliveryDecision: saveDecision,
+          generationStatus: 'approved',
+          status: 'approved',
+        };
+        approvedManuscriptForSave = {
+          ...reauditedApproved,
+          approvalEvidence: issueBookApprovalEvidence({
+            interviewId: interview.id,
+            manuscript: reauditedApproved,
+            sourceFingerprint: auditContext.sourceFingerprint,
+            report: hybridSaveAudit.report,
+            editorialAuditPassed: hybridSaveAudit.editorialAudit.passed,
+            deliveryDecision: saveDecision,
+          }),
+        };
+        this.registerBookDeliveryAuthorization({
+          interviewId: interview.id,
+          narrativeStyle: saveStyle,
+          manuscript: approvedManuscriptForSave,
+          generation: generationInfo,
+        });
       }
+
+      const auditedForSave = { manuscript: approvedManuscriptForSave };
 
       const maxExistingVersion = existingVersions.reduce(
         (max, v) => (v.versionNumber > max ? v.versionNumber : max),
         0
       );
-      const versionNumber = maxExistingVersion + 1;
+      // V5.3.2: right after a restart the versions may still be loading in the background, but the
+      // interview (core phase) carries the last committed version number → never a duplicate number.
+      const versionNumber =
+        Math.max(
+          maxExistingVersion,
+          Number((interview as QuotaTrackedInterview).lastBookVersionNumber ?? 0) || 0
+        ) + 1;
       const versionId = `pbv_${interview.id}_v${versionNumber}_${Date.now()}`;
     const baseFilename = buildSafeDemoPdfFilename(
       {
@@ -5471,23 +6708,261 @@ class StorageManager {
       createdAt: new Date().toISOString(),
     };
 
-    // Update interview quota counters
+    // V5.3 — Administrative audit report of THIS version, built from the real audit results
+    // (server-side; never from the request). Committed atomically with the version below.
+    const auditReport = buildBookAuditReport({
+      versionId,
+      versionNumber,
+      interviewId: interview.id,
+      protagonistName: participant.name,
+      manuscript: auditedForSave.manuscript,
+      savedAt: bookVersion.createdAt,
+      approvalPath,
+      generation: generationInfo || null,
+      source: reportSource,
+    });
+    (bookVersion as any).auditSummary = this.buildVersionAuditSummary(auditReport);
+
+    // Update interview quota counters.
+    // V5.2: counters are computed on a COPY and committed together with the new version. If the
+    // local snapshot cannot be written, both are rolled back, so a failed save never leaves a
+    // version without its counters (or counters consumed without a version).
+    const previousInterviewState: InterviewRecord = { ...interview };
+    const nextInterview: InterviewRecord = { ...interview };
     if (!hasExistingBook) {
-      interview.bookGeneratedCount = 1;
-      interview.layoutEditsAllowed = interview.layoutEditsAllowed ?? 1;
-      interview.layoutEditsUsed = interview.layoutEditsUsed ?? 0;
+      nextInterview.bookGeneratedCount = 1;
+      nextInterview.layoutEditsAllowed = nextInterview.layoutEditsAllowed ?? 1;
+      nextInterview.layoutEditsUsed = nextInterview.layoutEditsUsed ?? 0;
     } else {
-      interview.bookGeneratedCount = Math.max(versionNumber, (interview.bookGeneratedCount ?? 1) + 1);
-      interview.layoutEditsUsed = (interview.layoutEditsUsed ?? 0) + 1;
-      interview.layoutEditsAllowed = interview.layoutEditsAllowed ?? 1;
+      nextInterview.bookGeneratedCount = Math.max(
+        versionNumber,
+        (nextInterview.bookGeneratedCount ?? 1) + 1
+      );
+      nextInterview.layoutEditsUsed = (nextInterview.layoutEditsUsed ?? 0) + 1;
+      nextInterview.layoutEditsAllowed = nextInterview.layoutEditsAllowed ?? 1;
     }
-    interview.lastActivityAt = new Date().toISOString();
+    nextInterview.lastActivityAt = new Date().toISOString();
+
+    // V5.3.2 — Cross-instance consistency. Every quota-affecting change bumps `quotaRevision`; the
+    // remote commit only succeeds if no other instance changed the quota since this view was taken.
+    // `saveKey` identifies THIS save request, so a retry after a timeout (whose commit may have
+    // landed late) returns the committed version instead of creating a duplicate.
+    const previousQuota = previousInterviewState as QuotaTrackedInterview;
+    const expectedQuota = {
+      quotaRevision: Number(previousQuota.quotaRevision ?? 0) || 0,
+      bookGeneratedCount: Number(previousInterviewState.bookGeneratedCount ?? 0) || 0,
+      layoutEditsUsed: Number(previousInterviewState.layoutEditsUsed ?? 0) || 0,
+    };
+    const saveKey = sha256Hash('sha256')
+      .update(
+        JSON.stringify([
+          interview.id,
+          params.narrativeStyle,
+          computeManuscriptContentHash(auditedForSave.manuscript),
+          params.editorialConfig,
+          normalizedCoverPhoto?.id || null,
+          Object.entries(normalizedChapterPhotos).map(([chapterId, photo]) => [chapterId, photo?.id || null]),
+        ])
+      )
+      .digest('hex');
+    const trackedNext = nextInterview as QuotaTrackedInterview;
+    trackedNext.quotaRevision = expectedQuota.quotaRevision + 1;
+    trackedNext.lastBookSaveKey = saveKey;
+    trackedNext.lastBookSaveVersionId = versionId;
+    trackedNext.lastBookVersionNumber = versionNumber;
 
     this.participantBookVersions.set(versionId, bookVersion);
+    this.bookAuditReports.set(versionId, auditReport);
+    Object.assign(interview, nextInterview);
     this.interviews.set(interview.id, interview);
 
-    await this.persistDoc('participantBookVersions', versionId, bookVersion);
-    await this.persistDoc('interviews', interview.id, interview);
+    if (!this.saveStateToDisk()) {
+      this.participantBookVersions.delete(versionId);
+      this.bookAuditReports.delete(versionId);
+      for (const key of Object.keys(interview) as Array<keyof InterviewRecord>) {
+        if (!(key in previousInterviewState)) delete (interview as any)[key];
+      }
+      Object.assign(interview, previousInterviewState);
+      this.interviews.set(interview.id, interview);
+      await this.addAuditLog(
+        'SAVE_BOOK_VERSION_STORAGE_FAILED',
+        'interview',
+        interview.id,
+        participant.name || interview.title,
+        { narrativeStyle: params.narrativeStyle, failureCategory: 'technical' }
+      );
+      throw new Error(
+        'No pudimos guardar tu libro por un inconveniente técnico temporal. No se descontó ninguna modificación y tu libro aprobado sigue disponible: vuelve a intentarlo en unos momentos.'
+      );
+    }
+
+    // V5.3.1 — DURABILITY. In this deployment (Cloud Run) the local snapshot is ephemeral, so the
+    // save is accepted only once Firestore holds the version WITH its audit report (one document,
+    // chunked when large) and the interview with its quota counters. If that cannot be achieved and
+    // the local disk is not declared durable, everything is rolled back (memory, snapshot and any
+    // remote document already written): no version, no quota consumed, no report, and the
+    // participant is asked to retry. Nothing is ever reported as durable when it is not.
+    auditReport.durability = { remoteStatus: 'pending', checkedAt: new Date().toISOString() };
+    let versionRemote: { status: 'written' | 'failed'; chunked: boolean; bytes: number; chunkCount: number; error?: string };
+    let interviewRemote: { status: 'written' | 'failed'; error?: string };
+    let commitOutcome: 'atomic_committed' | 'sequential' | 'conflict' | 'failed' = 'sequential';
+    if (this.remoteDocStore.commitBookVersion) {
+      // V5.3.2 — ONE Firestore transaction: version (+ report) and interview counters together.
+      const plan = this.planBookVersionRemoteDocs(versionId);
+      const request: BookVersionCommitRequest = {
+        interviewId: interview.id,
+        versionId,
+        saveKey,
+        expected: expectedQuota,
+        interviewDoc: this.sanitizeDocForFirestore(interview) as Record<string, unknown>,
+        versionDoc: plan.versionDoc,
+        chunkDocs: plan.chunkDocs,
+      };
+      let commit: BookVersionCommitResult | null = null;
+      let commitError = '';
+      for (let attempt = 0; attempt < 2 && !commit; attempt++) {
+        try {
+          // A retry after an uncertain failure (timeout, unavailable) is safe: if the first attempt
+          // committed late, the retry sees `saveKey` and reports `already_committed`.
+          commit = await Promise.race([
+            this.remoteDocStore.commitBookVersion(request),
+            new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Firestore commit timed out')), 15000)),
+          ]);
+        } catch (err: any) {
+          commitError = String(err?.message || err);
+        }
+      }
+      const rollbackLocal = () => {
+        this.participantBookVersions.delete(versionId);
+        this.bookAuditReports.delete(versionId);
+        for (const key of Object.keys(interview) as Array<keyof InterviewRecord>) {
+          if (!(key in previousInterviewState)) delete (interview as any)[key];
+        }
+        Object.assign(interview, previousInterviewState);
+        this.interviews.set(interview.id, interview);
+      };
+      if (commit?.status === 'already_committed') {
+        // The same save had already been committed (late write or concurrent duplicate request):
+        // adopt the committed version and counters; nothing new is created or charged.
+        rollbackLocal();
+        this.ingestRemoteBookVersionDocs(commit.versionDocs);
+        for (const field of GUARDED_QUOTA_FIELDS) {
+          if ((commit.interviewDoc as any)[field] !== undefined) (interview as any)[field] = (commit.interviewDoc as any)[field];
+        }
+        this.interviews.set(interview.id, interview);
+        this.saveStateToDisk();
+        const committed = this.participantBookVersions.get(commit.versionId);
+        await this.addAuditLog('SAVE_BOOK_VERSION_IDEMPOTENT_REPLAY', 'participantBookVersion', commit.versionId, participant.name, {
+          interviewId: interview.id,
+        });
+        if (!committed) {
+          throw new Error('Tu libro ya se había guardado. Actualiza la página para verlo.');
+        }
+        return {
+          bookVersion: this.hydrateBookVersionPhotos(committed),
+          interview,
+          allVersions: this.getBookVersionsForInterview(interview.id),
+        };
+      }
+      if (commit?.status === 'conflict') {
+        rollbackLocal();
+        // Adopt the newer remote quota so the next attempt is evaluated against it.
+        if (commit.interviewDoc) {
+          for (const field of GUARDED_QUOTA_FIELDS) {
+            if ((commit.interviewDoc as any)[field] !== undefined) (interview as any)[field] = (commit.interviewDoc as any)[field];
+          }
+          this.interviews.set(interview.id, interview);
+        }
+        this.saveStateToDisk();
+        void this.syncFromFirestore(true).catch(() => undefined);
+        await this.addAuditLog('SAVE_BOOK_VERSION_CONCURRENT_CONFLICT', 'interview', interview.id, participant.name || interview.title, {
+          narrativeStyle: params.narrativeStyle,
+          failureCategory: 'technical',
+          expectedQuotaRevision: expectedQuota.quotaRevision,
+          remoteQuotaRevision: (commit.interviewDoc as any)?.quotaRevision ?? null,
+        });
+        throw new Error(
+          'Tu libro se estaba guardando al mismo tiempo desde otra sesión. No se descontó ninguna modificación adicional: actualiza la página y revisa tus versiones antes de volver a intentarlo.'
+        );
+      }
+      commitOutcome = commit?.status === 'committed' ? 'atomic_committed' : 'failed';
+      versionRemote = {
+        status: commit?.status === 'committed' ? 'written' : 'failed',
+        chunked: plan.chunkDocs.length > 0,
+        bytes: plan.bytes,
+        chunkCount: plan.chunkDocs.length,
+        error: commit ? undefined : commitError,
+      };
+      interviewRemote = { status: versionRemote.status, error: versionRemote.error };
+    } else {
+      versionRemote = await this.persistBookVersionDurable(versionId);
+      interviewRemote =
+        versionRemote.status === 'written'
+          ? await this.persistRemoteDocDurable('interviews', interview.id, interview)
+          : { status: 'failed' as const, error: 'not_attempted' };
+    }
+    const remoteDurable = versionRemote.status === 'written' && interviewRemote.status === 'written';
+    if (!remoteDurable && !this.localDiskDurability.durable) {
+      this.participantBookVersions.delete(versionId);
+      this.bookAuditReports.delete(versionId);
+      for (const key of Object.keys(interview) as Array<keyof InterviewRecord>) {
+        if (!(key in previousInterviewState)) delete (interview as any)[key];
+      }
+      Object.assign(interview, previousInterviewState);
+      this.interviews.set(interview.id, interview);
+      this.saveStateToDisk();
+      let remoteVersionRollback: 'not_needed' | 'done' | 'failed' = 'not_needed';
+      let remoteInterviewRestore: 'not_needed' | 'done' | 'failed' = 'not_needed';
+      if (versionRemote.status === 'written') {
+        try {
+          await this.remoteDocStore.deleteDoc('participantBookVersions', versionId);
+          for (let i = 0; i < versionRemote.chunkCount; i++) {
+            await this.remoteDocStore.deleteDoc('participantBookVersions', chunkDocId(versionId, i));
+          }
+          remoteVersionRollback = 'done';
+        } catch {
+          remoteVersionRollback = 'failed';
+        }
+        // The interview write may have landed despite reporting a failure: restore the previous
+        // counters (if Firestore still refuses it, the remote counters were never changed).
+        try {
+          await this.remoteDocStore.setDoc(
+            'interviews',
+            interview.id,
+            this.sanitizeDocForFirestore(interview) as Record<string, unknown>
+          );
+          remoteInterviewRestore = 'done';
+        } catch {
+          remoteInterviewRestore = 'failed';
+        }
+      }
+      await this.addAuditLog('SAVE_BOOK_VERSION_NOT_DURABLE', 'interview', interview.id, participant.name || interview.title, {
+        narrativeStyle: params.narrativeStyle,
+        failureCategory: 'technical',
+        versionRemote: versionRemote.status,
+        interviewRemote: interviewRemote.status,
+        versionBytes: versionRemote.bytes,
+        localDisk: this.localDiskDurability.reason,
+        remoteVersionRollback,
+        remoteInterviewRestore,
+        commitOutcome,
+        commitError: versionRemote.error || null,
+      });
+      throw new Error(
+        'No pudimos guardar tu libro de forma segura en este momento. No se descontó ninguna modificación y tu libro sigue disponible: vuelve a intentarlo en unos minutos.'
+      );
+    }
+    auditReport.durability = {
+      remoteStatus: remoteDurable ? 'written' : 'local_only',
+      checkedAt: new Date().toISOString(),
+      durable: true,
+      localDisk: this.localDiskDurability.reason,
+      versionDocument: { status: versionRemote.status, bytes: versionRemote.bytes, chunks: versionRemote.chunkCount },
+      interviewDocument: interviewRemote.status,
+      commit: commitOutcome,
+    };
+    this.markIncidentsCorrectedByVersion(auditReport, bookVersion);
+    this.saveStateToDisk();
 
     await this.addAuditLog(
       hasExistingBook ? 'MODIFY_PARTICIPANT_BOOK_LAYOUT' : 'CREATE_PARTICIPANT_BOOK',
@@ -5498,6 +6973,19 @@ class StorageManager {
         interviewId: interview.id,
         versionNumber,
         narrativeStyle: params.narrativeStyle,
+        approvalPath,
+        approvalEvidenceIssuedAt: isFullBookApprovalEvidence(approvedManuscriptForSave.approvalEvidence)
+          ? approvedManuscriptForSave.approvalEvidence.issuedAt
+          : null,
+        manuscriptContentHash: isFullBookApprovalEvidence(approvedManuscriptForSave.approvalEvidence)
+          ? approvedManuscriptForSave.approvalEvidence.manuscriptContentHash
+          : null,
+        evidenceStatus: evidenceCheck.reason || 'valid',
+        deliveryStatus: auditReport.delivery.deliveryStatus,
+        coverageBand: auditReport.coverage.band,
+        coverageExactPercent: auditReport.coverage.exactPercent,
+        auditReportSource: auditReport.identification.source,
+        remoteReplica: auditReport.durability?.remoteStatus || 'unknown',
         coverDesignId: params.editorialConfig.coverDesignId,
         interiorStyleId: params.editorialConfig.interiorStyleId,
         bookFormatId: params.editorialConfig.bookFormatId,
@@ -5547,6 +7035,12 @@ class StorageManager {
     if (synthVersionId !== versionId) {
       await this.removeDoc('participantBookVersions', synthVersionId);
     }
+    // V5.3.1: chunk documents of a large version (orphan chunks are ignored on load anyway). The
+    // administrative report stays in the server snapshot: history is never deleted with the book.
+    const remoteChunks = this.bookAuditReports.get(versionId)?.durability?.versionDocument?.chunks || 0;
+    for (let i = 0; i < remoteChunks; i++) {
+      await this.removeDoc('participantBookVersions', chunkDocId(versionId, i));
+    }
 
     // Also remove any matching manuscript with the same version number so ensureSynthesizedBookVersionsForInterview
     // never resurrects this deleted version
@@ -5568,6 +7062,14 @@ class StorageManager {
       } else {
         interview.layoutEditsAllowed = (interview.layoutEditsAllowed ?? 1) + 1;
       }
+    }
+    // V5.3.2: quota-affecting administrative change → new quota revision (other instances' older
+    // views can no longer overwrite it), and the deleted version is no longer a replay target.
+    const trackedInterview = interview as QuotaTrackedInterview;
+    trackedInterview.quotaRevision = (Number(trackedInterview.quotaRevision ?? 0) || 0) + 1;
+    if (trackedInterview.lastBookSaveVersionId === versionId) {
+      delete trackedInterview.lastBookSaveKey;
+      delete trackedInterview.lastBookSaveVersionId;
     }
     interview.lastActivityAt = new Date().toISOString();
     this.interviews.set(interviewId, interview);
@@ -5597,6 +7099,128 @@ class StorageManager {
       deletedVersionId: versionId,
       restoredQuota: Boolean(restoreQuota),
     };
+  }
+
+  /**
+   * V5.4.1 — True when an administrator deleted all book versions of the interview up to this
+   * version's number (persisted on the interview: respected by every instance and every restore).
+   */
+  private isBookVersionClearedByAdmin(bv: { interviewId?: string; versionNumber?: number } | null | undefined): boolean {
+    if (!bv?.interviewId) return false;
+    const inv = this.interviews.get(bv.interviewId) as { bookVersionsClearedUpTo?: number } | undefined;
+    const clearedUpTo = Number(inv?.bookVersionsClearedUpTo ?? 0) || 0;
+    return clearedUpTo > 0 && (Number(bv.versionNumber) || 0) <= clearedUpTo;
+  }
+
+  /**
+   * V5.4.1 — Administrator: deletes ALL saved PDF book versions of an interview at once.
+   *
+   * - Durable: memory, disk snapshot and Firestore (including the chunk documents of large versions).
+   * - The manuscripts are NOT touched (they have their own bulk delete).
+   * - Legacy versions synthesized from manuscripts can never come back: the interview records up to
+   *   which number the versions were cleared (bookVersionsClearedUpTo, persisted with the interview,
+   *   so every instance respects it), and the next saved book is numbered above them.
+   * - Layout quota (edits used / allowed) is not modified.
+   */
+  public async deleteAllParticipantBookVersionsForInterview(
+    interviewId: string,
+    performedBy: string
+  ): Promise<{ interview: InterviewRecord; deletedCount: number; deletedVersionIds: string[] }> {
+    const interview = this.interviews.get(interviewId);
+    if (!interview) {
+      throw new Error('Entrevista no encontrada.');
+    }
+    const versions = Array.from(this.participantBookVersions.values()).filter(
+      (v) => v.interviewId === interviewId && !this.deletedBookVersionIds.has(v.id)
+    );
+    const manuscriptsForInterview = Array.from(this.manuscripts.values()).filter(
+      (m) => m.interviewId === interviewId
+    );
+    const tracked = interview as QuotaTrackedInterview & { bookVersionsClearedUpTo?: number };
+    const highestNumber = Math.max(
+      0,
+      ...versions.map((v) => Number(v.versionNumber) || 0),
+      Number(tracked.lastBookVersionNumber ?? 0) || 0,
+      Number(tracked.bookVersionsClearedUpTo ?? 0) || 0,
+      Number(interview.bookGeneratedCount ?? 0) || 0,
+      manuscriptsForInterview.length,
+      ...manuscriptsForInterview.map((m) => Number(m.version) || 0)
+    );
+
+    const deletedVersionIds: string[] = [];
+    for (const v of versions) {
+      this.deletedBookVersionIds.add(v.id);
+      this.participantBookVersions.delete(v.id);
+      await this.removeDoc('participantBookVersions', v.id);
+      const remoteChunks = this.bookAuditReports.get(v.id)?.durability?.versionDocument?.chunks || 0;
+      for (let i = 0; i < remoteChunks; i++) {
+        await this.removeDoc('participantBookVersions', chunkDocId(v.id, i));
+      }
+      deletedVersionIds.push(v.id);
+    }
+    // Legacy synthesized ids (pbv_<interview>_v<n>) up to the highest number ever used.
+    for (let n = 1; n <= highestNumber; n++) {
+      this.deletedBookVersionIds.add(`pbv_${interviewId}_v${n}`);
+    }
+
+    tracked.bookVersionsClearedUpTo = highestNumber;
+    // The next saved book is numbered above every deleted one (never hidden by the registry).
+    tracked.lastBookVersionNumber = Math.max(Number(tracked.lastBookVersionNumber ?? 0) || 0, highestNumber);
+    interview.bookGeneratedCount = 0;
+    tracked.quotaRevision = (Number(tracked.quotaRevision ?? 0) || 0) + 1;
+    delete tracked.lastBookSaveKey;
+    delete tracked.lastBookSaveVersionId;
+    interview.lastActivityAt = new Date().toISOString();
+    this.interviews.set(interviewId, interview);
+    await this.persistDoc('interviews', interviewId, interview);
+
+    await this.addAuditLog(
+      'DELETE_ALL_PARTICIPANT_BOOK_VERSIONS',
+      'participantBookVersion',
+      interviewId,
+      performedBy,
+      {
+        interviewId,
+        deletedCount: deletedVersionIds.length,
+        versionNumbers: versions.map((v) => v.versionNumber).sort((a, b) => a - b),
+        clearedUpTo: highestNumber,
+      }
+    );
+    this.saveStateToDisk();
+    return { interview, deletedCount: deletedVersionIds.length, deletedVersionIds };
+  }
+
+  /**
+   * V5.4.1 — Administrator: deletes ALL manuscripts of an interview at once (memory, disk snapshot
+   * and Firestore). Saved PDF book versions are not touched.
+   */
+  public async deleteAllManuscriptsForInterview(
+    interviewId: string,
+    performedBy: string
+  ): Promise<{ interview: InterviewRecord; deletedCount: number; deletedManuscriptIds: string[] }> {
+    const interview = this.interviews.get(interviewId);
+    if (!interview) {
+      throw new Error('Entrevista no encontrada.');
+    }
+    const manuscriptsForInterview = Array.from(this.manuscripts.values()).filter(
+      (m) => m.interviewId === interviewId
+    );
+    const deletedManuscriptIds: string[] = [];
+    for (const m of manuscriptsForInterview) {
+      this.manuscripts.delete(m.id);
+      await this.removeDoc('manuscripts', m.id);
+      deletedManuscriptIds.push(m.id);
+    }
+    interview.lastActivityAt = new Date().toISOString();
+    this.interviews.set(interviewId, interview);
+    await this.persistDoc('interviews', interviewId, interview);
+    await this.addAuditLog('DELETE_ALL_MANUSCRIPTS', 'manuscript', interviewId, performedBy, {
+      interviewId,
+      deletedCount: deletedManuscriptIds.length,
+      versions: manuscriptsForInterview.map((m) => m.version).sort((a, b) => a - b),
+    });
+    this.saveStateToDisk();
+    return { interview, deletedCount: deletedManuscriptIds.length, deletedManuscriptIds };
   }
 
   public async seedCompleteTestStories(performedBy: string = 'system_admin'): Promise<{

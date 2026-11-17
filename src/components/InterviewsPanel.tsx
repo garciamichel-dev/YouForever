@@ -148,6 +148,13 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
   } | null>(null);
   const [restoreQuotaOnDelete, setRestoreQuotaOnDelete] = useState<boolean>(false);
   const [deletingVersion, setDeletingVersion] = useState<boolean>(false);
+  // V5.4.1: bulk delete (all PDF versions or all manuscripts of an interviewee), with confirmation.
+  const [bulkDeleteTarget, setBulkDeleteTarget] = useState<{
+    kind: 'versions' | 'manuscripts';
+    interview: EnrichedInterview;
+    count: number;
+  } | null>(null);
+  const [bulkDeleting, setBulkDeleting] = useState<boolean>(false);
 
   // Duplication, admin-only copy note, and inline quota states
   const [duplicateTarget, setDuplicateTarget] = useState<EnrichedInterview | null>(null);
@@ -699,6 +706,76 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
       setNoticeMessage('Error de conexión al sembrar historias de prueba.');
     } finally {
       setSeedingStories(false);
+    }
+  };
+
+  // V5.4.1 — Deletes ALL PDF versions or ALL manuscripts of one interviewee (after confirmation).
+  const handleConfirmBulkDelete = async () => {
+    if (!bulkDeleteTarget) return;
+    const { kind, interview } = bulkDeleteTarget;
+    try {
+      setBulkDeleting(true);
+      const res = await fetch(
+        `/api/interviews/${encodeURIComponent(interview.id)}/${kind === 'versions' ? 'book-versions' : 'manuscripts'}`,
+        { method: 'DELETE' }
+      );
+      const data = await res.json().catch(() => null);
+      if (!data?.success) {
+        setNoticeMessage(data?.error || 'No se pudo completar el borrado. Inténtalo de nuevo.');
+        return;
+      }
+      const clear = (item: EnrichedInterview): EnrichedInterview =>
+        kind === 'versions'
+          ? { ...item, bookVersions: [], bookVersionsCount: 0, bookGeneratedCount: 0 }
+          : { ...item, manuscriptsCount: 0 };
+      setInterviews((prev) => {
+        const next = prev.map((item) => (item.id === interview.id ? clear(item) : item));
+        try {
+          localStorage.setItem('foreveryou_interviews_cache', JSON.stringify(next));
+        } catch (_e) {
+          // ignore
+        }
+        return next;
+      });
+      if (kind === 'versions') {
+        // Keep this browser's copy consistent: deleted versions are never shown or pushed back.
+        try {
+          const clearedUpTo = Number(data.data?.clearedUpTo) || 0;
+          const synthIds = Array.from({ length: clearedUpTo }, (_v, i) => `pbv_${interview.id}_v${i + 1}`);
+          const deletedRaw = localStorage.getItem('foreveryou_deleted_book_version_ids');
+          const deletedList: string[] = deletedRaw ? JSON.parse(deletedRaw) : [];
+          const nextDeleted = Array.from(
+            new Set([...deletedList, ...(data.data?.deletedVersionIds || []), ...synthIds])
+          );
+          localStorage.setItem('foreveryou_deleted_book_version_ids', JSON.stringify(nextDeleted));
+          const cachedRaw = localStorage.getItem('foreveryou_book_versions_cache');
+          if (cachedRaw) {
+            const parsed: ParticipantBookVersionRecord[] = JSON.parse(cachedRaw);
+            localStorage.setItem(
+              'foreveryou_book_versions_cache',
+              JSON.stringify(parsed.filter((v) => v.interviewId !== interview.id))
+            );
+          }
+        } catch (_e) {
+          // ignore
+        }
+      }
+      if (bookStudioAdminTarget && bookStudioAdminTarget.id === interview.id) {
+        setBookStudioAdminTarget(clear(bookStudioAdminTarget));
+      }
+      setNoticeMessage(
+        data.message ||
+          (kind === 'versions'
+            ? 'Se eliminaron todas las versiones del libro en PDF.'
+            : 'Se eliminaron todos los manuscritos.')
+      );
+      setTimeout(() => setNoticeMessage(null), 6000);
+      setBulkDeleteTarget(null);
+      void fetchInterviews();
+    } catch (_err) {
+      setNoticeMessage('Error de conexión al borrar. Inténtalo de nuevo.');
+    } finally {
+      setBulkDeleting(false);
     }
   };
 
@@ -1642,6 +1719,21 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
                       </button>
                     ) : null}
 
+                    {/* V5.4.1: borrar todos los manuscritos de este entrevistado */}
+                    {inv.manuscriptsCount && inv.manuscriptsCount > 0 ? (
+                      <button
+                        onClick={() =>
+                          setBulkDeleteTarget({ kind: 'manuscripts', interview: inv, count: inv.manuscriptsCount || 0 })
+                        }
+                        className="inline-flex items-center space-x-1 px-3 py-1.5 bg-white hover:bg-rose-50 text-rose-700 border border-rose-300 rounded-lg text-xs font-semibold transition"
+                        title="Borrar todos los manuscritos de este entrevistado (pide confirmación)"
+                        data-testid={`bulk-delete-manuscripts-${inv.id}`}
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Borrar manuscritos ({inv.manuscriptsCount})</span>
+                      </button>
+                    ) : null}
+
                     <button
                       onClick={() => handleCompileManuscript(inv.id)}
                       disabled={compilingId === inv.id}
@@ -1689,6 +1781,25 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
                         Libros PDF &amp; Cuota ({inv.bookVersions?.length || inv.bookVersionsCount || 0})
                       </span>
                     </button>
+
+                    {/* V5.4.1: borrar todas las versiones PDF guardadas de este entrevistado */}
+                    {(inv.bookVersions?.length || inv.bookVersionsCount || 0) > 0 && (
+                      <button
+                        onClick={() =>
+                          setBulkDeleteTarget({
+                            kind: 'versions',
+                            interview: inv,
+                            count: inv.bookVersions?.length || inv.bookVersionsCount || 0,
+                          })
+                        }
+                        className="inline-flex items-center space-x-1 px-3 py-1.5 bg-white hover:bg-rose-50 text-rose-700 border border-rose-300 rounded-lg text-xs font-semibold transition"
+                        title="Borrar todas las versiones del libro en PDF de este entrevistado (pide confirmación)"
+                        data-testid={`bulk-delete-versions-${inv.id}`}
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Borrar PDFs ({inv.bookVersions?.length || inv.bookVersionsCount || 0})</span>
+                      </button>
+                    )}
 
                     {/* Extend or Reopen */}
                     {inv.status === 'open' && !inv.userDeclaredComplete && (
@@ -2358,9 +2469,27 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
                 <h4 className="font-serif text-sm font-bold text-stone-900">
                   Historial de Versiones PDF Generadas ({bookStudioAdminTarget.bookVersions?.length || 0})
                 </h4>
-                <span className="text-[11px] text-stone-500">
-                  Las versiones antiguas se conservan permanentemente
-                </span>
+                {bookStudioAdminTarget.bookVersions && bookStudioAdminTarget.bookVersions.length > 0 ? (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setBulkDeleteTarget({
+                        kind: 'versions',
+                        interview: bookStudioAdminTarget,
+                        count: bookStudioAdminTarget.bookVersions?.length || 0,
+                      })
+                    }
+                    className="inline-flex items-center space-x-1 px-2.5 py-1 bg-white hover:bg-rose-50 text-rose-700 border border-rose-300 rounded-lg text-[11px] font-semibold transition"
+                    title="Borrar todas las versiones PDF de este entrevistado (pide confirmación)"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                    <span>Borrar todas</span>
+                  </button>
+                ) : (
+                  <span className="text-[11px] text-stone-500">
+                    Las versiones antiguas se conservan permanentemente
+                  </span>
+                )}
               </div>
 
               {!bookStudioAdminTarget.bookVersions ||
@@ -2614,6 +2743,81 @@ Tus recuerdos y testimonios serán preservados con total fidelidad para nuestra 
                 className="px-4 py-2 border border-stone-300 text-stone-700 rounded-lg hover:bg-stone-50 text-xs"
               >
                 Cerrar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* V5.4.1 — Modal: confirm bulk delete (all PDF versions / all manuscripts of an interviewee) */}
+      {bulkDeleteTarget && (
+        <div
+          className="fixed inset-0 z-[60] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4"
+          data-testid="bulk-delete-confirm"
+        >
+          <div className="bg-white rounded-xl max-w-lg w-full p-6 shadow-2xl border-2 border-rose-200">
+            <div className="flex items-center space-x-3 text-rose-600 mb-3">
+              <div className="p-3 bg-rose-100 rounded-xl">
+                <Trash2 className="w-6 h-6 text-rose-600" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-stone-900">
+                  {bulkDeleteTarget.kind === 'versions'
+                    ? `¿Borrar las ${bulkDeleteTarget.count} versiones del libro en PDF?`
+                    : `¿Borrar los ${bulkDeleteTarget.count} manuscritos?`}
+                </h3>
+                <p className="text-xs text-rose-600 font-semibold">Esta acción no se puede deshacer</p>
+              </div>
+            </div>
+
+            <div className="bg-stone-50 border border-stone-200 rounded-lg p-3.5 mb-4 text-xs space-y-1.5">
+              <div className="font-serif font-bold text-stone-900 text-sm">{bulkDeleteTarget.interview.title}</div>
+              <div className="text-[11px] text-stone-600">
+                {bulkDeleteTarget.kind === 'versions'
+                  ? 'Se borrarán todas las «Versiones de tu Libro en PDF Guardadas» de este entrevistado, de la base de datos y de su portal.'
+                  : 'Se borrarán todos los manuscritos de este entrevistado de la base de datos.'}
+              </div>
+            </div>
+
+            <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg mb-4 text-[11px] text-amber-950 space-y-1">
+              {bulkDeleteTarget.kind === 'versions' ? (
+                <>
+                  <p>• Los manuscritos del entrevistado no se tocan.</p>
+                  <p>• Los intentos de maquetación (cuota) no cambian; puedes ajustarlos en «Libros PDF &amp; Cuota».</p>
+                  <p>• Los libros que se guarden después seguirán numerándose a partir de la última versión.</p>
+                </>
+              ) : (
+                <>
+                  <p>• Las versiones del libro en PDF guardadas no se tocan.</p>
+                  <p>• Las respuestas, fotografías y audios del entrevistado no se tocan.</p>
+                </>
+              )}
+            </div>
+
+            <div className="flex justify-center items-center gap-3 pt-3 border-t border-stone-200">
+              <button
+                type="button"
+                onClick={() => setBulkDeleteTarget(null)}
+                disabled={bulkDeleting}
+                className="px-4 py-2 border border-stone-300 text-stone-700 rounded-lg hover:bg-stone-50 text-xs font-semibold"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmBulkDelete}
+                disabled={bulkDeleting}
+                className="px-4 py-2 bg-rose-700 hover:bg-rose-800 disabled:opacity-50 text-white rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition shadow-sm"
+                data-testid="bulk-delete-confirm-button"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>
+                  {bulkDeleting
+                    ? 'Borrando...'
+                    : bulkDeleteTarget.kind === 'versions'
+                      ? 'Sí, borrar todas las versiones'
+                      : 'Sí, borrar todos los manuscritos'}
+                </span>
               </button>
             </div>
           </div>

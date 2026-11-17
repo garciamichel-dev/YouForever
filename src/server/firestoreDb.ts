@@ -1,6 +1,9 @@
-import { initializeApp, getApps, getApp } from 'firebase/app';
-import {
-  getFirestore,
+/**
+ * V5.3.2 — Legacy helper kept for compatibility. The server reaches Firestore only through the
+ * Firebase Admin SDK with its service identity (see ./firestoreAdmin.ts); the browser SDK is no
+ * longer used on the server.
+ */
+export {
   doc,
   getDoc,
   setDoc,
@@ -10,36 +13,10 @@ import {
   query,
   where,
   getDocFromServer,
-  Firestore,
-  setLogLevel,
-} from 'firebase/firestore';
-import fs from 'node:fs';
-import path from 'node:path';
-
-let dbInstance: Firestore | null = null;
+  type Firestore,
+} from './firestoreAdmin.ts';
+import { getServerFirestore, type Firestore } from './firestoreAdmin.ts';
 
 export function getDb(): Firestore {
-  if (dbInstance) return dbInstance;
-
-  try {
-    const configPath = path.resolve(process.cwd(), 'firebase-applet-config.json');
-    if (fs.existsSync(configPath)) {
-      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-      try {
-        setLogLevel('error');
-      } catch {}
-      const app = getApps().length > 0 ? getApp() : initializeApp(config);
-      dbInstance = getFirestore(app, config.firestoreDatabaseId);
-
-      // Validate connection to Firestore as required by skill
-      getDocFromServer(doc(dbInstance, 'test', 'connection')).catch((err) => {
-        console.debug('Firestore check notice:', err?.message || err);
-      });
-      return dbInstance;
-    }
-  } catch (err) {
-    console.error('Failed to initialize Firestore instance from config:', err);
-  }
-
-  throw new Error('Firestore configuration not loaded');
+  return getServerFirestore();
 }

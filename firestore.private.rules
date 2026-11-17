@@ -1,0 +1,44 @@
+rules_version = '2';
+
+// =================================================================================================
+// YouForever — V5.3.2 PRIVATE RULES (deny by default)
+//
+// This file is NOT published automatically: `firestore.rules` keeps the previous rules so that a
+// Google AI Studio import cannot lock the server out while it still runs in compatibility mode.
+// Publish these rules deliberately (Firebase console → Firestore → the named database → Rules, or
+// the Firebase CLI) once `GET /api/admin/firestore-status` reports "mode": "admin".
+//
+// Every read and write of YouForever data is performed by the Node.js server through the Firebase
+// Admin SDK with the Cloud Run service identity, which is authorized by IAM and is NOT subject to
+// these rules. Browsers never read or write application data directly: they talk to the server API,
+// which authenticates participants (access codes) and administrators (verified Firebase ID tokens).
+//
+// Therefore no public client — anonymous, signed in with any account, or claiming to be an
+// administrator through an e-mail address — may read or write any collection. In particular:
+// interviews, participants, interviewTokens, answers, questions, questionnaireVersions,
+// participantBookVersions (books + private audit reports, including chunked documents),
+// interviewPhotos, interviewAudio, manuscripts, auditLogs, privacyConsents, arcoRequests,
+// secondaryAccess, scheduledDeliveries, postMortemInstructions, bookShares, settings, admins and
+// every mi_esencia_* collection. Clients cannot create documents in administrative collections
+// (e.g. `admins`) to forge an authorization either.
+//
+// The only exception is the empty connectivity probe `test/connection`, which the web client reads
+// on start-up (a denied read is tolerated too). It never contains data and cannot be written.
+//
+// DEPLOY ONLY AFTER `GET /api/admin/firestore-status` reports "mode": "admin" (the server may run in
+// a compatibility mode that still needs public rules when it has no service identity). See
+// docs/V5.3.2-despliegue-firestore.md. Previous public rules: `git show 8de522b:firestore.rules`.
+// =================================================================================================
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    match /test/connection {
+      allow get: if true;
+      allow list, create, update, delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

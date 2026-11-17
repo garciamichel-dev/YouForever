@@ -1,0 +1,965 @@
+# YOUFOREVER V5.1 — PROMPT FINAL DE CORRECCIÓN CRÍTICA
+
+## RECUPERACIÓN DEFINITIVA DEL FLUJO DE GENERACIÓN, AUDITORÍA, APROBACIÓN Y GUARDADO DE LIBROS
+
+### 1. ROL Y MISIÓN
+
+Actúa como arquitecto senior de software TypeScript, React y Node.js, ingeniero especializado en Gemini y OpenAI, especialista en auditoría semántica documental y responsable de pruebas de regresión.
+
+Trabaja directamente sobre el código fuente ACTUAL de YouForever, correspondiente a la versión 5 del 14 de noviembre de 2026.
+
+**TU MISIÓN ES CORREGIR EL BLOQUEO RECURRENTE QUE IMPIDE FINALIZAR LOS LIBROS AUTOBIOGRÁFICOS, SIN DEBILITAR SU FIDELIDAD DOCUMENTAL Y SIN MODIFICAR FUNCIONALIDADES AJENAS.**
+
+El usuario ha realizado tres intentos consecutivos de generación sin conseguir aprobar un libro.
+
+El sistema devuelve:
+
+**"BORRADOR INCOMPLETO — PENDIENTE DE REVISIÓN"**
+
+La versión 5 incorporó generación por trabajos, auditoría híbrida, reparación contextual y diagnósticos. Estas mejoras deben conservarse.
+
+No quiero una nueva reestructuración integral del motor.
+
+Quiero corregir los defectos concretos que todavía pueden provocar rechazos incorrectos, inconsistencias entre generación y guardado y reutilización de resultados obsoletos.
+
+**Debes implementar las correcciones, ejecutar las pruebas disponibles y documentar sus resultados. No te limites a explicar las soluciones.**
+
+---
+
+## 2. RESTRICCIONES ABSOLUTAS
+
+Está estrictamente prohibido:
+
+1. Modificar los textos de los prompts literarios A, B y C.
+2. Modificar entrevistas, preguntas, respuestas o profundizaciones originales.
+3. Modificar fotografías originales o sus descripciones históricas.
+4. Alterar `data/storage_state.json` u otros datos históricos reales.
+5. Eliminar o sobrescribir versiones anteriores de libros.
+6. Desactivar la auditoría documental o editorial.
+7. Establecer artificialmente `passed: true`.
+8. Forzar `generationStatus: 'approved'`.
+9. Aprobar manuscritos con omisiones o contradicciones reales sin resolver.
+10. Reducir artificialmente el inventario testimonial para elevar el porcentaje de cobertura.
+11. Debilitar permisos, autenticación o verificaciones del servidor.
+12. Cambiar cuotas, suscripciones, precios o reglas comerciales.
+13. Modificar Mi Esencia u otros módulos ajenos al motor autobiográfico.
+14. Cambiar arbitrariamente modelos, proveedores o claves de API.
+15. Reescribir completamente funciones que puedan corregirse con modificaciones localizadas.
+16. Incorporar excepciones específicas para alguna persona o entrevista.
+
+Conserva la funcionalidad de los tres estilos literarios, las entrevistas individuales y compartidas, los formatos editoriales y las opciones de fotografías.
+
+**No confundas conservar fidelidad con impedir indefinidamente la publicación de un manuscrito correcto.**
+
+Toda decisión de aprobación o rechazo debe estar respaldada por evidencia verificable.
+
+---
+
+# PARTE I — CAUSAS QUE DEBES COMPROBAR Y CORREGIR
+
+## 3. PROBLEMA CRÍTICO 1: FALSOS POSITIVOS SEMÁNTICOS
+
+Revisa las funciones existentes:
+
+- `auditWithHybridSemantics`
+- `auditAndApproveBookManuscript`
+- `verifyDocumentaryUnitInManuscript`
+- `detectSemanticContradictionsBetweenTexts`
+- `judgeAmbiguousSemanticUnitsWithAI`
+
+En la versión 5, `auditWithHybridSemantics` ejecuta primero una auditoría determinista y posteriormente consulta al verificador mediante IA para determinadas unidades clasificadas como ambiguas.
+
+**PROBLEMA IDENTIFICADO:**
+
+Las unidades clasificadas inicialmente como contradicciones o como omisiones pueden quedar fuera de esa revisión semántica independiente.
+
+Esto permite que una heurística incorrecta bloquee un manuscrito sin haber comprobado contextualmente el supuesto defecto.
+
+### 3.1. Comportamiento requerido
+
+Las heurísticas deben servir para detectar candidatos, localizar evidencia y reconocer casos determinísticamente seguros.
+
+No deberán establecer una contradicción definitiva cuando el significado requiera interpretación contextual.
+
+El sistema deberá distinguir:
+
+- Equivalencia demostrada.
+- Paráfrasis potencialmente equivalente.
+- Omisión candidata.
+- Omisión confirmada.
+- Contradicción candidata.
+- Contradicción confirmada.
+- Información añadida sin respaldo.
+- Resultado inconcluso.
+
+**Tanto las contradicciones candidatas como las omisiones ambiguas deberán poder pasar por verificación semántica.**
+
+No envíes indiscriminadamente todo el libro a la IA.
+
+Utiliza una estrategia selectiva: primero búsqueda de evidencia y comprobaciones deterministas; después verificación por IA de los casos verdaderamente inciertos.
+
+### 3.2. Comparación semántica
+
+Para resolver cada caso, considera:
+
+- Sujeto.
+- Acción.
+- Destinatario.
+- Negación.
+- Intención.
+- Temporalidad.
+- Lugar.
+- Resultado.
+- Relaciones personales.
+- Emociones expresadas.
+- Incertidumbres originales.
+- Contexto narrativo.
+
+No compares negaciones aisladas de la proposición a la que pertenecen.
+
+No confundas un recuerdo expresado con duda con una negación.
+
+No confundas cambios gramaticales propios del estilo C con cambios de protagonista.
+
+### 3.3. Localización correcta de evidencia
+
+El verificador no debe recibir solamente un párrafo elegido por una coincidencia superficial.
+
+Localiza los fragmentos candidatos realmente relacionados con el hecho, incluso cuando la narración esté distribuida entre varios párrafos.
+
+Si la evidencia no aparece en el fragmento inicialmente seleccionado, busca en el capítulo o en otros fragmentos pertinentes antes de declarar una omisión.
+
+No apruebes unidades cuyo respaldo no pueda localizarse.
+
+Los veredictos del modelo deberán corresponder a identificadores válidos y a evidencia existente en el manuscrito.
+
+Valida la estructura de las respuestas de IA, sus identificadores y sus resultados. No aceptes evidencia ficticia.
+
+### 3.4. Manejo de resultados inconclusos
+
+Cuando el verificador no pueda determinar la equivalencia:
+
+- No inventes una contradicción.
+- No declares cobertura verificada.
+- No elimines el hecho del inventario.
+- Conserva el estado pendiente.
+- Intenta una comprobación adicional cuando exista evidencia útil.
+- Registra el motivo si permanece inconcluso.
+
+Si el proveedor falla, no conviertas automáticamente ese fallo técnico en una omisión biográfica.
+
+---
+
+## 4. PROBLEMA CRÍTICO 2: AUDITORÍA HÍBRIDA QUE PUEDE PERDER BLOQUEOS REALES
+
+Revisa especialmente cómo `auditWithHybridSemantics` reconstruye:
+
+- `blockingDefects`
+- `coverageAudit`
+- `semanticAudit`
+- `veracityAudit`
+- `structuralAudit`
+- `photoAudit`
+- `editorialAudit`
+
+El código actual reconstruye una nueva lista de defectos después de recibir los veredictos semánticos.
+
+**RIESGO IDENTIFICADO:**
+
+Al reconstruir esa lista de manera parcial, pueden desaparecer defectos que siguen siendo válidos aunque algunas unidades hayan sido aprobadas semánticamente.
+
+### Corrección obligatoria
+
+No reemplaces indiscriminadamente la lista original de bloqueos con una lista incompleta.
+
+Debes:
+
+1. Conservar todos los defectos que sigan siendo aplicables.
+2. Eliminar únicamente aquellos resueltos mediante evidencia suficiente.
+3. Actualizar de forma coherente las unidades verificadas.
+4. Recalcular cobertura.
+5. Mantener los defectos estructurales, documentales, editoriales, de privacidad y de fotografías que permanezcan pendientes.
+6. Garantizar que todos los indicadores de aprobación sean consistentes.
+
+La aprobación global deberá corresponder al resultado conjunto de las auditorías obligatorias.
+
+No permitas que:
+
+- `report.passed === true` mientras una auditoría obligatoria indique fallo.
+- `generationStatus === 'approved'` mientras existan defectos bloqueantes.
+- La auditoría semántica apruebe un manuscrito con errores estructurales vigentes.
+- Un resultado de IA elimine inadvertidamente bloqueos de privacidad, fotografías o invenciones.
+
+Comprueba también los defectos de numeración, identificadores duplicados, fragmentos de continuación, preguntas convertidas en capítulos y adiciones sin respaldo.
+
+**Un veredicto semántico favorable solamente debe resolver el defecto específico que ha sido verificado.**
+
+No debe invalidar otras comprobaciones.
+
+---
+
+# PARTE II — APROBACIÓN Y GUARDADO
+
+## 5. PROBLEMA CRÍTICO 3: DOS VALIDACIONES INCOMPATIBLES
+
+Revisa:
+
+`src/server/storage.ts`
+
+Función:
+
+`saveParticipantBookVersion`
+
+Y su relación con:
+
+`src/server/geminiService.ts`
+
+Función:
+
+`auditWithHybridSemantics`
+
+### Problema confirmado en el código
+
+Durante la generación, el manuscrito utiliza una auditoría híbrida.
+
+Sin embargo, durante el guardado se ejecuta nuevamente:
+
+`auditAndApproveBookManuscript`
+
+Esta validación determinista puede rechazar una paráfrasis que ya fue correctamente aprobada por el sistema híbrido.
+
+Esto crea dos decisiones incompatibles sobre el mismo manuscrito.
+
+### 5.1. Establecer una única política de aprobación
+
+Implementa una política canónica de auditoría y aprobación compartida por generación y guardado.
+
+No debe haber dos conjuntos distintos de criterios finales.
+
+El servidor deberá ser la única autoridad de aprobación.
+
+No será suficiente recibir del navegador:
+
+- `generationStatus: 'approved'`
+- `status: 'approved'`
+- `documentaryAudit.passed`
+- `editorialAudit.passed`
+
+Estos campos no constituyen prueba de autorización.
+
+### 5.2. Evidencia de aprobación vinculada al contenido
+
+Implementa, aprovechando las estructuras existentes, un registro o constancia de aprobación gestionado exclusivamente por el servidor.
+
+Debe permitir verificar que el manuscrito guardado corresponde exactamente al que superó la auditoría.
+
+Asocia la aprobación con:
+
+- Identificador de entrevista.
+- Identificador y autorización del participante.
+- Contenido narrativo canónico.
+- Conjunto de respuestas elegibles.
+- Profundizaciones.
+- Exclusiones.
+- Relaciones entre participantes.
+- Estilo literario.
+- Prompt literario activo.
+- Versión del motor.
+- Versión de auditoría.
+- Contextos fotográficos relevantes.
+- Resultado de auditoría documental.
+- Resultado de auditoría editorial.
+
+Utiliza serialización canónica y hashes criptográficos estables.
+
+No incluyas testimonios privados directamente en identificadores visibles.
+
+Una huella criptográfica calculada en el navegador no es suficiente para autorizar un guardado.
+
+La constancia debe existir o verificarse en el servidor y estar asociada al usuario autorizado.
+
+No es necesario introducir un nuevo servicio externo ni una infraestructura de seguridad completamente nueva si el almacenamiento actual permite resolverlo.
+
+### 5.3. Validación al guardar
+
+Cuando se reciba una solicitud de guardado:
+
+1. Autentica al participante.
+2. Comprueba el permiso sobre la entrevista.
+3. Comprueba las reglas comerciales y de versiones existentes.
+4. Recupera la aprobación canónica del servidor.
+5. Verifica que corresponde al manuscrito exacto.
+6. Comprueba que las fuentes y reglas no cambiaron.
+7. Verifica la integridad de la aprobación.
+8. Comprueba que no existan defectos pendientes.
+9. Guarda únicamente la versión efectivamente aprobada.
+
+Si todo coincide, no vuelvas a rechazar el libro por ejecutar una auditoría determinista diferente.
+
+Si falta la constancia o ha quedado obsoleta, utiliza la misma política híbrida canónica antes de decidir.
+
+Si el contenido fue alterado, debe volver a validarse.
+
+No permitas aprobar un manuscrito modificado o una versión distinta usando una aprobación anterior.
+
+### 5.4. Compatibilidad con la maquetación
+
+Distingue entre:
+
+**Cambios narrativos:** alteran el contenido testimonial y requieren nueva verificación.
+
+**Cambios puramente visuales:** modifican fuente, tamaño, márgenes, portada o presentación sin cambiar los hechos.
+
+No obligues a regenerar ni a consumir llamadas literarias de IA por un cambio puramente visual.
+
+Sí debes verificar que los cambios de fotografías o elementos editoriales no incorporen contenido excluido, inventado o asociado incorrectamente.
+
+Mantén las cuotas y permisos existentes.
+
+---
+
+## 6. CORREGIR INCONSISTENCIAS EN EL CLIENTE
+
+Revisa:
+
+`src/components/ParticipantBookStudio.tsx`
+
+Especialmente:
+
+`handleSaveAndGenerateBookVersion`
+
+Comprueba que no se modifique el contenido narrativo después de su aprobación.
+
+Revisa las operaciones que:
+
+- Recuperan un manuscrito aprobado.
+- Combinan información de la vista previa con el manuscrito completo.
+- Sobrescriben títulos, subtítulos o introducciones.
+- Modifican el objeto recibido del servidor.
+- Sustituyen el manuscrito devuelto por el guardado.
+
+### Corrección requerida
+
+El objeto narrativo que se guarda debe corresponder al contenido aprobado en el servidor.
+
+No reconstruyas un supuesto manuscrito aprobado mediante combinaciones de resultados anteriores que no hayan sido verificadas.
+
+El servidor debe devolver la versión canónica efectivamente guardada.
+
+El cliente debe utilizar esa versión autoritativa para actualizar su estado y sus referencias locales.
+
+No sustituyas el manuscrito devuelto por el servidor por una copia antigua almacenada en el navegador.
+
+Las modificaciones de portada, título visible y otros campos editoriales configurables deberán mantenerse en sus espacios correspondientes sin invalidar indebidamente la auditoría narrativa.
+
+---
+
+# PARTE III — REANUDACIÓN Y CACHÉ
+
+## 7. PROBLEMA CRÍTICO 4: TRABAJOS REANUDADOS CON FUENTES INCOMPATIBLES
+
+Revisa:
+
+`src/server/bookJobManager.ts`
+
+Especialmente:
+
+- `buildJobKey`
+- `startOrResumeJob`
+- Persistencia de trabajos.
+- Recuperación de checkpoints.
+
+Actualmente la identidad del trabajo se basa principalmente en entrevista, estilo y alcance.
+
+Esto no demuestra que las fuentes sigan siendo exactamente iguales.
+
+### Corrección obligatoria
+
+Cada trabajo deberá asociarse con una huella de sus entradas relevantes.
+
+Incluye:
+
+- Entrevista.
+- Participantes.
+- Respuestas escritas finales.
+- Profundizaciones.
+- Material testimonial adicional elegible.
+- Exclusiones.
+- Estilo seleccionado.
+- Prompt literario activo.
+- Configuración narrativa.
+- Contexto y asociaciones de fotografías.
+- Versión del motor.
+- Versión de auditoría.
+
+La huella debe generarse de manera determinista y permitir comprobar la identidad de las fuentes antes de reutilizar un trabajo.
+
+Antes de recuperar checkpoints:
+
+1. Compara la huella almacenada con la actual.
+2. Verifica la integridad de los lotes.
+3. Comprueba que pertenecen al mismo plan editorial y versión de generación.
+4. Reutiliza únicamente resultados compatibles.
+5. Descarta para la nueva ejecución los checkpoints incompatibles, sin borrar datos históricos.
+
+No reutilices un resultado de otra entrevista, estilo o configuración.
+
+No reutilices manuscritos incompletos como si estuvieran aprobados.
+
+### 7.1. No rehacer el gestor de trabajos
+
+La versión 5 ya cuenta con:
+
+- Inicio de trabajos.
+- Consulta de progreso.
+- Cancelación.
+- Checkpoints.
+- Persistencia.
+
+Conserva estas funciones.
+
+Corrige exclusivamente la identidad, verificación y recuperación cuando sea necesario.
+
+Mantén el flujo de sondeo utilizado por la interfaz.
+
+No conviertas nuevamente la generación en una solicitud HTTP de larga duración.
+
+### 7.2. Evitar procesos duplicados
+
+Comprueba que las solicitudes simultáneas no produzcan:
+
+- Dos libros guardados accidentalmente.
+- Dos consumos de cuota.
+- Sobrescrituras.
+- Mezcla de lotes.
+- Checkpoints incompatibles.
+- Resultados tardíos de un trabajo cancelado.
+
+Mantén el control de concurrencia del sistema.
+
+---
+
+# PARTE IV — DIAGNÓSTICO Y RECUPERACIÓN
+
+## 8. PROBLEMA CRÍTICO 5: MOTIVOS DE FALLO INSUFICIENTES
+
+Revisa:
+
+`onJobSettled`
+
+y el registro de eventos de generación.
+
+Los trabajos que terminan como `incomplete` también necesitan un diagnóstico técnico.
+
+Actualmente, algunos registros detallados se generan solamente cuando el trabajo tiene estado `failed`.
+
+### Corrección requerida
+
+Registra de forma consistente los siguientes estados:
+
+- Completado y aprobado.
+- Completado pero incompleto.
+- Fallido por proveedor.
+- Fallido por timeout.
+- Fallido por respuesta inválida.
+- Fallido por auditoría.
+- Fallido durante guardado.
+- Cancelado.
+
+Incluye:
+
+- Identificador del trabajo.
+- Fase en que terminó.
+- Código de error.
+- Número de lotes completados.
+- Unidades documentales elegibles.
+- Unidades verificadas.
+- Unidades pendientes.
+- Contradicciones confirmadas.
+- Ambigüedades pendientes.
+- Auditoría editorial.
+- Reparaciones ejecutadas.
+- Defectos bloqueantes restantes.
+- Resultado de la validación de guardado.
+
+No almacenes testimonios completos ni datos sensibles en logs generales.
+
+No muestres detalles técnicos a entrevistados.
+
+Los usuarios deben recibir mensajes sencillos.
+
+Los administradores deben poder consultar la causa real del rechazo.
+
+### 8.1. No repetir innecesariamente toda la generación
+
+Si un manuscrito ya fue redactado correctamente y el único problema es una verificación pendiente, intenta recuperar y completar la verificación.
+
+No regeneres obligatoriamente todo el libro.
+
+Si se detecta una omisión real, utiliza la reparación contextual existente.
+
+No insertes respuestas originales mecánicamente para alcanzar la cobertura.
+
+Si el proveedor falla durante una auditoría, identifica el error como problema técnico, no como hecho omitido.
+
+### 8.2. Tratamiento de borradores incompletos
+
+Conserva el estado:
+
+`incomplete_draft`
+
+cuando existan motivos auténticos para no aprobar.
+
+Permite consultar el borrador de manera segura.
+
+Mantén bloqueado el guardado como libro definitivo mientras existan defectos reales sin resolver.
+
+No elimines este mecanismo.
+
+El objetivo es reducir falsos rechazos, no permitir que todo se apruebe.
+
+---
+
+# PARTE V — CONSERVACIÓN DE CALIDAD LITERARIA
+
+## 9. NO REGRESAR A LOS ERRORES DE VERSIONES ANTERIORES
+
+Las modificaciones no deben reintroducir los problemas detectados anteriormente:
+
+- Un capítulo por respuesta.
+- Reproducción de preguntas como capítulos.
+- Testimonios orales pegados mecánicamente.
+- Párrafos gigantescos.
+- Recuerdos repetidos.
+- Fragmentos inconclusos.
+- Cambios de narrador.
+- Fotografías fuera de contexto.
+- Omisiones testimoniales.
+- Invenciones biográficas.
+
+La auditoría documental y la auditoría editorial deben seguir siendo obligatorias.
+
+El contenido autorizado de las entrevistas debe conservarse íntegramente en términos de hechos y detalles únicos.
+
+Los estilos A, B y C deberán utilizar sus prompts originales sin modificaciones.
+
+No modifiques los mecanismos literarios que ya funcionan a menos que una prueba demuestre que están relacionados directamente con el bloqueo.
+
+---
+
+# PARTE VI — PRUEBAS OBLIGATORIAS
+
+## 10. PREPARAR PRUEBAS AUTOMATIZADAS SIN DATOS REALES
+
+Ejecuta las pruebas existentes y añade exclusivamente las necesarias para cubrir los defectos identificados.
+
+Utiliza entrevistas sintéticas, almacenamiento de prueba y proveedores simulados.
+
+No escribas sobre Firestore de producción.
+
+No modifiques entrevistas históricas.
+
+No consumas APIs pagadas durante las pruebas automatizadas por defecto.
+
+### PRUEBA 1. PARÁFRASIS FIEL
+
+Fuente:
+
+"Mi padre me salvó de caer al río."
+
+Narración:
+
+"Gracias a la intervención de mi padre, no terminé cayendo al agua."
+
+**Resultado esperado:**
+
+La auditoría híbrida reconoce la equivalencia y conserva la cobertura.
+
+### PRUEBA 2. CONTRADICCIÓN REAL
+
+Fuente:
+
+"Mi padre me salvó de caer al río."
+
+Narración:
+
+"Mi padre me empujó al río."
+
+**Resultado esperado:**
+
+La auditoría detecta la contradicción y rechaza la aprobación.
+
+### PRUEBA 3. NEGACIÓN REAL
+
+Narración alterada:
+
+"Mi padre no me salvó de caer al río."
+
+**Resultado esperado:**
+
+Rechazo por cambio de significado.
+
+### PRUEBA 4. CAMBIO DE SUJETO
+
+Narración alterada:
+
+"Yo salvé a mi padre de caer al río."
+
+**Resultado esperado:**
+
+Rechazo por atribución incorrecta.
+
+### PRUEBA 5. FALSO POSITIVO DETERMINISTA
+
+Construye un caso donde las reglas deterministas señalen una supuesta contradicción, pero el verificador semántico encuentre evidencia suficiente de equivalencia.
+
+**Resultado esperado:**
+
+La contradicción candidata se resuelve correctamente y no bloquea el manuscrito.
+
+### PRUEBA 6. CONSERVACIÓN DE OTROS BLOQUEOS
+
+Prepara un manuscrito con una paráfrasis válida y, simultáneamente, un error estructural o una adición biográfica sin respaldo.
+
+**Resultado esperado:**
+
+La auditoría híbrida resuelve la paráfrasis sin eliminar el defecto estructural o documental restante.
+
+El manuscrito no debe aprobarse.
+
+### PRUEBA 7. APROBACIÓN Y GUARDADO COHERENTES
+
+Genera un manuscrito sintético válido.
+
+Haz que supere ambas auditorías.
+
+Después intenta guardarlo mediante el flujo real de `saveParticipantBookVersion`, utilizando almacenamiento aislado.
+
+**Resultado esperado:**
+
+El mismo manuscrito validado puede guardarse sin ser rechazado por criterios diferentes.
+
+Comprueba el resultado persistido, no únicamente la respuesta HTTP.
+
+### PRUEBA 8. PROTECCIÓN CONTRA MANIPULACIÓN
+
+Modifica deliberadamente un manuscrito después de aprobarlo.
+
+Reutiliza la aprobación anterior.
+
+**Resultado esperado:**
+
+El servidor detecta la modificación y rechaza el guardado.
+
+### PRUEBA 9. CAMBIOS DE MAQUETACIÓN
+
+Modifica únicamente opciones de presentación que no afecten el contenido testimonial.
+
+**Resultado esperado:**
+
+El sistema permite utilizar el manuscrito previamente aprobado sin solicitar una nueva generación literaria innecesaria.
+
+Respeta las reglas comerciales existentes.
+
+### PRUEBA 10. REANUDACIÓN CON FUENTES MODIFICADAS
+
+Inicia un trabajo, genera checkpoints y simula una interrupción.
+
+Modifica una respuesta sintética.
+
+Intenta reanudar.
+
+**Resultado esperado:**
+
+No se reutilizan lotes incompatibles.
+
+### PRUEBA 11. REANUDACIÓN SIN CAMBIOS
+
+Interrumpe un trabajo y reanúdalo sin modificar las fuentes.
+
+**Resultado esperado:**
+
+Se aprovechan los checkpoints compatibles y no se repite innecesariamente el procesamiento.
+
+### PRUEBA 12. ENTREVISTA COMPLETA
+
+Genera una entrevista sintética con:
+
+- 46 respuestas.
+- Preguntas principales y profundizaciones.
+- Diferentes recuerdos.
+- Negaciones e incertidumbres.
+- Varios capítulos.
+
+**Resultado esperado:**
+
+Se conserva el testimonio, se superan las auditorías cuando el manuscrito es válido y puede completarse el guardado.
+
+### PRUEBA 13. ENTREVISTA EXTENSA
+
+Simula aproximadamente 230 respuestas más profundizaciones.
+
+Comprueba integridad de lotes, recuperación y ausencia de pérdidas.
+
+No es obligatorio llamar a modelos reales para esta prueba.
+
+### PRUEBA 14. LOS TRES ESTILOS
+
+Verifica con datos sintéticos los estilos:
+
+- A.
+- B.
+- C.
+
+Los tres deben utilizar la misma política de aprobación.
+
+La verificación no debe fallar porque el estilo C narre correctamente en tercera persona.
+
+### PRUEBA 15. PDF COMPLETO
+
+Reproduce el flujo de composición del PDF mediante las funciones existentes, a partir del manuscrito realmente aprobado y guardado.
+
+Comprueba:
+
+- Que todos los capítulos estén presentes.
+- Que no falte texto.
+- Que no existan capítulos duplicados.
+- Que el PDF proceda de la versión canónica.
+- Que se respeten las fotografías configuradas.
+- Que la vista previa y el libro completo sean consistentes cuando utilicen la misma configuración.
+
+Cuando la exportación dependa del navegador, utiliza la infraestructura de pruebas disponible o deja expresamente documentada la comprobación manual pendiente.
+
+No afirmes que se generó un PDF real si solamente se comprobó un objeto JSON.
+
+### PRUEBA 16. FALLA DE PERSISTENCIA
+
+Simula un error al guardar.
+
+Comprueba que no quede registrada una versión completa falsa ni se consuma una cuota indebidamente.
+
+Comprueba que la operación pueda recuperarse sin crear versiones duplicadas.
+
+---
+
+# PARTE VII — EJECUCIÓN DE PRUEBAS
+
+## 11. VERIFICACIONES TÉCNICAS
+
+Después de implementar las correcciones, ejecuta:
+
+`npm run lint`
+
+`npm test`
+
+`npm run build`
+
+Utiliza los scripts existentes en el proyecto.
+
+Agrega las nuevas pruebas a la estructura de pruebas actual.
+
+No modifiques pruebas para ocultar errores.
+
+No introduzcas mocks que simplemente devuelvan `passed: true` sin representar la situación que se desea comprobar.
+
+Los mocks deben simular veredictos específicos y permitir comprobar la lógica real de aprobación, conciliación y guardado.
+
+Distingue claramente entre:
+
+- Pruebas unitarias.
+- Pruebas de integración.
+- Pruebas de cliente.
+- Pruebas de persistencia.
+- Pruebas de PDF.
+- Pruebas con proveedores reales.
+
+Si alguna prueba no puede ejecutarse por limitaciones del entorno, indícalo explícitamente.
+
+No declares verificado un flujo completo si solamente has probado sus funciones individuales.
+
+---
+
+# PARTE VIII — ORDEN DE CORRECCIÓN Y CONTROL DE ALCANCE
+
+## 12. ORDEN ESTRICTO DE IMPLEMENTACIÓN
+
+Realiza los cambios en este orden:
+
+**PRIORIDAD 1 — BLOQUEO DE APROBACIÓN**
+
+Corregir la detección de falsos positivos y la conciliación de resultados de la auditoría híbrida.
+
+**PRIORIDAD 2 — SEGURIDAD DE LA AUDITORÍA**
+
+Garantizar que ningún defecto bloqueante vigente se pierda al resolver una ambigüedad.
+
+**PRIORIDAD 3 — GUARDADO**
+
+Unificar la política de aprobación y vincular el guardado al manuscrito canónico verificado por el servidor.
+
+**PRIORIDAD 4 — INTERFAZ**
+
+Evitar modificaciones accidentales del manuscrito aprobado y utilizar el objeto autoritativo devuelto por el servidor.
+
+**PRIORIDAD 5 — REANUDACIÓN**
+
+Proteger checkpoints y trabajos mediante huellas de fuentes y configuraciones.
+
+**PRIORIDAD 6 — DIAGNÓSTICOS**
+
+Registrar correctamente los trabajos incompletos y los fallos de auditoría o guardado.
+
+**PRIORIDAD 7 — REGRESIÓN**
+
+Ejecutar todas las pruebas y corregir cualquier regresión introducida.
+
+No inicies modificaciones adicionales no relacionadas.
+
+No refactorices módulos completos únicamente para mejorar su apariencia o estructura.
+
+No modifiques interfaces públicas sin actualizar los consumidores afectados.
+
+No introduzcas nuevas dependencias externas si las herramientas existentes permiten implementar la solución.
+
+---
+
+# PARTE IX — CRITERIOS DE ACEPTACIÓN
+
+## 13. CONDICIONES QUE DEBEN CUMPLIRSE
+
+La actualización solo podrá considerarse satisfactoria cuando se demuestre lo siguiente:
+
+1. Una paráfrasis correcta no queda bloqueada injustificadamente.
+2. Una contradicción real sigue siendo rechazada.
+3. Las omisiones documentales reales siguen detectándose.
+4. La auditoría híbrida conserva todos los defectos bloqueantes no resueltos.
+5. No existen estados de aprobación internamente contradictorios.
+6. La generación y el guardado aplican la misma política de aprobación.
+7. El navegador no puede falsificar una aprobación.
+8. Un manuscrito aprobado y sin modificaciones puede guardarse correctamente.
+9. Los cambios de presentación no obligan a regenerar innecesariamente el contenido.
+10. Los trabajos no reutilizan fuentes incompatibles.
+11. Los trabajos compatibles pueden reanudarse.
+12. Los borradores incompletos generan diagnósticos útiles.
+13. Los estilos A, B y C conservan su funcionamiento.
+14. El manuscrito guardado corresponde al realmente aprobado.
+15. La composición del PDF utiliza ese manuscrito.
+16. Los datos históricos y prompts literarios permanecen intactos.
+17. Las pruebas de regresión no presentan fallos nuevos.
+
+**NO APRUEBES UN MANUSCRITO PARA SUPERAR UNA PRUEBA. CORRIGE EL DEFECTO Y COMPRUEBA SU RESULTADO REAL.**
+
+No reduzcas arbitrariamente los requisitos de cobertura.
+
+No elimines los estados incompletos.
+
+No desactives las auditorías.
+
+---
+
+# PARTE X — INFORME FINAL OBLIGATORIO
+
+## 14. DOCUMENTACIÓN DE RESULTADOS
+
+Al terminar, entrega un informe técnico estructurado con:
+
+### A. Causa raíz
+
+Indica qué defectos explicaban el bloqueo y cuáles eran solamente riesgos potenciales.
+
+No presentes una hipótesis como si hubiera quedado demostrada.
+
+### B. Archivos modificados
+
+Para cada archivo indica:
+
+- Ruta.
+- Funciones modificadas.
+- Cambio realizado.
+- Razón técnica.
+- Riesgos de regresión.
+
+### C. Auditoría
+
+Explica cómo quedaron coordinadas las verificaciones deterministas y semánticas.
+
+### D. Aprobación
+
+Describe cómo se vincula la aprobación al manuscrito exacto y cómo la valida el servidor al guardar.
+
+### E. Trabajos
+
+Explica cómo se protegen las reanudaciones frente a cambios de fuentes y configuraciones.
+
+### F. Pruebas
+
+Presenta una tabla con:
+
+- Identificador de prueba.
+- Resultado esperado.
+- Resultado obtenido.
+- Estado: superada, fallida o no ejecutada.
+- Evidencia.
+
+### G. Flujo completo
+
+Confirma con evidencia si un manuscrito sintético válido consiguió:
+
+**GENERACIÓN → AUDITORÍA → APROBACIÓN → GUARDADO → COMPOSICIÓN DE PDF.**
+
+Si no se pudo ejecutar algún paso, indícalo sin afirmar éxito.
+
+### H. Integridad del proyecto
+
+Verifica que:
+
+- Los prompts literarios A, B y C no cambiaron.
+- No se modificaron entrevistas.
+- No se sobrescribieron libros históricos.
+- No se modificaron funcionalidades ajenas.
+- No se alteraron las cuotas comerciales.
+- No se introdujeron errores de compilación.
+
+### I. Estado final
+
+Clasifica la implementación como:
+
+- **CORRECCIÓN VERIFICADA:** pruebas obligatorias superadas y flujo funcional comprobado.
+- **CORRECCIÓN PARCIAL:** quedan pruebas o defectos pendientes.
+- **CORRECCIÓN NO VERIFICADA:** no existe evidencia suficiente para afirmar que se resolvió el bloqueo.
+
+No utilices la categoría de corrección verificada si quedan pruebas críticas fallidas.
+
+---
+
+## 15. INSTRUCCIÓN FINAL
+
+**IMPLEMENTA AHORA LAS CORRECCIONES FOCALIZADAS SOBRE EL CÓDIGO ACTUAL DE YOUFOREVER V5.**
+
+No me entregues solamente explicaciones.
+
+No vuelvas a rediseñar el motor autobiográfico.
+
+No modifiques los tres prompts literarios.
+
+No alteres datos históricos.
+
+No introduzcas soluciones específicas para una entrevista.
+
+No confundas cobertura léxica con fidelidad semántica.
+
+No permitas que generación y guardado utilicen aprobaciones incompatibles.
+
+No pierdas defectos reales al conciliar veredictos.
+
+No permitas que el cliente falsifique aprobaciones.
+
+No reutilices trabajos generados con fuentes diferentes.
+
+**OBJETIVO FINAL:**
+
+Que YouForever pueda generar, verificar, aprobar, guardar y producir libros autobiográficos completos cuando sus testimonios estén correctamente representados; y que continúe rechazando los manuscritos verdaderamente incompletos, contradictorios o no verificables.
+
+La corrección debe funcionar universalmente en los estilos A, B y C, con distintas entrevistas, diferentes cantidades de recuerdos y configuraciones editoriales.
+
+**EJECUTA LOS CAMBIOS, VERIFICA LOS RESULTADOS Y ENTREGA EL INFORME FINAL.**

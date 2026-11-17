@@ -37,8 +37,28 @@ import { normalizeCanonicalPublicOrigin } from '../logic/freeRegistration.ts';
 import {
   bookJobManager,
   sanitizeBookResultForParticipant,
+  sanitizeBookVersionForParticipant,
+  toParticipantBookVersionSummary,
   toParticipantBookJobView,
 } from './bookJobManager.ts';
+import type { BookAuditIncidentStatus } from '../logic/bookAuditReport.ts';
+import {
+  MEDIA_ACCESS_COOKIE,
+  authenticateAdminRequest,
+  buildAdminSessionCookie,
+  buildMediaAccessCookie,
+  issueAdminSessionCookieValue,
+  issueMediaAccessCookieValue,
+  mediaAccessInterviewsFromRequest,
+  readCookie,
+  verifyFirebaseIdToken,
+} from './adminAuth.ts';
+import { toParticipantAuditLogView } from './participantViews.ts';
+import { ensureFirestoreMode } from './firestoreAdmin.ts';
+import { APP_RELEASE_DATE, APP_RELEASE_SUMMARY, APP_VERSION, APP_VERSION_LABEL } from '../version.ts';
+
+// V5.3.4: moment this server process started (a new deployment always restarts it).
+const SERVER_STARTED_AT = new Date().toISOString();
 
 export const apiRouter: Router = express.Router();
 apiRouter.use(express.json({ limit: '100mb' }));
@@ -138,62 +158,106 @@ apiRouter.get('/health', (_req: Request, res: Response) => {
 });
 
 // --- Helper: Admin verification & Middleware ---
-export function getAdminUser(req: Request): string | null {
-  const queryAdmin = req.query.admin || req.query.adminEmail || req.query.token;
-  if (typeof queryAdmin === 'string' && queryAdmin.trim().length > 0) {
-    const email = queryAdmin.trim().toLowerCase();
-    if (storage.isAdmin(email)) {
-      return email;
-    }
-  }
-
-  const adminHeader = req.headers['x-admin-user'] || req.headers['x-admin-email'];
-  if (typeof adminHeader === 'string' && adminHeader.trim().length > 0) {
-    const email = adminHeader.trim().toLowerCase();
-    if (storage.isAdmin(email)) {
-      return email;
-    }
-  }
-
-  const authHeader = req.headers['authorization'];
-  if (typeof authHeader === 'string' && authHeader.trim().length > 0) {
-    const raw = authHeader.replace(/^Bearer\s+/i, '').trim().toLowerCase();
-    if (storage.isAdmin(raw)) {
-      return raw;
-    }
-  }
-
-  return null;
+// V5.3.1: the administrator is identified ONLY by a verified Firebase ID token (or by the HttpOnly
+// session cookie issued in exchange for one, for safe GET/HEAD requests). E-mails sent by the
+// client in the query string, the `x-admin-user` / `x-admin-email` headers or the body are ignored
+// as proof of identity (they are still sent by older screens and are simply not trusted).
+export async function getAdminUser(req: Request): Promise<string | null> {
+  const identity = await authenticateAdminRequest(req, (email) => storage.isAdmin(email));
+  return identity ? identity.email : null;
 }
+
+const ADMIN_UNAUTHORIZED_MESSAGE =
+  'Acceso no autorizado: Se requiere inicio de sesión administrativo con una cuenta Google autorizada.';
 
 export function requireAdmin(req: Request, res: Response, next: NextFunction): void {
-  const admin = getAdminUser(req);
-  if (!admin) {
-    res.status(401).json({
-      success: false,
-      error:
-        'Acceso no autorizado: Se requiere inicio de sesión administrativo con una cuenta Google autorizada.',
+  getAdminUser(req)
+    .then((admin) => {
+      if (!admin) {
+        res.status(401).json({ success: false, error: ADMIN_UNAUTHORIZED_MESSAGE });
+        return;
+      }
+      (req as any).adminUser = admin;
+      next();
+    })
+    .catch(() => {
+      res.status(401).json({ success: false, error: ADMIN_UNAUTHORIZED_MESSAGE });
     });
-    return;
-  }
-  (req as any).adminUser = admin;
-  next();
 }
 
-// Check admin status for authenticated client
-apiRouter.get('/auth/admin-check', (req: Request, res: Response) => {
-  const emailQuery = ((req.query.email as string) || '').trim().toLowerCase();
-  const detectedAdmin = getAdminUser(req);
-  const isQueryAdmin = emailQuery ? storage.isAdmin(emailQuery) : false;
-  const isAuthorized = !!detectedAdmin || isQueryAdmin;
-  const activeEmail = detectedAdmin || (isQueryAdmin ? emailQuery : null);
+const isSecureRequest = (req: Request): boolean =>
+  req.secure || String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
 
+// Exchange a verified Firebase ID token for an HttpOnly admin session cookie (used by download
+// links, iframes and new windows, which cannot send the token in a header).
+apiRouter.post('/auth/admin-session', async (req: Request, res: Response) => {
+  const authHeader = req.headers['authorization'];
+  const bearer = typeof authHeader === 'string' ? authHeader.replace(/^Bearer\s+/i, '').trim() : '';
+  try {
+    const identity = await verifyFirebaseIdToken(bearer);
+    if (!storage.isAdmin(identity.email)) {
+      res.status(403).json({ success: false, error: 'Esta cuenta no tiene acceso administrativo.' });
+      return;
+    }
+    res.setHeader('Set-Cookie', buildAdminSessionCookie(issueAdminSessionCookieValue(identity), isSecureRequest(req)));
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ success: true, data: { isAdmin: true, adminEmail: identity.email } });
+  } catch {
+    res.status(401).json({ success: false, error: ADMIN_UNAUTHORIZED_MESSAGE });
+  }
+});
+
+// V5.3.2: which SDK the server uses to reach Firestore. `privateRulesSafeToDeploy` must be true
+// before publishing the private firestore.rules (see docs/V5.3.2-despliegue-firestore.md).
+apiRouter.get('/admin/firestore-status', requireAdmin, async (_req: Request, res: Response) => {
+  try {
+    const status = await ensureFirestoreMode();
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({
+      success: true,
+      data: {
+        ...status,
+        guidance:
+          status.mode === 'admin'
+            ? 'El servidor usa su identidad de servicio (Admin SDK). Se pueden publicar las reglas privadas siguiendo el procedimiento por etapas.'
+            : 'El servidor usa el modo de compatibilidad (SDK de cliente). NO publiques las reglas privadas: primero concede a la identidad de servicio el rol roles/datastore.user sobre la base de datos y reinicia el servicio.',
+      },
+    });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
+// V5.3.4 (admin only): version of the code the SERVER is running, shown in the administrator's
+// version label next to the version of the frontend bundle.
+apiRouter.get('/admin/version', requireAdmin, (_req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store');
   res.json({
     success: true,
     data: {
-      isAdmin: isAuthorized,
-      adminEmail: activeEmail,
-      authorizedAdmins: storage.getAdmins(),
+      version: APP_VERSION,
+      label: APP_VERSION_LABEL,
+      releaseDate: APP_RELEASE_DATE,
+      summary: APP_RELEASE_SUMMARY,
+      serverStartedAt: SERVER_STARTED_AT,
+    },
+  });
+});
+
+apiRouter.delete('/auth/admin-session', (req: Request, res: Response) => {
+  res.setHeader('Set-Cookie', buildAdminSessionCookie('', isSecureRequest(req), 0));
+  res.json({ success: true });
+});
+
+// Check admin status of the VERIFIED caller. V5.3.1: no longer trusts `?email=` and no longer
+// publishes the list of administrator addresses.
+apiRouter.get('/auth/admin-check', async (req: Request, res: Response) => {
+  const detectedAdmin = await getAdminUser(req);
+  res.json({
+    success: true,
+    data: {
+      isAdmin: Boolean(detectedAdmin),
+      adminEmail: detectedAdmin,
     },
   });
 });
@@ -914,6 +978,41 @@ apiRouter.delete('/participant-book-versions/:id', requireAdmin, async (req: Req
   }
 });
 
+// V5.4.1 — Administrator: delete ALL saved PDF book versions of an interviewee at once.
+apiRouter.delete('/interviews/:id/book-versions', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const admin = (req as any).adminUser as string;
+    const result = await storage.deleteAllParticipantBookVersionsForInterview(req.params.id, admin);
+    res.json({
+      success: true,
+      message: `Se eliminaron ${result.deletedCount} versión(es) del libro en PDF.`,
+      data: {
+        deletedCount: result.deletedCount,
+        deletedVersionIds: result.deletedVersionIds,
+        clearedUpTo: Number((result.interview as { bookVersionsClearedUpTo?: number }).bookVersionsClearedUpTo ?? 0) || 0,
+        interview: result.interview,
+      },
+    });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
+// V5.4.1 — Administrator: delete ALL manuscripts of an interviewee at once.
+apiRouter.delete('/interviews/:id/manuscripts', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const admin = (req as any).adminUser as string;
+    const result = await storage.deleteAllManuscriptsForInterview(req.params.id, admin);
+    res.json({
+      success: true,
+      message: `Se eliminaron ${result.deletedCount} manuscrito(s).`,
+      data: { deletedCount: result.deletedCount, interview: result.interview },
+    });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
 // Seed 7 complete test stories (3 individual with varied flows, 4 shared of 2, 3, 4 and 5 people)
 apiRouter.post('/interviews/seed-test-stories', requireAdmin, async (req: Request, res: Response) => {
   try {
@@ -1055,7 +1154,7 @@ apiRouter.get('/interviews/:id/backup/qa-html', requireAdmin, (req: Request, res
     const photos = storage.getPhotosForInterview(req.params.id);
     const audios = storage.getAudiosForInterview(req.params.id);
 
-    const adminUser = ((req as any).adminUser as string | undefined) || (req.query.admin as string | undefined);
+    const adminUser = (req as any).adminUser as string | undefined; // verified by requireAdmin
     const html = generateQACompilationHtml({
       interview,
       participants,
@@ -1194,17 +1293,13 @@ apiRouter.post('/participant/session', async (req: Request, res: Response) => {
       return;
     }
 
-    const { token, cachedInterviews, cachedBookVersions } = req.body;
+    // V5.3.6: the browser no longer uploads its local copy of interviews and books on every
+    // sign-in (it could weigh several MB). The server's source of truth is Firestore, which is
+    // still synchronized before answering.
+    const { token } = req.body;
     if (!token) {
       res.status(400).json({ success: false, error: 'Token de invitación requerido.' });
       return;
-    }
-
-    if (
-      (Array.isArray(cachedInterviews) && cachedInterviews.length > 0) ||
-      (Array.isArray(cachedBookVersions) && cachedBookVersions.length > 0)
-    ) {
-      storage.restoreFromClientCache(cachedInterviews, cachedBookVersions);
     }
 
     await storage.syncFromFirestore(false, 'incremental');
@@ -1228,10 +1323,34 @@ apiRouter.post('/participant/session', async (req: Request, res: Response) => {
     resetAccessCodeFailures(req);
 
     const { token: resolvedTokenDoc, interview, participant } = resolvedResult;
+    // V5.3.2: a valid access code grants this browser READ access to THIS interview's photos and
+    // voice recordings (HttpOnly signed cookie; see adminAuth.ts → media access).
+    res.append(
+      'Set-Cookie',
+      buildMediaAccessCookie(
+        issueMediaAccessCookieValue(interview.id, readCookie(req.headers.cookie, MEDIA_ACCESS_COOKIE)),
+        isSecureRequest(req)
+      )
+    );
     const questions = storage.getQuestionsForVersion(interview.questionnaireVersionId);
-    const answers = storage.getAnswersForInterview(interview.id);
+    // V5.4.2: recordings travel as links (/api/audio/:id, authorized for this participant), never
+    // embedded as base64 inside every answer of the session.
+    const stripEmbeddedAudio = <T extends { audioUrl?: string; audioDataUrl?: string }>(v: T): T => {
+      if (!v || !v.audioUrl) return v;
+      const { audioDataUrl: _drop, ...rest } = v;
+      return rest as T;
+    };
+    const answers = storage.getAnswersForInterview(interview.id).map((a) => ({
+      ...a,
+      ...(a.audio ? { audio: stripEmbeddedAudio(a.audio) } : {}),
+      ...(Array.isArray(a.audioRecordings) ? { audioRecordings: a.audioRecordings.map(stripEmbeddedAudio) } : {}),
+    }));
     const otherParticipants = storage.getParticipantsForInterview(interview.id);
-    const bookVersions = storage.getBookVersionsForInterview(interview.id);
+    // V5.3: participants never receive audit information (coverage, contradictions, reports).
+    // V5.3.6: only the LIST of versions (no book text): each book is loaded when it is opened.
+    const bookVersions = storage
+      .getBookVersionsForInterview(interview.id)
+      .map((v) => toParticipantBookVersionSummary(v));
 
     // Verify existing informed consent on record for this specific participant
     const consent = storage.getActiveConsent(interview.id, participant.id) || storage.getConsentForParticipant(participant.id, PRIVACY_NOTICE_VERSION);
@@ -1270,6 +1389,29 @@ apiRouter.post('/participant/session', async (req: Request, res: Response) => {
   }
 });
 
+// V5.3.6 — One saved book version (full content), loaded when the participant opens or downloads it.
+apiRouter.post('/participant/book/version', async (req: Request, res: Response) => {
+  try {
+    const { token, versionId } = req.body || {};
+    if (!token || !versionId) {
+      res.status(400).json({ success: false, error: 'Faltan datos para abrir el libro.' });
+      return;
+    }
+    const { interview } = storage.resolveToken(String(token));
+    const version = storage
+      .getBookVersionsForInterview(interview.id)
+      .find((v) => v.id === String(versionId));
+    if (!version) {
+      res.status(404).json({ success: false, error: 'No encontramos esta versión de tu libro.' });
+      return;
+    }
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ success: true, data: { bookVersion: sanitizeBookVersionForParticipant(version) } });
+  } catch (err: unknown) {
+    res.status(403).json({ success: false, error: (err as Error).message });
+  }
+});
+
 apiRouter.post('/participant/answer', async (req: Request, res: Response) => {
   try {
     const {
@@ -1288,6 +1430,7 @@ apiRouter.post('/participant/answer', async (req: Request, res: Response) => {
       audioRecordings,
       audios,
       idempotencyKey,
+      autosave,
     } = req.body;
 
     if (!token) {
@@ -1320,6 +1463,8 @@ apiRouter.post('/participant/answer', async (req: Request, res: Response) => {
       audio,
       audioRecordings: audioRecordings || audios,
       idempotencyKey: idempotencyKey || `idem_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      // V5.3.6: automatic save while the participant writes.
+      autosave: autosave === true,
     });
 
     const sanitizedResult =
@@ -1412,9 +1557,39 @@ apiRouter.post('/participant/audio/:audioId/delete', async (req: Request, res: R
   }
 });
 
+/**
+ * V5.3.2 — Authorization of personal media. Before, any photo or recording could be downloaded by
+ * anyone who knew (or guessed) its identifier. Now a request needs either a verified administrator
+ * (ID token or admin session cookie) or the participant media cookie for the interview that owns the
+ * file (issued when a valid access code opens a session, so participants and the relatives who use
+ * their code keep seeing their photos, hearing their recordings and composing their PDF).
+ */
+async function authorizeMediaRequest(req: Request, res: Response, kind: 'photo' | 'audio', mediaId: string): Promise<boolean> {
+  const granted = mediaAccessInterviewsFromRequest(req);
+  if (granted.length > 0) {
+    const owner = await storage.resolveMediaInterviewId(kind, mediaId);
+    if (owner && granted.includes(owner)) return true;
+  }
+  if (await getAdminUser(req)) return true;
+  res.setHeader('Cache-Control', 'no-store');
+  res.status(granted.length > 0 ? 403 : 401).json({
+    success: false,
+    error:
+      kind === 'photo'
+        ? 'No tienes autorización para ver esta fotografía. Vuelve a abrir tu historia con tu código de acceso.'
+        : 'No tienes autorización para escuchar esta grabación. Vuelve a abrir tu historia con tu código de acceso.',
+  });
+  return false;
+}
+
+/** Private, per-user caching only (never shared caches or CDNs). */
+const PRIVATE_MEDIA_CACHE = 'private, max-age=3600';
+
 // Serve stored voice audio recording by ID with HTTP 206 Range streaming support
 apiRouter.get('/audio/:audioId', async (req: Request, res: Response) => {
   try {
+    if (!(await authorizeMediaRequest(req, res, 'audio', req.params.audioId))) return;
+    res.setHeader('Vary', 'Cookie, Authorization');
     const audioPayload = storage.getAudioBuffer(req.params.audioId);
     if (!audioPayload) {
       // Fallback try loading from Firestore
@@ -1454,7 +1629,7 @@ apiRouter.get('/audio/:audioId', async (req: Request, res: Response) => {
         'Accept-Ranges': 'bytes',
         'Content-Length': chunksize,
         'Content-Type': cleanMime,
-        'Cache-Control': 'public, max-age=86400',
+        'Cache-Control': PRIVATE_MEDIA_CACHE,
       });
       res.end(chunk);
       return;
@@ -1464,7 +1639,7 @@ apiRouter.get('/audio/:audioId', async (req: Request, res: Response) => {
       'Content-Length': total,
       'Content-Type': cleanMime,
       'Accept-Ranges': 'bytes',
-      'Cache-Control': 'public, max-age=86400',
+      'Cache-Control': PRIVATE_MEDIA_CACHE,
     });
     res.end(audioBuffer);
   } catch (err: unknown) {
@@ -1488,24 +1663,22 @@ apiRouter.post('/participant/photos/:photoId/delete', async (req: Request, res: 
   }
 });
 
-// Serve stored interview photograph by ID with full CORS support for canvas & PDF rasterization
+// Serve stored interview photograph by ID (same-origin: the app's own <img>, canvas and PDF composer).
+// V5.3.2: private resource — no wildcard CORS; authorization required (see authorizeMediaRequest).
 apiRouter.options('/photos/:photoId', (_req: Request, res: Response) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', '*');
+  res.setHeader('Allow', 'GET, OPTIONS');
   res.sendStatus(204);
 });
 
 apiRouter.get('/photos/:photoId', async (req: Request, res: Response) => {
   try {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', '*');
+    if (!(await authorizeMediaRequest(req, res, 'photo', req.params.photoId))) return;
+    res.setHeader('Vary', 'Cookie, Authorization');
 
     const photoBuffer = storage.getPhotoBuffer(req.params.photoId);
     if (photoBuffer) {
       res.setHeader('Content-Type', photoBuffer.mimeType);
-      res.setHeader('Cache-Control', 'public, max-age=86400');
+      res.setHeader('Cache-Control', PRIVATE_MEDIA_CACHE);
       res.send(photoBuffer.buffer);
       return;
     }
@@ -1525,7 +1698,7 @@ apiRouter.get('/photos/:photoId', async (req: Request, res: Response) => {
     const mimeType = match[1] || photo.mimeType || 'image/jpeg';
     const imgBuffer = Buffer.from(match[2], 'base64');
     res.setHeader('Content-Type', mimeType);
-    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.setHeader('Cache-Control', PRIVATE_MEDIA_CACHE);
     res.send(imgBuffer);
   } catch (err: unknown) {
     res.status(500).json({ success: false, error: (err as Error).message });
@@ -1699,11 +1872,103 @@ apiRouter.post('/participant/book/save-version', async (req: Request, res: Respo
       chapterPhotos,
       pageCount: Number(pageCount) || 5,
     });
-    const sanitizedSaveResult =
-      result && (result as any).interview
-        ? { ...result, interview: sanitizeInterviewForParticipant((result as any).interview) }
-        : result;
+    // V5.3: the saved version and the history go back to the participant WITHOUT audit data.
+    const sanitizedSaveResult = {
+      ...result,
+      interview: sanitizeInterviewForParticipant(result.interview),
+      bookVersion: sanitizeBookVersionForParticipant(result.bookVersion),
+      allVersions: (result.allVersions || []).map((v) => sanitizeBookVersionForParticipant(v)),
+    };
     res.json({ success: true, data: sanitizedSaveResult });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
+// =============================================================================================
+// V5.3 — ADMINISTRATIVE BOOK AUDIT ("Ver auditoría del libro"). Admin-only on the server: every
+// route goes through `requireAdmin`; none of this data is reachable from participant routes.
+// =============================================================================================
+apiRouter.get('/admin/book-audits', requireAdmin, (req: Request, res: Response) => {
+  try {
+    const interviewId = typeof req.query.interviewId === 'string' ? req.query.interviewId : undefined;
+    res.json({ success: true, data: storage.listBookAuditSummaries(interviewId) });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
+apiRouter.get('/admin/book-versions/:versionId/audit', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const report = await storage.getBookAuditReport(req.params.versionId);
+    if (!report) {
+      res.status(404).json({ success: false, error: 'Informe de auditoría no encontrado.' });
+      return;
+    }
+    res.json({ success: true, data: report });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
+apiRouter.get('/admin/book-versions/:versionId/audit/export', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const report = await storage.getBookAuditReport(req.params.versionId);
+    if (!report) {
+      res.status(404).json({ success: false, error: 'Informe de auditoría no encontrado.' });
+      return;
+    }
+    const safeId = req.params.versionId.replace(/[^A-Za-z0-9_-]/g, '_');
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="auditoria_${safeId}.json"`);
+    res.send(JSON.stringify(report, null, 2));
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
+apiRouter.post('/admin/book-versions/:versionId/audit/notes', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const report = await storage.addBookAuditNote({
+      versionId: req.params.versionId,
+      note: String(req.body?.note || ''),
+      incidentId: req.body?.incidentId ? String(req.body.incidentId) : undefined,
+      performedBy: (req as any).adminUser as string,
+    });
+    res.json({ success: true, data: report });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
+apiRouter.post(
+  '/admin/book-versions/:versionId/audit/incidents/:incidentId/status',
+  requireAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const report = await storage.updateBookAuditIncidentStatus({
+        versionId: req.params.versionId,
+        incidentId: req.params.incidentId,
+        status: String(req.body?.status || '') as BookAuditIncidentStatus,
+        note: req.body?.note ? String(req.body.note) : undefined,
+        performedBy: (req as any).adminUser as string,
+      });
+      res.json({ success: true, data: report });
+    } catch (err: unknown) {
+      res.status(400).json({ success: false, error: (err as Error).message });
+    }
+  }
+);
+
+apiRouter.post('/admin/book-versions/:versionId/audit/corrections', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const report = await storage.requestBookAuditCorrection({
+      versionId: req.params.versionId,
+      incidentIds: Array.isArray(req.body?.incidentIds) ? req.body.incidentIds.map(String) : [],
+      note: String(req.body?.note || ''),
+      performedBy: (req as any).adminUser as string,
+    });
+    res.json({ success: true, data: report });
   } catch (err: unknown) {
     res.status(400).json({ success: false, error: (err as Error).message });
   }
@@ -1874,7 +2139,12 @@ apiRouter.post('/participant/admin/profile', async (req: Request, res: Response)
     const scheduledDeliveries = storage.getScheduledDeliveries(interview.id, participant.id);
     const secondaryAccessList = storage.getSecondaryAccess(interview.id, participant.id);
     const postMortemInstructions = storage.getPostMortemInstructions(interview.id, participant.id);
-    const auditLogs = storage.getParticipantAuditLogs(interview.id, participant.id);
+    // V5.3.1: participants see WHICH events happened on their account, never their internal
+    // details (coverage, colour band, delivery status, diagnostics, administrator identities).
+    const auditLogs = storage
+      .getParticipantAuditLogs(interview.id, participant.id)
+      .map(toParticipantAuditLogView)
+      .filter((log): log is NonNullable<typeof log> => log !== null);
     const manuscripts = storage.getManuscriptsForInterview(interview.id);
     const hasGeneratedBook = manuscripts && manuscripts.length > 0;
     const latestManuscript = hasGeneratedBook ? manuscripts[manuscripts.length - 1] : null;

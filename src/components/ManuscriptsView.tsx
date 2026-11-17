@@ -33,6 +33,7 @@ import {
 } from '../logic/demoStoryRules.ts';
 import { generateRealDemoBookPdf, preloadBookResourcesForPdf } from '../utils/demoPdfGenerator.ts';
 import { apiFetch } from '../utils/apiClient.ts';
+import BookAuditReportPanel, { CoverageBandChip } from './BookAuditReportPanel.tsx';
 
 interface EnrichedParticipantBookVersion extends ParticipantBookVersionRecord {
   interviewTitle?: string;
@@ -84,6 +85,8 @@ export const ManuscriptsView: React.FC<ManuscriptsViewProps> = ({
   const [savingQuota, setSavingQuota] = useState(false);
   const [quotaNotice, setQuotaNotice] = useState<string | null>(null);
   const [versionToDelete, setVersionToDelete] = useState<EnrichedParticipantBookVersion | null>(null);
+  // V5.3: administrative audit report of one saved version ("Ver auditoría del libro").
+  const [auditVersionId, setAuditVersionId] = useState<string | null>(null);
   const [restoreQuotaOnDelete, setRestoreQuotaOnDelete] = useState<boolean>(false);
   const [deletingVersion, setDeletingVersion] = useState<boolean>(false);
   const [manuscriptToDelete, setManuscriptToDelete] = useState<EnrichedManuscript | null>(null);
@@ -869,7 +872,24 @@ export const ManuscriptsView: React.FC<ManuscriptsViewProps> = ({
                       <span>Cuota edición ({remaining} disp.)</span>
                     </button>
 
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {(ver as any).auditSummary && (
+                        <CoverageBandChip
+                          compact
+                          band={(ver as any).auditSummary.band}
+                          percent={(ver as any).auditSummary.coverageExactPercent}
+                        />
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => setAuditVersionId(ver.id)}
+                        data-testid="btn-ver-auditoria-libro"
+                        className="inline-flex items-center space-x-1 px-2.5 py-1.5 bg-white hover:bg-sky-50 text-stone-700 border border-stone-300 rounded-lg text-[11px] font-semibold transition"
+                        title="Informe administrativo de auditoría de esta versión"
+                      >
+                        <Shield className="w-3.5 h-3.5 text-sky-700" />
+                        <span>Ver auditoría del libro</span>
+                      </button>
                       <button
                         type="button"
                         onClick={() => handleDownloadParticipantPdf(ver)}
@@ -954,6 +974,14 @@ export const ManuscriptsView: React.FC<ManuscriptsViewProps> = ({
       )}
 
       {/* Modal: Confirm Delete Participant Book Version PDF */}
+      {auditVersionId && (
+        <BookAuditReportPanel
+          versionId={auditVersionId}
+          adminEmail={resolvedAdminEmail}
+          onClose={() => setAuditVersionId(null)}
+        />
+      )}
+
       {versionToDelete && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-white rounded-xl max-w-lg w-full p-6 shadow-2xl border-2 border-rose-200 text-xs">

@@ -968,6 +968,28 @@ export const MiEsenciaAvatarAiConfigPanel: React.FC<MiEsenciaAvatarAiConfigPanel
 
             {/* BLOQUE 2: PROMPT PARA OPENAI GPT */}
             <div className="p-4 rounded-xl bg-white border border-stone-200 space-y-3">
+              {/* V5.4.2: each provider has its own prompt; warn when they are not the same text. */}
+              {geminiPromptContent.trim() && openaiPromptContent.trim() !== geminiPromptContent.trim() && (
+                <div
+                  className="p-2.5 rounded-lg bg-amber-50 border border-amber-300 text-[11px] text-amber-950 flex flex-wrap items-center justify-between gap-2"
+                  data-testid="openai-prompt-differs-warning"
+                >
+                  <span>
+                    {openaiPromptContent.trim()
+                      ? 'Este prompt de OpenAI GPT es DISTINTO al de Google Gemini. ChatGPT responde con este texto, no con el de Gemini.'
+                      : 'OpenAI GPT no tiene prompt propio: usará el de Google Gemini.'}
+                  </span>
+                  {openaiPromptContent.trim() && (
+                    <button
+                      type="button"
+                      onClick={() => setOpenaiPromptContent(geminiPromptContent)}
+                      className="px-2.5 py-1 rounded-lg bg-amber-800 hover:bg-amber-900 text-white font-semibold cursor-pointer"
+                    >
+                      Usar el mismo prompt que Gemini
+                    </button>
+                  )}
+                </div>
+              )}
               <div className="flex items-center justify-between border-b border-stone-100 pb-2">
                 <div>
                   <h4 className="font-serif font-bold text-sm text-stone-900">

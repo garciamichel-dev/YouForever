@@ -15,7 +15,7 @@ import {
   type CollectionReference,
   type QuerySnapshot,
   type DocumentSnapshot,
-} from 'firebase/firestore';
+} from './firestoreAdmin.ts';
 import {
   getPacificDateKey,
   computeFirestoreQuotaReport,
@@ -206,6 +206,8 @@ class FirestoreTelemetryManager {
     const code = String(err?.code || '').toLowerCase();
     return (
       code.includes('resource-exhausted') ||
+      code === '8' ||
+      msg.includes('resource_exhausted') ||
       msg.includes('quota limit exceeded') ||
       msg.includes('quota exceeded') ||
       msg.includes('free daily read units')

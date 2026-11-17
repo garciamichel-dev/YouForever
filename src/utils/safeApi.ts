@@ -1,3 +1,5 @@
+import { attachAdminAuthHeaders } from '../firebase/adminSession.ts';
+
 /**
  * Safe fetch utility to guarantee all responses are cleanly parsed without
  * throwing 'JSON.parse: unexpected character at line 1 column 1' on HTML fallbacks.
@@ -7,7 +9,8 @@ export async function safeFetchJson<T = any>(
   init?: RequestInit
 ): Promise<{ success: boolean; data?: T; error?: string; status: number }> {
   try {
-    const res = await fetch(input, init);
+    const authedInit = await attachAdminAuthHeaders(input, init);
+    const res = await fetch(input, authedInit);
     const text = await res.text();
     let parsed: any = null;
     if (text && text.trim()) {

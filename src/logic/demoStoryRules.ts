@@ -90,12 +90,14 @@ export type ManuscriptGenerationStatus =
   | 'needs_correction'
   | 'incomplete_draft'
   | 'approved'
+  /** V5.3: fast 5-page editorial sample; never a full book, never saved as a version. */
+  | 'preview_sample'
   | 'failed_ai'
   | 'failed_audit'
   | 'error';
 
-export const CANONICAL_AUDIT_RULES_VERSION = 'v4.1.0-propositional-hybrid-audit';
-export const BOOK_GENERATION_ENGINE_VERSION = 'v4.1.0-resumable-book-engine';
+export const CANONICAL_AUDIT_RULES_VERSION = 'v5.3.0-priority-judged-hybrid-audit';
+export const BOOK_GENERATION_ENGINE_VERSION = 'v5.3.0-delivery-policy-book-engine';
 
 export type BookGenerationReasonCode =
   | 'PROVIDER_ERROR'
@@ -108,7 +110,453 @@ export type BookGenerationReasonCode =
   | 'PRIVACY_VALIDATION_FAILURE'
   | 'PHOTO_PLACEMENT_FAILURE'
   | 'REPAIR_EXHAUSTED'
-  | 'AUDIT_INCONCLUSIVE';
+  | 'AUDIT_INCONCLUSIVE'
+  | 'SEMANTIC_JUDGE_UNAVAILABLE'
+  | 'SOURCE_CHANGED_SINCE_APPROVAL';
+
+/**
+ * V5.1 — Coarse failure family derived from `BookGenerationReasonCode`. Unlike the granular
+ * internal code (administrators only), the category is safe to show to participants and decides
+ * WHICH message they read and WHAT a retry will actually do.
+ * - technical: provider outage, timeout, invalid JSON, partial batches, judge unavailable. Retrying resumes.
+ * - documentary: real omissions / contradictions / unsupported data confirmed by the audit.
+ * - editorial: style, title, duplicate or formatting defects.
+ * - privacy: excluded content leaked into the manuscript.
+ * - repair_pending: automatic repairs ran but did not manage to clear every defect.
+ * - source_changed: the interview changed after the manuscript was approved.
+ */
+export type BookFailureCategory =
+  | 'technical'
+  | 'documentary'
+  | 'editorial'
+  | 'privacy'
+  | 'repair_pending'
+  | 'source_changed';
+
+export function resolveBookFailureCategory(
+  code: BookGenerationReasonCode | undefined | null
+): BookFailureCategory {
+  switch (code) {
+    case 'PROVIDER_ERROR':
+    case 'MODEL_TIMEOUT':
+    case 'INVALID_MODEL_RESPONSE':
+    case 'PARTIAL_BATCH_GENERATION':
+    case 'SEMANTIC_JUDGE_UNAVAILABLE':
+      return 'technical';
+    case 'PRIVACY_VALIDATION_FAILURE':
+      return 'privacy';
+    case 'EDITORIAL_QUALITY_FAILURE':
+      return 'editorial';
+    case 'REPAIR_EXHAUSTED':
+      return 'repair_pending';
+    case 'SOURCE_CHANGED_SINCE_APPROVAL':
+      return 'source_changed';
+    case 'DOCUMENTARY_COVERAGE_FAILURE':
+    case 'SEMANTIC_CONTRADICTION':
+    case 'PHOTO_PLACEMENT_FAILURE':
+    case 'AUDIT_INCONCLUSIVE':
+    default:
+      return 'documentary';
+  }
+}
+
+/** Plain-language participant notice per failure family (never exposes internal codes). */
+export function buildIncompleteDraftUserNotice(category: BookFailureCategory): string {
+  switch (category) {
+    case 'technical':
+      return 'Tuvimos un inconveniente técnico temporal al preparar tu libro. Tus recuerdos están a salvo y el avance quedó guardado: al volver a intentarlo continuaremos desde donde nos quedamos.';
+    case 'privacy':
+      return 'Detectamos que este borrador todavía menciona algo que pediste no incluir. Por tu privacidad no lo guardaremos como versión definitiva; vuelve a intentarlo para prepararlo de nuevo sin esa parte.';
+    case 'editorial':
+      return 'Tus recuerdos ya están reunidos en este borrador, pero la redacción todavía necesita un pulido de estilo antes de quedar como versión definitiva. Vuelve a intentarlo para terminar ese pulido.';
+    case 'repair_pending':
+      return 'Tu libro todavía necesita reunir más de tus recuerdos antes de quedar listo. Vuelve a intentarlo: continuaremos con los capítulos pendientes sin empezar desde cero.';
+    case 'source_changed':
+      return 'Tus respuestas cambiaron después de preparar este libro. Vuelve a prepararlo para que incluya tus recuerdos más recientes antes de guardarlo.';
+    case 'documentary':
+    default:
+      return 'Tu libro todavía necesita reunir más de tus recuerdos antes de quedar listo. Puedes leer este borrador y volver a intentarlo; continuaremos desde donde nos quedamos.';
+  }
+}
+
+// =============================================================================================
+// V5.3 — DELIVERY POLICY (separate from the strict audit verdict)
+// =============================================================================================
+
+export const BOOK_DELIVERY_POLICY_VERSION = 'v5.3.0-delivery-min-60';
+/** Minimum calculated documentary coverage for delivery (inclusive): 60 %. */
+export const DELIVERY_MIN_COVERAGE_PERCENT = 60;
+export const COVERAGE_BAND_YELLOW_FROM_PERCENT = 80;
+export const COVERAGE_BAND_GREEN_FROM_PERCENT = 91;
+
+/** Admin-only coverage indicator. Below 60 % there is no acceptance indicator (pending review). */
+export type CoverageBand = 'pending_review' | 'orange' | 'yellow' | 'green';
+
+/**
+ * Band of an exact percentage value (never a rounded display value):
+ * < 60 pending_review · 60 to < 80 orange · 80 to < 91 yellow · 91 to 100 green.
+ */
+export function classifyCoveragePercentage(exactPercent: number): CoverageBand {
+  if (!Number.isFinite(exactPercent)) return 'pending_review';
+  if (exactPercent >= COVERAGE_BAND_GREEN_FROM_PERCENT) return 'green';
+  if (exactPercent >= COVERAGE_BAND_YELLOW_FROM_PERCENT) return 'yellow';
+  if (exactPercent >= DELIVERY_MIN_COVERAGE_PERCENT) return 'orange';
+  return 'pending_review';
+}
+
+/**
+ * Band from the ORIGINAL unit counts, compared in integer arithmetic
+ * (`verified * 100 >= threshold * eligible`), so no floating-point or display rounding can push a
+ * value below a threshold over it (e.g. 59.99 % stays below 60 %).
+ */
+export function classifyCoverageCounts(verifiedUnits: number, eligibleUnits: number): CoverageBand {
+  if (!(eligibleUnits > 0) || !(verifiedUnits >= 0)) return 'pending_review';
+  const v = Math.floor(verifiedUnits) * 100;
+  if (v >= COVERAGE_BAND_GREEN_FROM_PERCENT * eligibleUnits) return 'green';
+  if (v >= COVERAGE_BAND_YELLOW_FROM_PERCENT * eligibleUnits) return 'yellow';
+  if (v >= DELIVERY_MIN_COVERAGE_PERCENT * eligibleUnits) return 'orange';
+  return 'pending_review';
+}
+
+export type BookDeliveryBlockerCode =
+  | 'COVERAGE_BELOW_MINIMUM'
+  | 'PRIVACY_EXCLUSION_LEAK'
+  | 'STRUCTURE_INVALID'
+  | 'NO_DOCUMENTARY_SOURCES';
+
+export interface BookDeliveryDecision {
+  policyVersion: string;
+  /** Server-computed. The browser can never set it. */
+  eligible: boolean;
+  band: CoverageBand;
+  /** Exact ratio * 100, NOT rounded. */
+  coverageExactPercent: number;
+  verifiedUnits: number;
+  eligibleUnits: number;
+  /** fully_verified: strict documentary + editorial audits passed; otherwise with observations. */
+  verificationLevel: 'fully_verified' | 'delivered_with_observations' | 'not_eligible';
+  deliveryStatus: 'delivered' | 'delivered_with_observations' | 'pending_review';
+  blockers: Array<{ code: BookDeliveryBlockerCode; message: string }>;
+  observations: {
+    contradictions: number;
+    omittedUnits: number;
+    pendingVerificationUnits: number;
+    ambiguousUnits: number;
+    inventedDataFlags: number;
+    unsupportedAdditions: number;
+    uncertaintyViolations: number;
+    editorialDefects: number;
+    photosPending: number;
+  };
+  decidedAt: string;
+}
+
+/**
+ * V5.3 — Technical integrity of a manuscript received for saving: something that can really be
+ * stored, versioned and composed. Returns the problems found (empty when valid).
+ */
+export function validateManuscriptTechnicalIntegrity(manuscript: any): string[] {
+  const problems: string[] = [];
+  if (!manuscript || typeof manuscript !== 'object') return ['El manuscrito no es un objeto válido.'];
+  if (!Array.isArray(manuscript.chapters) || manuscript.chapters.length === 0) {
+    return ['El manuscrito no contiene capítulos.'];
+  }
+  const ids = new Set<string>();
+  let textChars = 0;
+  manuscript.chapters.forEach((ch: any, idx: number) => {
+    if (!ch || typeof ch !== 'object') {
+      problems.push(`Capítulo ${idx + 1} inválido.`);
+      return;
+    }
+    if (typeof ch.id !== 'string' || !ch.id.trim()) problems.push(`Capítulo ${idx + 1} sin identificador.`);
+    else if (ids.has(ch.id)) problems.push(`Identificador de capítulo duplicado: ${ch.id}.`);
+    else ids.add(ch.id);
+    if (!Array.isArray(ch.paragraphs) || ch.paragraphs.some((p: unknown) => typeof p !== 'string')) {
+      problems.push(`Capítulo ${idx + 1} con párrafos inválidos.`);
+    } else {
+      textChars += ch.paragraphs.join('').trim().length;
+    }
+  });
+  if (problems.length === 0 && textChars === 0) problems.push('El manuscrito no contiene texto.');
+  return problems;
+}
+
+/**
+ * V5.3 — DELIVERY ELIGIBILITY, independent of the strict audit verdict.
+ *
+ * The documentary and editorial audits keep measuring how well the manuscript was verified and
+ * are never altered. Delivery (save, version, export, hand to the participant) is decided here:
+ *   1. calculated coverage >= 60 % (inclusive, original unit counts, no rounding),
+ *   2. technically valid structure,
+ *   3. no leak of content the interviewee explicitly excluded (privacy),
+ *   4. at least one eligible documentary unit.
+ * Contradictions, omissions, pending verifications and editorial defects are OBSERVATIONS for the
+ * administrator, never blockers by themselves.
+ */
+export function evaluateBookDeliveryEligibility(params: {
+  report: DocumentaryAuditReport;
+  editorialAudit?: EditorialQualityAuditReport | null;
+  manuscript?: DemoManuscript | null;
+}): BookDeliveryDecision {
+  const { report, editorialAudit, manuscript } = params;
+  const eligibleUnits = Number(report.totalSourceUnits) || 0;
+  const verifiedUnits = Math.max(0, Math.min(Number(report.integratedUnits) || 0, eligibleUnits));
+  const coverageExactPercent = eligibleUnits > 0 ? (verifiedUnits / eligibleUnits) * 100 : 0;
+  const band = classifyCoverageCounts(verifiedUnits, eligibleUnits);
+  const blockers: BookDeliveryDecision['blockers'] = [];
+
+  if (eligibleUnits === 0) {
+    blockers.push({
+      code: 'NO_DOCUMENTARY_SOURCES',
+      message: 'No hay unidades documentales elegibles en las fuentes.',
+    });
+  } else if (band === 'pending_review') {
+    blockers.push({
+      code: 'COVERAGE_BELOW_MINIMUM',
+      message: `Cobertura documental calculada inferior al mínimo de entrega (${verifiedUnits}/${eligibleUnits}).`,
+    });
+  }
+  const leaks = [
+    ...(report.veracityAudit?.leakedExcludedContentFlags || []),
+    ...(report.leakedExcludedContentFlags || []),
+  ];
+  if (leaks.length > 0) {
+    blockers.push({
+      code: 'PRIVACY_EXCLUSION_LEAK',
+      message: `El manuscrito incluye contenido que el entrevistado excluyó expresamente (${leaks.length}).`,
+    });
+  }
+  const structuralProblems = manuscript ? validateManuscriptTechnicalIntegrity(manuscript) : [];
+  if (
+    structuralProblems.length > 0 ||
+    report.structuralAudit?.uniqueChapterIds === false ||
+    report.structuralAudit?.consecutiveNumbering === false
+  ) {
+    blockers.push({
+      code: 'STRUCTURE_INVALID',
+      message:
+        structuralProblems[0] || 'La estructura de capítulos del manuscrito no es técnicamente válida.',
+    });
+  }
+
+  const trace = report.traceabilityMatrix || [];
+  const inventedSet = new Set(report.veracityAudit?.inventedDataFlags || []);
+  const observations: BookDeliveryDecision['observations'] = {
+    contradictions:
+      trace.filter((t) => t.verificationStatus === 'contradicted' || t.aiJudgeVerdict === 'contradicted').length,
+    omittedUnits: trace.filter(
+      (t) =>
+        (t.exclusionReason || 'none') === 'none' &&
+        !t.verified &&
+        !t.judgeDeferred &&
+        t.verificationStatus !== 'contradicted' &&
+        t.aiJudgeVerdict !== 'contradicted'
+    ).length,
+    pendingVerificationUnits: trace.filter((t) => t.judgeDeferred).length,
+    ambiguousUnits: (report.semanticAudit?.ambiguousUnitIds || []).length,
+    inventedDataFlags: inventedSet.size,
+    unsupportedAdditions: (report.veracityAudit?.unsupportedAdditionFlags || []).filter((f) => !inventedSet.has(f))
+      .length,
+    uncertaintyViolations: (report.veracityAudit?.uncertaintyViolations || []).length,
+    editorialDefects: (editorialAudit?.blockingDefects || []).length,
+    photosPending: (report.photoAudit?.unplacedPhotoIds || []).length,
+  };
+  const eligible = blockers.length === 0;
+  const fullyVerified = eligible && report.passed === true && (editorialAudit ? editorialAudit.passed : true);
+  return {
+    policyVersion: BOOK_DELIVERY_POLICY_VERSION,
+    eligible,
+    band,
+    coverageExactPercent,
+    verifiedUnits,
+    eligibleUnits,
+    verificationLevel: !eligible ? 'not_eligible' : fullyVerified ? 'fully_verified' : 'delivered_with_observations',
+    deliveryStatus: !eligible ? 'pending_review' : fullyVerified ? 'delivered' : 'delivered_with_observations',
+    blockers,
+    observations,
+    decidedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * V5.2 — SINGLE GLOBAL APPROVAL DECISION.
+ *
+ * A manuscript is approved only when every mandatory audit gate passes AND no blocking defect is
+ * pending. Before V5.2 the verdict was `blockingDefects.length === 0`, and a gate could fail
+ * without contributing a line to that list (e.g. unsupported narrative additions made
+ * `semanticAudit.passed === false` while `report.passed === true`). This function is used by both
+ * the deterministic audit and the hybrid audit, so the two can never disagree on what "approved"
+ * means, and it guarantees that each failing gate is explained by at least one blocking defect.
+ *
+ * Mandatory gates: coverage, veracity, semantic, structural, photo and (when included) editorial.
+ * Deliberately NON-blocking signals, documented here so their indicators never contradict the
+ * verdict:
+ *   - `photoAudit.duplicatePhotoIds`: the normalization step keeps the first placement and drops
+ *     the repeated one, so the audited (and saved) manuscript no longer contains the duplicate.
+ *   - `structuralAudit.duplicateChapterFlags`: chapters sharing a title are merged by the
+ *     normalization step without losing paragraphs; the result has unique ids and numbering.
+ * Duplicate chapter ids and broken numbering are re-checked on the NORMALIZED chapters and block.
+ */
+export function finalizeGlobalAuditDecision(params: {
+  report: DocumentaryAuditReport;
+  editorialAudit?: EditorialQualityAuditReport | null;
+  includeEditorialAudit?: boolean;
+}): { passed: boolean; blockingDefects: string[]; failedGates: string[] } {
+  const { report, editorialAudit, includeEditorialAudit = true } = params;
+  const blocking: string[] = [];
+  const pushUnique = (line: string | undefined | null) => {
+    const clean = String(line || '').trim();
+    if (clean && !blocking.includes(clean)) blocking.push(clean);
+  };
+  for (const line of report.blockingDefects || []) pushUnique(line);
+  const failedGates: string[] = [];
+
+  // Coverage
+  if (report.coverageAudit && !report.coverageAudit.passed) {
+    failedGates.push('coverage');
+    if (!blocking.some((l) => l.startsWith('Cobertura documental incompleta'))) {
+      pushUnique(
+        `Cobertura documental incompleta (${report.coveragePercentage}%: faltan ${
+          report.coverageAudit.missingUnitIds.length
+        } unidad(es): ${report.coverageAudit.missingUnitIds.slice(0, 8).join(', ')}).`
+      );
+    }
+  }
+
+  // Veracity
+  const ver = report.veracityAudit;
+  if (ver && !ver.passed) {
+    failedGates.push('veracity');
+    const before = blocking.length;
+    for (const l of ver.uncertaintyViolations || []) pushUnique(l);
+    for (const l of ver.semanticContradictionFlags || []) pushUnique(l);
+    for (const l of ver.inventedDataFlags || []) pushUnique(l);
+    for (const l of ver.leakedExcludedContentFlags || []) pushUnique(l);
+    for (const l of ver.coupleAttributionViolations || []) pushUnique(l);
+    if (blocking.length === before && !ver.uncertaintiesPreserved) {
+      pushUnique('Las expresiones de duda o incertidumbre del testimonio no se conservaron.');
+    }
+  }
+
+  // Semantic
+  const sem = report.semanticAudit;
+  if (sem && !sem.passed) {
+    failedGates.push('semantic');
+    for (const l of sem.contradictionsDetected || []) pushUnique(l);
+    for (const l of ver?.inventedDataFlags || []) pushUnique(l);
+    for (const l of sem.unsupportedAdditions || []) pushUnique(l);
+    const pending = sem.pendingVerificationUnitIds || [];
+    if (pending.length > 0) {
+      pushUnique(
+        `Verificación semántica pendiente para ${pending.length} unidad(es) de baja prioridad (no enviadas al juez).`
+      );
+    }
+    const ambiguous = sem.ambiguousUnitIds || [];
+    if (
+      ambiguous.length > 0 &&
+      !blocking.some((l) => /inconclusa|no disponible/.test(l) && ambiguous.some((id) => l.includes(id)))
+    ) {
+      pushUnique(
+        `Auditoría semántica inconclusa para ${ambiguous.length} unidad(es) ambigua(s): ${ambiguous
+          .slice(0, 6)
+          .join(', ')}.`
+      );
+    }
+  }
+
+  // Structural
+  const st = report.structuralAudit;
+  if (st) {
+    const orphanFlags = st.orphanContinuationFlags || [];
+    if (!st.passed || orphanFlags.length > 0) {
+      failedGates.push('structural');
+      if (!st.uniqueChapterIds) pushUnique('Identificadores de capítulo duplicados en el manuscrito.');
+      if (!st.consecutiveNumbering) pushUnique('La numeración de los capítulos no es consecutiva.');
+      if (st.oneQuestionPerChapterDetected) {
+        pushUnique(
+          'Fragmentación editorial inválida: se detectó estructura de una pregunta/respuesta por capítulo o títulos en formato de pregunta.'
+        );
+      }
+      for (const l of orphanFlags) pushUnique(l);
+      if (!blocking.some((l) => l.includes('no contiene capítulos válidos')) && st.passed === false) {
+        const structuralExplained =
+          !st.uniqueChapterIds || !st.consecutiveNumbering || st.oneQuestionPerChapterDetected;
+        if (!structuralExplained) pushUnique('El manuscrito no contiene capítulos válidos.');
+      }
+    }
+  }
+
+  // Photos
+  const ph = report.photoAudit;
+  if (ph && !ph.passed) {
+    failedGates.push('photo');
+    if (!blocking.some((l) => l.startsWith('Fotografías sin ubicar'))) {
+      pushUnique(
+        `Fotografías sin ubicar en el manuscrito (${ph.placedPhotosCount}/${ph.totalPhotos}): ${(ph.unplacedPhotoIds || [])
+          .slice(0, 6)
+          .join(', ')}.`
+      );
+    }
+  }
+
+  // Editorial
+  if (includeEditorialAudit && editorialAudit && !editorialAudit.passed) {
+    failedGates.push('editorial');
+    const before = blocking.length;
+    for (const l of editorialAudit.blockingDefects || []) pushUnique(l);
+    if (blocking.length === before && (editorialAudit.blockingDefects || []).length === 0) {
+      pushUnique('La auditoría editorial no fue aprobada.');
+    }
+  }
+
+  return { passed: blocking.length === 0 && failedGates.length === 0, blockingDefects: blocking, failedGates };
+}
+
+/**
+ * V5.1 — Server-issued approval evidence. It binds one approved manuscript text to the exact
+ * interview sources, narrative style and audit rules it was approved with. The signature is an
+ * HMAC computed with a server-only secret, so a browser can carry the evidence but cannot forge
+ * or re-target it. `src/server/bookApproval.ts` issues and verifies it.
+ */
+/** V5.3 — What a participant's browser holds instead of the evidence: an opaque reference. */
+export interface BookApprovalEvidenceRef {
+  evidenceRef: string;
+}
+
+export function isBookApprovalEvidenceRef(value: unknown): value is BookApprovalEvidenceRef {
+  return (
+    !!value &&
+    typeof value === 'object' &&
+    typeof (value as any).evidenceRef === 'string' &&
+    typeof (value as any).signature !== 'string'
+  );
+}
+
+export function isFullBookApprovalEvidence(value: unknown): value is BookApprovalEvidence {
+  return !!value && typeof value === 'object' && typeof (value as any).signature === 'string';
+}
+
+export interface BookApprovalEvidence {
+  /** 1: V5.1/V5.2 (full approvals only). 2: V5.3 delivery authorization. */
+  evidenceVersion: 1 | 2;
+  auditRulesVersion: string;
+  engineVersion: string;
+  auditPolicy: 'hybrid_arbitrated';
+  interviewId: string;
+  narrativeStyle: DemoNarrativeStyleId;
+  sourceFingerprint: string;
+  manuscriptContentHash: string;
+  coveragePercentage: number;
+  totalSourceUnits: number;
+  judgeResolvedUnits: number;
+  /** V5.3 (evidenceVersion 2): delivery policy and eligibility result bound into the signature. */
+  deliveryPolicyVersion?: string;
+  verificationLevel?: 'fully_verified' | 'delivered_with_observations';
+  deliveryEligible?: boolean;
+  verifiedUnits?: number;
+  issuedAt: string;
+  signature: string;
+}
 
 export type DocumentaryExclusionReason =
   | 'none'
@@ -258,7 +706,20 @@ export interface TraceabilityMatrixEntry {
   verificationStatus?: UnitVerificationStatus;
   semanticIssues?: string[];
   ambiguityReason?: string;
-  aiJudgeVerdict?: 'supported' | 'contradicted' | 'inconclusive';
+  /** V5.1: deterministic rules could not settle this unit alone; a semantic judge must arbitrate. */
+  needsSemanticReview?: boolean;
+  semanticReviewReason?: string;
+  /** V5.2: why absence is considered demonstrated (concrete datum missing from the whole book). */
+  evidenceOfAbsenceReason?: string;
+  /**
+   * V5.3: the unit needed the semantic judge but was NOT sent because the delivery decision was
+   * already reached with higher-priority cases. It stays unverified (pending), never "covered".
+   */
+  judgeDeferred?: boolean;
+  aiJudgeVerdict?: 'supported' | 'contradicted' | 'omitted' | 'inconclusive';
+  aiJudgeRationale?: string;
+  /** V5.1: true when the judge could not be reached (technical), as opposed to an inconclusive verdict. */
+  aiJudgeUnavailable?: boolean;
   exclusionReason?: DocumentaryExclusionReason;
   eventId?: string;
   lifeStage?: string;
@@ -277,6 +738,20 @@ export interface TraceabilityMatrixEntry {
   verified?: boolean;
 }
 
+/**
+ * V5.2 — A Direction-B sentence that shares no significant word with any testimony. It may be a
+ * harmless editorial bridge ("Los años pasaron deprisa") or an invented biographical fact, which
+ * only a contextual reading can tell apart. Deterministic-only audits treat it as blocking; the
+ * hybrid audit asks the semantic judge and keeps it blocking unless the judge clears it.
+ */
+export interface UnsupportedAdditionCandidate {
+  flag: string;
+  chapterId: string;
+  chapterTitle: string;
+  paragraphIndex: number;
+  sentence: string;
+}
+
 export interface DocumentaryAuditReport {
   auditVersion?: string;
   auditedAt: string;
@@ -286,6 +761,11 @@ export interface DocumentaryAuditReport {
   passed: boolean;
   internalReasonCode?: BookGenerationReasonCode;
   diagnosticSummary?: string;
+  /**
+   * V5.1: which policy produced this verdict. 'deterministic_only' reports are conservative
+   * locators (suspicions block until arbitrated); 'hybrid_arbitrated' is the single approval policy.
+   */
+  auditPolicy?: 'deterministic_only' | 'hybrid_arbitrated';
   totalSourceUnits: number;
   integratedUnits: number;
   omittedNotRecalledUnits: number;
@@ -319,6 +799,8 @@ export interface DocumentaryAuditReport {
     coupleAttributionViolations?: string[];
     semanticContradictionFlags?: string[];
     unsupportedAdditionFlags?: string[];
+    /** V5.2: structured form of the pure "unsupported narrative sentence" flags (Direction B). */
+    unsupportedAdditionCandidates?: UnsupportedAdditionCandidate[];
   };
   semanticAudit?: {
     passed: boolean;
@@ -327,6 +809,24 @@ export interface DocumentaryAuditReport {
     uncertainUnitsCount: number;
     ambiguousUnitsCount?: number;
     ambiguousUnitIds?: string[];
+    /** V5.2: fact-like unsupported sentences waiting for the hybrid audit's contextual check. */
+    unsupportedAdditionsPendingArbitration?: number;
+    /** V5.3: units the judge was not asked about (decision already reached). Unverified. */
+    pendingVerificationUnitIds?: string[];
+    /** V5.3: what the semantic judge actually did in this audit. */
+    judgeStats?: {
+      policy: 'priority' | 'exhaustive';
+      casesTotal: number;
+      casesSent: number;
+      casesFromCache: number;
+      casesDeferred: number;
+      invocations: number;
+    };
+    /** V5.1: every unit the deterministic rules could not settle (superset of ambiguousUnitIds). */
+    reviewCandidateUnitIds?: string[];
+    /** V5.1: units a semantic judge ruled on, and those left unresolved because it was unreachable. */
+    judgeResolvedUnitIds?: string[];
+    judgeUnavailableUnitIds?: string[];
     directionAChecked: number;
     directionBChecked: number;
   };
@@ -416,12 +916,35 @@ export interface DemoManuscript {
   incompleteDraftNotice?: string;
   internalReasonCode?: BookGenerationReasonCode;
   diagnosticSummary?: string;
+  /** V5.1: participant-safe failure family (see `BookFailureCategory`). */
+  failureCategory?: BookFailureCategory;
+  /** V5.1: server-signed proof that this exact text was approved for these exact sources. */
+  /**
+   * Server-signed delivery authorization. V5.3: participants only ever hold an opaque reference
+   * (`{ evidenceRef }`); the full evidence, with its coverage figures, stays on the server.
+   */
+  approvalEvidence?: BookApprovalEvidence | BookApprovalEvidenceRef;
   auditReport?: DocumentaryAuditReport;
   documentaryAudit?: DocumentaryAuditReport;
   editorialAudit?: EditorialQualityAuditReport;
+  /** V5.3: server-computed delivery decision (separate from the strict audit verdict). */
+  deliveryDecision?: BookDeliveryDecision;
+  /** V5.3: this manuscript is the fast editorial sample, not the full book. */
+  isPreviewSample?: boolean;
+  /** V5.3: local fidelity check of the sample (only the memories it uses). Admin-only. */
+  previewFidelity?: PreviewFidelityReport;
   includeTableOfContents?: boolean;
   includeEditorialCredits?: boolean;
   editorialCreditsText?: string;
+}
+
+/** V5.3 — Local fidelity check of the 5-page editorial sample. */
+export interface PreviewFidelityReport {
+  checkedAnswerIds: string[];
+  checkedUnits: number;
+  verifiedUnits: number;
+  replacedChapterIds: string[];
+  issues: string[];
 }
 
 export interface DemoInMemoryPhoto {
@@ -3942,6 +4465,11 @@ export interface ParticipantBookVersionRecord {
   pageCount: number;
   fileName: string;
   createdAt: string;
+  /**
+   * V5.3.6: true in the participant's session list, where the book itself (manuscript and photos)
+   * is not sent; it is loaded on demand when the version is opened or downloaded.
+   */
+  contentOmitted?: boolean;
 }
 
 /**
@@ -4549,6 +5077,167 @@ function normalizePlainAscii(text: string): string {
     .trim();
 }
 
+// ---------------------------------------------------------------------------------------------
+// V5.1 — Spanish number normalization.
+// A testimony may say "veinticinco años" / "en el 75" while a faithful manuscript writes "25 años" /
+// "en 1975" (or the reverse). Treating those as different facts produced false "invented data" and
+// false "missing year" defects. These helpers let both audit directions compare numeric VALUES.
+// ---------------------------------------------------------------------------------------------
+const SPANISH_NUMBER_UNIT_WORDS: Record<string, number> = {
+  un: 1, uno: 1, una: 1, dos: 2, tres: 3, cuatro: 4, cinco: 5, seis: 6, siete: 7, ocho: 8,
+  nueve: 9, diez: 10, once: 11, doce: 12, trece: 13, catorce: 14, quince: 15, dieciseis: 16,
+  diecisiete: 17, dieciocho: 18, diecinueve: 19, veinte: 20, veintiun: 21, veintiuno: 21,
+  veintiuna: 21, veintidos: 22, veintitres: 23, veinticuatro: 24, veinticinco: 25,
+  veintiseis: 26, veintisiete: 27, veintiocho: 28, veintinueve: 29,
+};
+const SPANISH_NUMBER_TENS_WORDS: Record<string, number> = {
+  treinta: 30, cuarenta: 40, cincuenta: 50, sesenta: 60, setenta: 70, ochenta: 80, noventa: 90,
+};
+const SPANISH_NUMBER_HUNDREDS_WORDS: Record<string, number> = {
+  cien: 100, ciento: 100, doscientos: 200, doscientas: 200, trescientos: 300, trescientas: 300,
+  cuatrocientos: 400, cuatrocientas: 400, quinientos: 500, quinientas: 500, seiscientos: 600,
+  seiscientas: 600, setecientos: 700, setecientas: 700, ochocientos: 800, ochocientas: 800,
+  novecientos: 900, novecientas: 900,
+};
+const SPANISH_AMBIGUOUS_ARTICLE_NUMBERS = new Set(['un', 'uno', 'una']);
+
+/**
+ * Parses spelled-out Spanish numbers found in already ASCII-normalized text and returns their
+ * digit strings ("mil novecientos setenta y cinco" -> "1975", "treinta y dos" -> "32").
+ * A lone article ("un", "una", "uno") is never reported as the number 1.
+ */
+export function extractSpanishNumberWordValues(normalizedAsciiText: string): string[] {
+  const words = (normalizedAsciiText || '').split(/\s+/).filter(Boolean);
+  const values: string[] = [];
+  let i = 0;
+  while (i < words.length) {
+    let total = 0;
+    let current = 0;
+    let consumed = 0;
+    let onlyAmbiguousArticle = true;
+    let lastKind: 'none' | 'unit' | 'tens' | 'hundreds' | 'mil' = 'none';
+    let j = i;
+    while (j < words.length) {
+      const w = words[j];
+      if (w in SPANISH_NUMBER_HUNDREDS_WORDS && (lastKind === 'none' || lastKind === 'mil')) {
+        current += SPANISH_NUMBER_HUNDREDS_WORDS[w];
+        lastKind = 'hundreds';
+        onlyAmbiguousArticle = false;
+      } else if (
+        w in SPANISH_NUMBER_TENS_WORDS &&
+        (lastKind === 'none' || lastKind === 'mil' || lastKind === 'hundreds')
+      ) {
+        current += SPANISH_NUMBER_TENS_WORDS[w];
+        lastKind = 'tens';
+        onlyAmbiguousArticle = false;
+      } else if (
+        w === 'y' &&
+        lastKind === 'tens' &&
+        words[j + 1] in SPANISH_NUMBER_UNIT_WORDS &&
+        SPANISH_NUMBER_UNIT_WORDS[words[j + 1]] < 10
+      ) {
+        current += SPANISH_NUMBER_UNIT_WORDS[words[j + 1]];
+        lastKind = 'unit';
+        j += 1;
+        consumed += 1;
+      } else if (
+        w in SPANISH_NUMBER_UNIT_WORDS &&
+        (lastKind === 'none' || lastKind === 'mil' || lastKind === 'hundreds')
+      ) {
+        current += SPANISH_NUMBER_UNIT_WORDS[w];
+        lastKind = 'unit';
+        if (!SPANISH_AMBIGUOUS_ARTICLE_NUMBERS.has(w)) onlyAmbiguousArticle = false;
+      } else if (w === 'mil' && lastKind !== 'mil' && total === 0) {
+        total += (current || 1) * 1000;
+        current = 0;
+        lastKind = 'mil';
+        onlyAmbiguousArticle = false;
+      } else {
+        break;
+      }
+      consumed += 1;
+      j += 1;
+    }
+    if (consumed === 0) {
+      i += 1;
+      continue;
+    }
+    const value = total + current;
+    if (value > 0 && !onlyAmbiguousArticle) values.push(String(value));
+    i = j;
+  }
+  return values;
+}
+
+/** Spells a non-negative integer below 10000 as ASCII-normalized Spanish words. */
+function spellSpanishNumberAsAsciiWords(value: number): string[] {
+  if (!Number.isInteger(value) || value <= 0 || value >= 10000) return [];
+  const out: string[] = [];
+  const unitByValue = new Map<number, string>();
+  for (const [w, v] of Object.entries(SPANISH_NUMBER_UNIT_WORDS)) {
+    if (!unitByValue.has(v) && w !== 'un' && w !== 'una' && w !== 'veintiun' && w !== 'veintiuna') {
+      unitByValue.set(v, w);
+    }
+  }
+  const tensByValue = new Map<number, string>(
+    Object.entries(SPANISH_NUMBER_TENS_WORDS).map(([w, v]) => [v, w])
+  );
+  const hundredsByValue: Record<number, string> = {
+    100: 'ciento', 200: 'doscientos', 300: 'trescientos', 400: 'cuatrocientos', 500: 'quinientos',
+    600: 'seiscientos', 700: 'setecientos', 800: 'ochocientos', 900: 'novecientos',
+  };
+  let rest = value;
+  const thousands = Math.floor(rest / 1000);
+  if (thousands > 0) {
+    if (thousands > 1) out.push(unitByValue.get(thousands) || String(thousands));
+    out.push('mil');
+    rest %= 1000;
+  }
+  const hundreds = Math.floor(rest / 100) * 100;
+  if (hundreds > 0) {
+    out.push(rest === 100 ? 'cien' : hundredsByValue[hundreds]);
+    rest %= 100;
+  }
+  if (rest > 0) {
+    if (rest < 30) {
+      out.push(unitByValue.get(rest) || String(rest));
+    } else {
+      out.push(tensByValue.get(Math.floor(rest / 10) * 10) || '');
+      if (rest % 10 > 0) out.push(unitByValue.get(rest % 10) || '');
+    }
+  }
+  return out.filter(Boolean);
+}
+
+/**
+ * Two-digit years said aloud ("en el 75", "del 82", "año 68") expanded to their 4-digit form.
+ * Only fires after a year-introducing cue, so ages ("tenía 75 años") are not turned into years.
+ */
+export function expandSpokenTwoDigitYears(normalizedAsciiText: string): string[] {
+  const out: string[] = [];
+  const rx = /\b(?:en\s+el|del|desde\s+el|hasta\s+el|por\s+el|ano|anos)\s+(\d{2})\b(?!\s+anos?\b)/g;
+  for (const m of (normalizedAsciiText || '').matchAll(rx)) {
+    const yy = Number(m[1]);
+    if (Number.isNaN(yy)) continue;
+    out.push(String(yy >= 30 ? 1900 + yy : 2000 + yy));
+  }
+  return out;
+}
+
+/**
+ * Extra index tokens that make numeric facts comparable regardless of how they are written:
+ * digits for spelled-out numbers, and spelled words for digits.
+ */
+function buildNumericEquivalenceTokens(normalizedAsciiText: string): string[] {
+  const extra: string[] = [];
+  for (const v of extractSpanishNumberWordValues(normalizedAsciiText)) extra.push(v);
+  for (const y of expandSpokenTwoDigitYears(normalizedAsciiText)) extra.push(y);
+  for (const d of normalizedAsciiText.match(/\b\d{1,4}\b/g) || []) {
+    for (const w of spellSpanishNumberAsAsciiWords(Number(d))) extra.push(w);
+  }
+  return extra;
+}
+
 export function resolveAnswerExclusionReason(
   ansOrText: DocumentarySourceAnswerInput | string
 ): DocumentaryExclusionReason {
@@ -5147,13 +5836,20 @@ export function buildDocumentaryInventory(params: {
     for (const yn of u.yearsOrNumbers) corpusYearsSet.add(yn);
     for (const pn of u.properNames) corpusNamesSet.add(pn);
     for (const pl of u.places) corpusNamesSet.add(pl);
-    for (const w of normalizePlainAscii(`${u.cleanText} ${u.questionText}`).split(/\s+/)) {
+    const unitNormText = normalizePlainAscii(`${u.cleanText} ${u.questionText}`);
+    for (const w of unitNormText.split(/\s+/)) {
       if (w.length >= 3) corpusNamesSet.add(w);
     }
+    // V5.1: a number the interviewee SPOKE ("veinticinco", "en el 75") is as documented as a digit.
+    for (const v of extractSpanishNumberWordValues(unitNormText)) corpusYearsSet.add(v);
+    for (const y of expandSpokenTwoDigitYears(unitNormText)) corpusYearsSet.add(y);
   }
   for (const p of photosInventory) {
     if (!p.isExcluded && p.caption) {
       for (const m of p.caption.match(/\b\d+\b/g) || []) corpusYearsSet.add(m);
+      const captionNorm = normalizePlainAscii(p.caption);
+      for (const v of extractSpanishNumberWordValues(captionNorm)) corpusYearsSet.add(v);
+      for (const y of expandSpokenTwoDigitYears(captionNorm)) corpusYearsSet.add(y);
       for (const w of normalizePlainAscii(p.caption).split(/\s+/)) {
         if (w.length >= 3) corpusNamesSet.add(w);
       }
@@ -6721,6 +7417,33 @@ function stripSpanishDiscourseNoiseForPolarity(clauseText: string): string {
   );
 }
 
+/**
+ * V5.1 — Negation bindings: for every negation cue, the stem of the predicate it governs (the
+ * next significant word inside the same punctuation-delimited segment). Oral fillers, repeated
+ * words and tag questions (", ¿no?") do not create bindings, so a testimony and its cleaned-up
+ * rendering yield the same set even when a fixed word window would have drifted.
+ */
+function collectNegationBindings(text: string): string[] {
+  const bindings: string[] = [];
+  const segments = normalizeAsciiPreserveClausePunctuation(text)
+    .split(/[.,;:!?]+/)
+    .map((seg) => seg.trim().split(/\s+/).filter(Boolean))
+    .filter((segWords) => segWords.length > 0);
+  for (const segWords of segments) {
+    for (let i = 0; i < segWords.length; i++) {
+      if (!NEGATION_CUES_RX.test(segWords[i])) continue;
+      for (let k = i + 1; k < segWords.length; k++) {
+        const candidate = segWords[k];
+        if (candidate.length < 4 || NEGATION_CUES_RX.test(candidate)) continue;
+        if (tokenizeSignificantWords(candidate).length === 0) continue;
+        bindings.push(candidate.slice(0, 3));
+        break;
+      }
+    }
+  }
+  return bindings;
+}
+
 function selectAlignedTargetClauses(params: {
   sourceText: string;
   targetSentencesRaw: string[];
@@ -6828,9 +7551,25 @@ function detectSemanticContradictionsBetweenTexts(params: {
     stemPrefix: string
   ): { polarity: 'affirmed' | 'negated' | 'absent'; usedDiscourseTag: boolean } => {
     const hadDiscourseStarter = LEADING_DISCOURSE_NO_RX.test(rawClause);
-    const cleaned = stripSpanishDiscourseNoiseForPolarity(rawClause);
-    const words = cleaned.split(/\s+/).filter(Boolean);
-    const hitIdx = words.findIndex((w) => w.startsWith(stemPrefix));
+    // V5.1: a negation only governs the predicate inside its own comma-delimited segment.
+    // Looking back across a comma ("...ellos no lo sepan, mis papás ...") attached the previous
+    // segment's negation to an unrelated noun and produced false polarity inversions.
+    const commaSegments = rawClause
+      .replace(LEADING_DISCOURSE_NO_RX, '')
+      .replace(TRAILING_TAG_NO_RX, '')
+      .split(',')
+      .map((seg) => normalizePlainAscii(seg).split(/\s+/).filter(Boolean))
+      .filter((segWords) => segWords.length > 0);
+    let words: string[] = [];
+    let hitIdx = -1;
+    for (const segWords of commaSegments) {
+      const idx = segWords.findIndex((w) => w.startsWith(stemPrefix));
+      if (idx >= 0) {
+        words = segWords;
+        hitIdx = idx;
+        break;
+      }
+    }
     if (hitIdx < 0) return { polarity: 'absent', usedDiscourseTag: hadDiscourseStarter };
     const windowBefore = words.slice(Math.max(0, hitIdx - 4), hitIdx).join(' ');
     // Exclude benign rhetorical or epistemic idioms across 1st/2nd/3rd person ("no recuerdo/recuerda", "no me/se acuerda", "no cabe duda")
@@ -6847,7 +7586,22 @@ function detectSemanticContradictionsBetweenTexts(params: {
     return { polarity: 'affirmed', usedDiscourseTag: hadDiscourseStarter };
   };
 
-  for (const tok of significantActionOrSubjectTokens.slice(0, 12)) {
+  // V5.1: when every negation of the testimony governs the same predicate in the manuscript and
+  // the manuscript adds no negation over a predicate the testimony affirmed, polarity was
+  // preserved by construction and the word-window heuristic below cannot add information.
+  const srcNegationBindings = new Set(collectNegationBindings(sourceText));
+  const tgtNegationBindings = new Set(collectNegationBindings(alignedOrFullTargetRaw));
+  const srcPredicateStems = new Set(
+    normSource
+      .split(/\s+/)
+      .filter((w) => w.length >= 4)
+      .map((w) => w.slice(0, 3))
+  );
+  const polarityStructurePreserved =
+    Array.from(srcNegationBindings).every((b) => tgtNegationBindings.has(b)) &&
+    Array.from(tgtNegationBindings).every((b) => !srcPredicateStems.has(b) || srcNegationBindings.has(b));
+
+  for (const tok of polarityStructurePreserved ? [] : significantActionOrSubjectTokens.slice(0, 12)) {
     const stem = tok.slice(0, 5);
     let srcHasAffirmed = false;
     let srcHasNegated = false;
@@ -6895,7 +7649,24 @@ function detectSemanticContradictionsBetweenTexts(params: {
   if (srcPassiveM && tgtActiveM) {
     const srcStem = srcPassiveM[1].slice(0, 4);
     const tgtStem = tgtActiveM[1].slice(0, 4);
-    if (srcStem === tgtStem && !tgtFull.match(passiveToFirstPersonRx)) {
+    // V5.1: "-aba" forms are identical in 1st and 3rd person. In a third-person biography
+    // "me cuidaba" is correctly rendered as "le/lo/la cuidaba": the object clitic proves the
+    // protagonist still RECEIVES the action, so it is not an agency reversal.
+    const tgtVerb = tgtActiveM[1];
+    const isPersonAmbiguousImperfect = /aba$/.test(tgtVerb);
+    const keepsObjectClitic = new RegExp(
+      `\\b(?:le|lo|la|les|los|las|nos|se)\\s+${tgtVerb}\\b`
+    ).test(tgtFull);
+    const hasExplicitFirstPersonSubject = new RegExp(
+      `\\byo\\s+(?:(?:le|lo|la|les|los|las)\\s+)?${tgtVerb}\\b`
+    ).test(tgtFull);
+    const isThirdPersonRendering =
+      isPersonAmbiguousImperfect && keepsObjectClitic && !hasExplicitFirstPersonSubject;
+    if (
+      srcStem === tgtStem &&
+      !tgtFull.match(passiveToFirstPersonRx) &&
+      !isThirdPersonRendering
+    ) {
       issues.push(
         `Inversión de agencia (quién realizó la acción): el testimonio indica "me ${srcPassiveM[1]}" pero el manuscrito invierte el rol hacia "${tgtActiveM[0]}".`
       );
@@ -6955,6 +7726,311 @@ function detectSemanticContradictionsBetweenTexts(params: {
   return { issues, ambiguousEdge };
 }
 
+/**
+ * V5.1: at or above this lexical overlap a unit that is not verified literally is sent to the
+ * semantic judge. V5.2: BELOW it the unit is no longer treated as omitted by default — a faithful
+ * literary paraphrase can share almost no words with the testimony. Low-overlap units go through
+ * `assessUnitEvidenceOfAbsence` and only skip the judge when absence is actually demonstrated.
+ */
+const SEMANTIC_REVIEW_MIN_LEXICAL_SCORE = 0.2;
+
+/**
+ * V5.2 — Related-meaning groups used ONLY to retrieve evidence and to decide whether absence is
+ * demonstrated. They never verify (approve) a unit: a hit here can only send a case to the
+ * semantic judge instead of declaring it omitted. Entries are prefixes of ASCII-normalized words.
+ */
+const SPANISH_RELATED_MEANING_STEM_GROUPS: string[][] = [
+  ['rescat', 'salv', 'socorr', 'auxili', 'interven', 'proteg', 'libr', 'gracias a'],
+  ['ahog', 'hund', 'tragedi', 'accident', 'peligr', 'arrastr'],
+  ['empuj', 'arroj', 'tir', 'lanz', 'golpe'],
+  ['rio', 'arroy', 'agua', 'corrient', 'lago', 'mar', 'orill'],
+  ['padre', 'papa', 'papi', 'progenit', 'viejo'],
+  ['madre', 'mama', 'mami', 'progenit', 'vieja'],
+  ['abuel', 'nona', 'nono'],
+  ['herman'],
+  ['hijo', 'hija', 'nino', 'nina', 'chamac', 'crio', 'pequen'],
+  ['esposa', 'esposo', 'marido', 'mujer', 'compan', 'conyug', 'pareja'],
+  ['muri', 'muert', 'falleci', 'partid', 'perdi', 'descans', 'despedi'],
+  ['naci', 'nacer', 'llegue al mundo', 'vine al mundo'],
+  ['trabaj', 'emple', 'ofici', 'labor', 'chamb', 'jornad', 'sueldo', 'patron'],
+  ['escuel', 'coleg', 'aula', 'estudi', 'maestr', 'profes', 'clase', 'primari', 'secundari'],
+  ['casa', 'hogar', 'vivienda', 'techo', 'domicil', 'cuarto', 'patio'],
+  ['boda', 'cas', 'matrimon', 'nupci', 'altar', 'novi'],
+  ['viaj', 'recorr', 'visit', 'conoc', 'trasl', 'mud'],
+  ['enferm', 'hospital', 'medic', 'doctor', 'cura', 'sanar', 'salud'],
+  ['iglesi', 'parroqui', 'templ', 'misa', 'fe', 'reza', 'oracion'],
+  ['pueblo', 'aldea', 'comunidad', 'rancho', 'campo', 'milpa', 'parcela', 'tierra'],
+  ['dinero', 'ahorr', 'pago', 'pesos', 'deud', 'presta', 'cost'],
+  ['comid', 'cocin', 'guis', 'platill', 'sabor', 'mesa', 'cena', 'almuerz'],
+  ['jug', 'juego', 'diver', 'travesur', 'canica', 'pelota'],
+  ['feliz', 'alegr', 'dicha', 'contento', 'gozo', 'sonri'],
+  ['triste', 'pena', 'dolor', 'llor', 'lagrim', 'melancol', 'pesar'],
+  ['miedo', 'temor', 'asust', 'susto', 'pavor', 'angusti', 'nervio'],
+  ['amor', 'quer', 'carin', 'ternur', 'afecto', 'ama'],
+  ['gratitud', 'agradec', 'gracias', 'bendic'],
+];
+
+function expandTokenToRelatedStems(token: string): string[] {
+  const norm = normalizePlainAscii(token);
+  if (!norm) return [];
+  const stems = new Set<string>([norm.length >= 6 ? norm.slice(0, 5) : norm]);
+  for (const grp of SPANISH_RELATED_MEANING_STEM_GROUPS) {
+    if (grp.some((stem) => stem.length >= 3 && norm.startsWith(stem))) {
+      for (const stem of grp) if (stem.length >= 3) stems.add(stem);
+    }
+  }
+  return Array.from(stems);
+}
+
+function paragraphHasStem(normParagraph: string, words: string[], stem: string): boolean {
+  if (stem.includes(' ')) return normParagraph.includes(stem);
+  return words.some((w) => w.length >= Math.min(3, stem.length) && w.startsWith(stem));
+}
+
+/**
+ * V5.2 — Conjugated verbs of a testimony that carry its action: accented preterites ("salvó",
+ * "llegué"), -ar imperfects ("cuidaba") and preterite plurals ("llegaron", "vivieron"). Returned
+ * ASCII-normalized; only words of 5+ letters, so irregular short forms that change in the third
+ * person ("fui" -> "fue", "tuve" -> "tuvo") do not create false alarms. Capitalized words
+ * (names such as "José") are ignored.
+ */
+function extractTestimonyActionVerbs(rawText: string): string[] {
+  const out = new Set<string>();
+  for (const raw of String(rawText || '').split(/[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+/)) {
+    if (raw.length < 5 || /^[A-ZÁÉÍÓÚÑ]/.test(raw)) continue;
+    if (/(ó|é|aba|abas|aban|ábamos|aron|ieron)$/.test(raw)) {
+      out.add(normalizePlainAscii(raw));
+    }
+  }
+  return Array.from(out);
+}
+
+/** V5.2: the facets that a faithful book must keep with the same value, whatever its wording. */
+function collectStrongAnchors(unit: DocumentaryFactUnit): string[] {
+  const familySet = new Set(SPANISH_FAMILY_RELATIONS.map((r) => r.trim()));
+  const placeNounSet = new Set(SPANISH_PLACE_NOUNS);
+  return Array.from(
+    new Set([
+      ...unit.yearsOrNumbers,
+      ...unit.properNames.filter((n) => !familySet.has(n)),
+      ...unit.places.filter((pl) => !placeNounSet.has(pl)),
+    ])
+  ).filter((a) => a && a.trim().length > 0);
+}
+
+export interface UnitEvidenceFragment {
+  chapterId: string;
+  chapterTitle: string;
+  paragraphIndex: number;
+  paragraphId: string;
+  text: string;
+  /** Why this fragment was retrieved (best match, neighbor of the best match, related chapter...). */
+  role: 'best_match' | 'previous_paragraph' | 'next_paragraph' | 'related_paragraph';
+}
+
+export interface UnitEvidenceAssessment {
+  /**
+   * - present: literal or strong evidence exists (no judge needed when the unit is verified).
+   * - uncertain: some related evidence exists; only a contextual reading can decide.
+   * - absent: absence is DEMONSTRATED (a concrete name, place or figure of the testimony is
+   *   nowhere in the book, or nothing related to the memory exists anywhere).
+   */
+  status: 'present' | 'uncertain' | 'absent';
+  reason: string;
+  missingStrongAnchors: string[];
+  fragments: UnitEvidenceFragment[];
+}
+
+const MAX_FRAGMENT_CHARS = 1800;
+const MAX_TOTAL_EVIDENCE_CHARS = 6000;
+
+/**
+ * Cuts a long paragraph AROUND its best-matching sentences instead of keeping a prefix, so the
+ * verifiable fact is never left outside the excerpt sent to the judge.
+ */
+function excerptParagraphAroundStems(raw: string, stems: string[]): string {
+  if (raw.length <= MAX_FRAGMENT_CHARS) return raw;
+  const sentences = raw.split(/(?<=[.!?…])\s+/).filter(Boolean);
+  const scored = sentences.map((sentence, idx) => {
+    const norm = normalizePlainAscii(sentence);
+    const words = norm.split(/\s+/).filter(Boolean);
+    return { idx, hits: stems.filter((st) => paragraphHasStem(norm, words, st)).length };
+  });
+  const bestIdx = scored.reduce((best, cur) => (cur.hits > best.hits ? cur : best), scored[0]).idx;
+  let start = bestIdx;
+  let end = bestIdx;
+  let length = sentences[bestIdx].length;
+  while (true) {
+    const canPrev = start > 0 && length + sentences[start - 1].length + 1 <= MAX_FRAGMENT_CHARS;
+    const canNext =
+      end < sentences.length - 1 && length + sentences[end + 1].length + 1 <= MAX_FRAGMENT_CHARS;
+    if (!canPrev && !canNext) break;
+    if (canPrev) {
+      start -= 1;
+      length += sentences[start].length + 1;
+    }
+    if (canNext) {
+      end += 1;
+      length += sentences[end].length + 1;
+    }
+  }
+  const body = sentences.slice(start, end + 1).join(' ');
+  return `${start > 0 ? '[…] ' : ''}${body}${end < sentences.length - 1 ? ' […]' : ''}`;
+}
+
+/**
+ * V5.2 — Evidence retrieval for one documentary unit across the WHOLE manuscript.
+ * Order: (1) direct and equivalent words, (2) related-meaning stems, (3) the paragraph planned for
+ * the answer and thematically related chapters, (4) the paragraphs before and after the best
+ * match (a memory split between two paragraphs). It returns several identified fragments and
+ * decides whether absence is demonstrated or merely evidence is lacking.
+ */
+function assessUnitEvidenceOfAbsenceIndexed(params: {
+  unit: DocumentaryFactUnit;
+  indexedAll: PreIndexedChapterAudit[];
+  bestChapterIdx: number;
+  bestParaIdx: number;
+  maxRelatedFragments?: number;
+}): UnitEvidenceAssessment {
+  const { unit, indexedAll, bestChapterIdx, bestParaIdx, maxRelatedFragments = 2 } = params;
+  const requiredTokens =
+    unit.keyTokens.length > 0
+      ? unit.keyTokens
+      : normalizePlainAscii(unit.cleanText)
+          .split(/\s+/)
+          .filter((w) => w.length >= 3);
+  const tokenStemSets = requiredTokens.map((tok) => expandTokenToRelatedStems(tok));
+  const allStems = Array.from(new Set(tokenStemSets.flat()));
+
+  // Strong anchors: compared by value against the whole book (numbers include spelled forms).
+  const strongAnchors = collectStrongAnchors(unit);
+  const missingStrongAnchors = strongAnchors.filter(
+    (anchor) =>
+      !indexedAll.some((item) =>
+        item.paragraphs.some((pe) => doesTokenMatchIndexedWords(anchor, pe.words, pe.wordSet))
+      )
+  );
+
+  // Rank every paragraph of the book by direct + related evidence.
+  const ranked: Array<{ cIdx: number; pIdx: number; score: number }> = [];
+  for (const item of indexedAll) {
+    const linked = item.answerIdSet.has(unit.answerId);
+    item.paragraphs.forEach((pe, pIdx) => {
+      let score = 0;
+      requiredTokens.forEach((tok, tIdx) => {
+        if (doesTokenMatchIndexedWords(tok, pe.words, pe.wordSet)) score += 1;
+        else if (tokenStemSets[tIdx].some((st) => paragraphHasStem(pe.norm, pe.words, st))) score += 0.6;
+      });
+      for (const anchor of strongAnchors) {
+        if (doesTokenMatchIndexedWords(anchor, pe.words, pe.wordSet)) score += 0.5;
+      }
+      if (score > 0 && linked) score += 0.15;
+      if (score > 0) ranked.push({ cIdx: item.cIdx, pIdx, score });
+    });
+  }
+  ranked.sort((a, b) => b.score - a.score);
+
+  const fragments: UnitEvidenceFragment[] = [];
+  const seen = new Set<string>();
+  let totalChars = 0;
+  const pushFragment = (cIdx: number, pIdx: number, role: UnitEvidenceFragment['role']) => {
+    const item = indexedAll.find((it) => it.cIdx === cIdx);
+    const pe = item?.paragraphs[pIdx];
+    if (!item || !pe || !pe.raw.trim()) return;
+    const key = `${cIdx}:${pIdx}`;
+    if (seen.has(key)) return;
+    const text = excerptParagraphAroundStems(pe.raw, allStems);
+    if (totalChars + text.length > MAX_TOTAL_EVIDENCE_CHARS && fragments.length > 0) return;
+    seen.add(key);
+    totalChars += text.length;
+    fragments.push({
+      chapterId: item.ch.id,
+      chapterTitle: item.ch.title,
+      paragraphIndex: pIdx,
+      paragraphId: item.ch.paragraphIds?.[pIdx] || `${item.ch.id}_p_${pIdx + 1}`,
+      text,
+      role,
+    });
+  };
+
+  const top = ranked[0];
+  const anchorCIdx = top && top.score > 0 ? top.cIdx : bestChapterIdx;
+  const anchorPIdx = top && top.score > 0 ? top.pIdx : bestParaIdx;
+  pushFragment(anchorCIdx, anchorPIdx, 'best_match');
+  if (!(anchorCIdx === bestChapterIdx && anchorPIdx === bestParaIdx)) {
+    pushFragment(bestChapterIdx, bestParaIdx, 'related_paragraph');
+  }
+  pushFragment(anchorCIdx, anchorPIdx - 1, 'previous_paragraph');
+  pushFragment(anchorCIdx, anchorPIdx + 1, 'next_paragraph');
+  let related = 0;
+  for (const cand of ranked.slice(1)) {
+    if (related >= maxRelatedFragments) break;
+    const before = fragments.length;
+    pushFragment(cand.cIdx, cand.pIdx, 'related_paragraph');
+    if (fragments.length > before) related++;
+  }
+
+  const bestScore = top?.score || 0;
+  if (missingStrongAnchors.length > 0) {
+    return {
+      status: 'absent',
+      reason: `Dato concreto del testimonio ausente en todo el libro (${missingStrongAnchors.join(', ')}).`,
+      missingStrongAnchors,
+      fragments,
+    };
+  }
+  if (bestScore === 0) {
+    // No word or related word anywhere, but no concrete datum is missing either: a literary
+    // rewrite can still carry the memory ("la mano de quien me dio la vida me sacó del agua").
+    // That is ABSENCE OF EVIDENCE, so the judge reads the chapter planned for this answer.
+    for (const item of indexedAll.filter((it) => it.answerIdSet.has(unit.answerId)).slice(0, 2)) {
+      for (let pIdx = 0; pIdx < Math.min(item.paragraphs.length, 3); pIdx++) {
+        pushFragment(item.cIdx, pIdx, 'related_paragraph');
+      }
+    }
+    return {
+      status: 'uncertain',
+      reason:
+        'Sin coincidencias léxicas ni variantes y sin datos concretos ausentes: solo una lectura contextual del capítulo planificado puede descartar una paráfrasis.',
+      missingStrongAnchors,
+      fragments,
+    };
+  }
+  return {
+    status: bestScore >= requiredTokens.length * 0.9 ? 'present' : 'uncertain',
+    reason:
+      bestScore >= requiredTokens.length * 0.9
+        ? 'Evidencia directa localizada.'
+        : 'Hay evidencia relacionada pero no literal: requiere lectura contextual.',
+    missingStrongAnchors,
+    fragments,
+  };
+}
+
+/**
+ * V5.2 — Public retriever used by the hybrid audit to build the semantic judge's cases: several
+ * identified fragments per unit instead of one truncated excerpt.
+ */
+export function createUnitEvidenceRetriever(chapters: DemoChapterManuscript[]) {
+  const indexedAll = buildChapterAuditIndex(chapters);
+  return (params: {
+    unit: DocumentaryFactUnit;
+    chapterId?: string;
+    paragraphIndex?: number;
+  }): UnitEvidenceAssessment => {
+    const cIdx = Math.max(
+      0,
+      indexedAll.findIndex((it) => it.ch.id === params.chapterId)
+    );
+    return assessUnitEvidenceOfAbsenceIndexed({
+      unit: params.unit,
+      indexedAll,
+      bestChapterIdx: cIdx,
+      bestParaIdx: Math.max(0, params.paragraphIndex ?? 0),
+    });
+  };
+}
+
 interface PreIndexedChapterParagraph {
   raw: string;
   norm: string;
@@ -6977,7 +8053,8 @@ function buildChapterAuditIndex(chapters: DemoChapterManuscript[]): PreIndexedCh
     const rawParas = ch.paragraphs || [];
     const normList = rawParas.map((p) => {
       const norm = normalizePlainAscii(p);
-      const words = norm.split(/\s+/).filter(Boolean);
+      // V5.1: index numeric facts by value so "1975" and "mil novecientos setenta y cinco" match.
+      const words = [...norm.split(/\s+/).filter(Boolean), ...buildNumericEquivalenceTokens(norm)];
       const sentencesRaw = (p || '')
         .split(/(?<=[.!?…])\s+/)
         .map((s) => s.trim())
@@ -7029,6 +8106,10 @@ export function verifyDocumentaryUnitInManuscript(params: {
   verificationStatus: UnitVerificationStatus;
   semanticIssues: string[];
   ambiguityReason?: string;
+  needsSemanticReview: boolean;
+  semanticReviewReason?: string;
+  /** V5.2: set when absence is DEMONSTRATED (no judge needed). */
+  evidenceOfAbsenceReason?: string;
   semanticMatchScore: number;
   chapterIndex: number;
   paragraphIndex: number;
@@ -7045,6 +8126,7 @@ export function verifyDocumentaryUnitInManuscript(params: {
       verified: false,
       verificationStatus: 'missing',
       semanticIssues: ['Manuscrito vacío'],
+      needsSemanticReview: false,
       semanticMatchScore: 0,
       chapterIndex: -1,
       paragraphIndex: -1,
@@ -7250,6 +8332,42 @@ export function verifyDocumentaryUnitInManuscript(params: {
         )
       : semanticMatchScore >= minRequiredScore && missingFacets.length === 0;
 
+  // V5.2 — The action must be present too. Word overlap can be high while the predicate changed
+  // ("Mi padre me salvó de caer al río" vs "Mi padre me empujó al río": padre and río match).
+  // A unit whose conjugated verbs are not found near its best match is not verified by rules;
+  // it is sent to the semantic judge as a possible change of meaning (never approved by rules).
+  const testimonyActions = lexicalAndFacetsPassed ? extractTestimonyActionVerbs(unit.cleanText) : [];
+  let missingActions = testimonyActions.filter(
+    (verb) => !paraWindowWords.some((w) => w.startsWith(verb.slice(0, 4)))
+  );
+  // The best lexical match may be a SIMILAR memory ("me cuidaba" vs "me consolaba"). Before
+  // doubting the action, look for another paragraph of the book that keeps the action, the
+  // words and the dates of this memory; if one exists, the unit is verified there.
+  let relocatedTo: { cIdx: number; pIdx: number } | null = null;
+  if (missingActions.length > 0) {
+    search: for (const item of chapterOrder) {
+      for (let pIdx = 0; pIdx < item.paragraphs.length; pIdx++) {
+        const pe = item.paragraphs[pIdx];
+        const hasActions = testimonyActions.every((verb) =>
+          pe.windowNextWords.some((w) => w.startsWith(verb.slice(0, 4)))
+        );
+        if (!hasActions) continue;
+        const covered = unitRequiredTokens.filter((tok) =>
+          doesTokenMatchIndexedWords(tok, pe.windowNextWords, pe.windowNextWordSet)
+        ).length;
+        const yearsOk = unit.yearsOrNumbers.every((yn) =>
+          doesTokenMatchIndexedWords(yn, pe.windowNextWords, pe.windowNextWordSet)
+        );
+        if (yearsOk && covered / unitRequiredTokens.length >= minRequiredScore) {
+          relocatedTo = { cIdx: item.cIdx, pIdx };
+          missingActions = [];
+          break search;
+        }
+      }
+    }
+  }
+  const actionPreserved = missingActions.length === 0;
+
   const hasContradiction = semanticIssues.length > 0;
   // Detect borderline paraphrase ambiguity eligible for hybrid AI semantic judge:
   // Either complex literary paraphrase (moderate overlap >= 0.34, all explicit dates/names/places preserved, zero contradictions)
@@ -7261,7 +8379,7 @@ export function verifyDocumentaryUnitInManuscript(params: {
     semanticMatchScore >= 0.34;
   const isAmbiguous = isParaphraseAmbiguous || (hasContradiction && contradictionResult.ambiguousEdge);
 
-  const verified = lexicalAndFacetsPassed && !hasContradiction;
+  const verified = lexicalAndFacetsPassed && actionPreserved && !hasContradiction;
 
   const verificationStatus: UnitVerificationStatus = isAmbiguous
     ? 'ambiguous'
@@ -7279,20 +8397,68 @@ export function verifyDocumentaryUnitInManuscript(params: {
     ? `Posible giro conversacional de negación o discurso (${semanticIssues[0] || ''}).`
     : undefined;
 
+  // V5.2: when the memory was relocated to the paragraph that keeps its action, report THAT place.
+  const finalChapterIdx = relocatedTo ? relocatedTo.cIdx : bestChapterIdx;
+  const finalParaIdx = relocatedTo ? relocatedTo.pIdx : bestParaIdx;
+  const finalCh = chapters[finalChapterIdx] || targetCh;
+  const finalPara = relocatedTo
+    ? indexedAll[finalChapterIdx]?.paragraphs[finalParaIdx]?.raw || targetPara
+    : targetPara;
   const paragraphId =
-    targetCh.paragraphIds?.[bestParaIdx] || `${targetCh.id}_p_${bestParaIdx + 1}`;
+    finalCh.paragraphIds?.[finalParaIdx] || `${finalCh.id}_p_${finalParaIdx + 1}`;
+
+  // V5.1 — Deterministic rules are LOCATORS, not judges. Word overlap, facet lists and
+  // negation/antonym patterns can prove that a memory is literally present, and they can prove
+  // that nothing resembling it exists. Everything in between (a paraphrase that changed the
+  // vocabulary, a facet expressed differently, a suspected contradiction) is a hypothesis that
+  // only a contextual reading can settle, so it is flagged for semantic arbitration instead of
+  // being treated as a final omission or contradiction.
+  // V5.2 — Low lexical overlap is ABSENCE OF EVIDENCE, not evidence of absence. Below the
+  // threshold the whole book is searched (equivalent and related words, other chapters, the
+  // neighbors of the best match); the unit skips the judge only when absence is demonstrated.
+  const evidenceAssessment =
+    !verified && unitRequiredTokens.length > 0
+      ? assessUnitEvidenceOfAbsenceIndexed({
+          unit,
+          indexedAll,
+          bestChapterIdx,
+          bestParaIdx,
+        })
+      : undefined;
+  const absenceDemonstrated = evidenceAssessment?.status === 'absent';
+  const needsSemanticReview =
+    !verified &&
+    unitRequiredTokens.length > 0 &&
+    (hasContradiction ||
+      (!absenceDemonstrated &&
+        (semanticMatchScore >= SEMANTIC_REVIEW_MIN_LEXICAL_SCORE ||
+          evidenceAssessment?.status !== undefined)));
+  const semanticReviewReason = !needsSemanticReview
+    ? undefined
+    : !actionPreserved && !hasContradiction
+    ? `Las palabras coinciden pero la acción del testimonio no se localizó (${missingActions.join(', ')}): posible cambio de sentido.`
+    : semanticMatchScore < SEMANTIC_REVIEW_MIN_LEXICAL_SCORE && !hasContradiction
+    ? `Coincidencia léxica baja (${(semanticMatchScore * 100).toFixed(0)}%), pero hay evidencia relacionada en el libro: posible paráfrasis con otro vocabulario.`
+    : hasContradiction
+    ? `Posible contradicción detectada por reglas (${semanticIssues[0]}); requiere confirmación contextual.`
+    : missingFacets.length > 0
+    ? `Coincidencia léxica ${(semanticMatchScore * 100).toFixed(0)}% con detalles no localizados literalmente (${missingFacets.join('; ')}).`
+    : `Posible paráfrasis: coincidencia léxica ${(semanticMatchScore * 100).toFixed(0)}% por debajo del umbral automático.`;
 
   return {
     verified,
     verificationStatus,
     semanticIssues,
     ambiguityReason,
+    needsSemanticReview,
+    semanticReviewReason,
+    evidenceOfAbsenceReason: absenceDemonstrated ? evidenceAssessment?.reason : undefined,
     semanticMatchScore,
-    chapterIndex: bestChapterIdx,
-    paragraphIndex: bestParaIdx,
-    chapterId: targetCh.id,
+    chapterIndex: finalChapterIdx,
+    paragraphIndex: finalParaIdx,
+    chapterId: finalCh.id,
     paragraphId,
-    evidenceSnippet: targetPara.slice(0, 180),
+    evidenceSnippet: finalPara.slice(0, 180),
     matchedTokens,
     missingTokens,
     missingFacets,
@@ -7314,6 +8480,7 @@ function runVeracityAndExclusionAudit(params: {
 }): {
   inventedDataFlags: string[];
   unsupportedAdditionFlags: string[];
+  unsupportedAdditionCandidates: UnsupportedAdditionCandidate[];
   uncertaintyViolations: string[];
   leakedExcludedContentFlags: string[];
   coupleAttributionViolations: string[];
@@ -7321,6 +8488,7 @@ function runVeracityAndExclusionAudit(params: {
   const { manuscript, chapters, inventory, participantNames } = params;
   const inventedDataFlags: string[] = [];
   const unsupportedAdditionFlags: string[] = [];
+  const unsupportedAdditionCandidates: UnsupportedAdditionCandidate[] = [];
   const uncertaintyViolations: string[] = [];
   const leakedExcludedContentFlags: string[] = [];
   const coupleAttributionViolations: string[] = [];
@@ -7329,6 +8497,7 @@ function runVeracityAndExclusionAudit(params: {
     return {
       inventedDataFlags,
       unsupportedAdditionFlags,
+      unsupportedAdditionCandidates,
       uncertaintyViolations,
       leakedExcludedContentFlags,
       coupleAttributionViolations,
@@ -7344,7 +8513,34 @@ function runVeracityAndExclusionAudit(params: {
     .filter(Boolean);
 
   // 1. Direction B (Book -> Testimony): Check each chapter paragraph for unsupported dates, ages, dialogues, names, or unsourced claims
-  for (const ch of chapters) {
+  // V5.2: the introduction and the closing message are audited text too (they are part of the
+  // signed content), so an invented fact there must be caught exactly like one in a chapter.
+  const directionBSurfaces: DemoChapterManuscript[] = [
+    ...(manuscript.introduction && manuscript.introduction.trim()
+      ? [
+          {
+            id: '__introduction__',
+            partNumber: 0,
+            dimensionKey: 'introduccion' as any,
+            title: 'Introducción',
+            paragraphs: [manuscript.introduction],
+          } as DemoChapterManuscript,
+        ]
+      : []),
+    ...chapters,
+    ...(manuscript.closingMessage && manuscript.closingMessage.trim()
+      ? [
+          {
+            id: '__closing__',
+            partNumber: 0,
+            dimensionKey: 'cierre' as any,
+            title: 'Mensaje de cierre',
+            paragraphs: [manuscript.closingMessage],
+          } as DemoChapterManuscript,
+        ]
+      : []),
+  ];
+  for (const ch of directionBSurfaces) {
     for (let pIdx = 0; pIdx < (ch.paragraphs || []).length; pIdx++) {
       const para = ch.paragraphs[pIdx] || '';
       const normPara = normalizePlainAscii(para);
@@ -7429,9 +8625,34 @@ function runVeracityAndExclusionAudit(params: {
             doesTokenMatchCorpusWords(tok, corpusAllEligibleWords)
           );
           if (supportedHits.length === 0) {
-            unsupportedAdditionFlags.push(
-              `Afirmación narrativa sin respaldo en los testimonios ("${bSent.slice(0, 75)}...") en capítulo "${ch.title}".`
+            const flag = `Afirmación narrativa sin respaldo en los testimonios ("${bSent.slice(0, 75)}...") en capítulo "${ch.title}".`;
+            unsupportedAdditionFlags.push(flag);
+            // V5.2: only sentences with a BIOGRAPHICAL-FACT signal (a conjugated past action, a
+            // figure, or a capitalized name absent from the testimonies and the protagonists) are
+            // arbitrated. A pure editorial bridge ("Esta edición reúne las vivencias de…") shares no
+            // words with the testimony by nature and asserts nothing; it is not a candidate.
+            const sentenceWords = bSent.split(/\s+/);
+            const protagonistWords = new Set(
+              participantNames.flatMap((n) => normalizePlainAscii(n).split(/\s+/)).filter(Boolean)
             );
+            const unknownCapitalized = sentenceWords.some((w, i) => {
+              if (i === 0 || /[.!?:]$/.test(sentenceWords[i - 1])) return false;
+              const clean = w.replace(/^[^A-Za-zÁÉÍÓÚÑáéíóúñ]+|[^A-Za-zÁÉÍÓÚÑáéíóúñ]+$/g, '');
+              if (!/^[A-ZÁÉÍÓÚÑ][a-záéíóúñ]{2,}$/.test(clean)) return false;
+              const norm = normalizePlainAscii(clean);
+              return !protagonistWords.has(norm) && !corpusAllEligibleWords.includes(norm);
+            });
+            const factLike =
+              /\d/.test(bSent) || unknownCapitalized || extractTestimonyActionVerbs(bSent).length > 0;
+            if (factLike) {
+              unsupportedAdditionCandidates.push({
+                flag,
+                chapterId: ch.id,
+                chapterTitle: ch.title,
+                paragraphIndex: pIdx,
+                sentence: bSent,
+              });
+            }
           }
         }
       }
@@ -7527,6 +8748,7 @@ function runVeracityAndExclusionAudit(params: {
   return {
     inventedDataFlags,
     unsupportedAdditionFlags,
+    unsupportedAdditionCandidates,
     uncertaintyViolations,
     leakedExcludedContentFlags,
     coupleAttributionViolations,
@@ -7559,7 +8781,12 @@ export function auditBookEditorialQuality(params: {
     /(?<![A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9])(yo|mi|mis|mío|mía|míos|mías|conmigo|nosotros|nosotras|nuestro|nuestra|nuestros|nuestras|nací|crecí|viví|aprendí|conocí|salí|volví|sentí|decidí|descubrí|compartí|recibí|elegí|construí|tuve|estuve|hice|pude|supe|quise|fui|empecé|comencé|terminé|trabajé|estudié|llegué|jugué|logré|pasé|encontré|formé|cuidé|disfruté|amé|tengo|soy|estoy|voy|quiero|pienso|siento|considero|agradezco|vivíamos|teníamos|éramos|estábamos|jugábamos|íbamos|tuvimos|fuimos|hicimos)(?![A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9])/i;
 
   const findFirstPersonLeakOutsideQuotes = (rawText: string): string | null => {
-    const outsideQuotes = rawText.replace(/«[^»]*»|"[^"]*"/g, ' ');
+    // V5.1: language models usually emit typographic quotes (“ ”, ‘ ’) and em-dash dialogue lines.
+    // Only straight quotes and guillemets were stripped, so every faithfully quoted first-person
+    // testimony inside a third-person biography was reported as a perspective leak.
+    const outsideQuotes = rawText
+      .replace(/«[^»]*»|"[^"]*"|“[^”]*”|‘[^’]*’/g, ' ')
+      .replace(/(^|[\n.!?:]\s*)[—–]\s*[^—–\n]*(?:[—–]|$)/g, '$1 ');
     const directMatch = outsideQuotes.match(firstPersonMarkerRx);
     if (directMatch) return directMatch[1];
 
@@ -7990,6 +9217,7 @@ export function auditAndApproveBookManuscript(params: {
   let uncertaintiesPreserved = true;
   const missingUnitIds: string[] = [];
   const ambiguousUnitIds: string[] = [];
+  const reviewCandidateUnitIds: string[] = [];
   const uncertaintyViolations: string[] = [];
   const semanticContradictionFlags: string[] = [];
   let uncertainUnitsCount = 0;
@@ -8041,6 +9269,9 @@ export function auditAndApproveBookManuscript(params: {
 
     if (verification.verificationStatus === 'ambiguous') {
       ambiguousUnitIds.push(unit.unitId);
+    }
+    if (verification.needsSemanticReview) {
+      reviewCandidateUnitIds.push(unit.unitId);
     }
 
     if (verification.semanticIssues.length > 0) {
@@ -8141,6 +9372,9 @@ export function auditAndApproveBookManuscript(params: {
         verificationStatus: verification.verificationStatus,
         semanticIssues: verification.semanticIssues,
         ambiguityReason: verification.ambiguityReason,
+        needsSemanticReview: verification.needsSemanticReview,
+        semanticReviewReason: verification.semanticReviewReason,
+        evidenceOfAbsenceReason: verification.evidenceOfAbsenceReason,
         exclusionReason: 'none',
         verified: false,
       });
@@ -8220,7 +9454,8 @@ export function auditAndApproveBookManuscript(params: {
     blockingDefects.push(...editorialAudit.blockingDefects);
   }
 
-  const passed = blockingDefects.length === 0;
+  // Provisional; replaced below by the single global decision (V5.2).
+  let passed = blockingDefects.length === 0;
 
   const report: DocumentaryAuditReport = {
     auditVersion: CANONICAL_AUDIT_RULES_VERSION,
@@ -8229,6 +9464,7 @@ export function auditAndApproveBookManuscript(params: {
     status: passed ? 'approved' : 'failed_audit',
     approved: passed,
     passed,
+    auditPolicy: 'deterministic_only',
     totalSourceUnits,
     integratedUnits,
     omittedNotRecalledUnits,
@@ -8267,18 +9503,24 @@ export function auditAndApproveBookManuscript(params: {
       coupleAttributionViolations: veracityCheck.coupleAttributionViolations,
       semanticContradictionFlags,
       unsupportedAdditionFlags: veracityCheck.unsupportedAdditionFlags,
+      unsupportedAdditionCandidates: veracityCheck.unsupportedAdditionCandidates,
     },
     semanticAudit: {
+      // V5.2: pure unsupported narrative sentences are SUSPICIONS for the hybrid audit to
+      // arbitrate (see `unsupportedAdditionsPendingArbitration`); deterministic rules alone neither
+      // block on them nor mark this gate failed because of them. Invented dates, ages, names and
+      // dialogues (`inventedDataFlags`) are proven by rules and keep failing it.
       passed:
         semanticContradictionFlags.length === 0 &&
         veracityCheck.inventedDataFlags.length === 0 &&
-        veracityCheck.unsupportedAdditionFlags.length === 0 &&
         ambiguousUnitIds.length === 0,
+      unsupportedAdditionsPendingArbitration: veracityCheck.unsupportedAdditionCandidates.length,
       contradictionsDetected: semanticContradictionFlags,
-      unsupportedAdditions: veracityCheck.unsupportedAdditionFlags,
+      unsupportedAdditions: veracityCheck.inventedDataFlags,
       uncertainUnitsCount,
       ambiguousUnitsCount: ambiguousUnitIds.length,
       ambiguousUnitIds,
+      reviewCandidateUnitIds,
       directionAChecked: inventory.eligibleFactUnits.length,
       directionBChecked: normalizedChapters.reduce((sum, ch) => sum + ch.paragraphs.length, 0),
     },
@@ -8304,6 +9546,18 @@ export function auditAndApproveBookManuscript(params: {
       defaultFirstChapterDumpDetected: false,
     },
   };
+
+  // V5.2: one global verdict over every mandatory gate (see `finalizeGlobalAuditDecision`).
+  const globalDecision = finalizeGlobalAuditDecision({
+    report,
+    editorialAudit,
+    includeEditorialAudit,
+  });
+  passed = globalDecision.passed;
+  report.passed = passed;
+  report.approved = passed;
+  report.status = passed ? 'approved' : 'failed_audit';
+  report.blockingDefects = globalDecision.blockingDefects;
 
   return {
     manuscript: {
@@ -8500,7 +9754,13 @@ export function buildContextualRepairTasks(params: {
     }
   }
 
+  // V5.3: units still pending verification (judge deferred) are NOT confirmed omissions; rewriting
+  // their chapters would only risk damaging text that is probably faithful.
+  const deferredIds = new Set(
+    (report.traceabilityMatrix || []).filter((t) => t.judgeDeferred).map((t) => t.unitId)
+  );
   for (const unitId of missingOrContradictedIds) {
+    if (deferredIds.has(unitId)) continue;
     const unit = inventory.eligibleFactUnits.find((u) => u.unitId === unitId);
     if (!unit) continue;
     const targetCh = resolveChapterForUnit(unit);
@@ -8752,6 +10012,17 @@ export function repairManuscriptOmissions(params: {
   storyMode?: 'individual' | 'compartida';
   participantNames?: string[];
   maxAttempts?: number;
+  /**
+   * V5.1: when false, the pass only performs structural/editorial hygiene (regrouping, privacy
+   * scrubbing, de-duplication, paragraph splitting) and NEVER pastes rule-rewritten testimony into
+   * the prose. AI-written manuscripts use false: omissions there are repaired narratively by the
+   * model, and the deterministic audit used inside this function would otherwise re-insert
+   * memories that the semantic judge already confirmed as present (the source of duplicated,
+   * mechanically concatenated paragraphs). Defaults to true for the rule-based fallback/demo flows.
+   */
+  integrateMissingUnits?: boolean;
+  /** V5.1: restricts integration to these unit ids (e.g. omissions confirmed by the hybrid audit). */
+  onlyIntegrateUnitIds?: string[];
 }): {
   manuscript: DemoManuscript;
   report: DocumentaryAuditReport;
@@ -8770,7 +10041,10 @@ export function repairManuscriptOmissions(params: {
       .map((s) => s.trim())
       .filter(Boolean),
     maxAttempts = 2,
+    integrateMissingUnits = true,
+    onlyIntegrateUnitIds,
   } = params;
+  const integrationAllowList = onlyIntegrateUnitIds ? new Set(onlyIntegrateUnitIds) : null;
 
   const isCouple = storyMode === 'compartida' && participantNames.length >= 2;
   const narrativeStyle = manuscript.narrativeStyle || 'first_person_literary';
@@ -9004,7 +10278,11 @@ export function repairManuscriptOmissions(params: {
     }
 
     // Step D: Locally integrate each missing or contradicted DocumentaryFactUnit cleanly into its planned chapter
-    const missingIds = currentAudit.report.coverageAudit?.missingUnitIds || [];
+    const missingIds = !integrateMissingUnits
+      ? []
+      : (currentAudit.report.coverageAudit?.missingUnitIds || []).filter(
+          (id) => !integrationAllowList || integrationAllowList.has(id)
+        );
     for (let mIdx = 0; mIdx < missingIds.length; mIdx++) {
       const missingId = missingIds[mIdx];
       const missingUnit = currentAudit.inventory.eligibleFactUnits.find(
@@ -9274,4 +10552,65 @@ export function computeCanonicalManuscriptCacheKey(params: {
   ].join(';');
 
   return `canonical_${narrativeStyle}_${simpleHash(payload)}`;
+}
+
+/**
+ * V5.1 — Canonical serialization of everything in a manuscript that the audit actually judged:
+ * narrative style, introduction, closing message and every chapter's id, title, paragraphs and
+ * photo anchors. Title, subtitle, authors and dedication are deliberately excluded because the
+ * participant customizes them in the layout studio after approval and they carry no testimony.
+ * Whitespace and Unicode form are normalized so a JSON round-trip through the browser yields the
+ * same payload. The server hashes this string; any edit to audited text changes the hash.
+ */
+export function buildManuscriptApprovalDigestPayload(manuscript: DemoManuscript): string {
+  const clean = (text: string | undefined | null): string =>
+    String(text || '')
+      .normalize('NFC')
+      .replace(/\s+/g, ' ')
+      .trim();
+  const chapters = (manuscript.chapters || []).map((ch) => ({
+    id: clean(ch.id),
+    title: clean(ch.title),
+    paragraphs: (ch.paragraphs || []).map((p) => clean(p)),
+    photos: (ch.photoPlacements || [])
+      .map((pl) => `${pl.photoId}@${Number(pl.paragraphIndex) || 0}`)
+      .sort(),
+  }));
+  return JSON.stringify({
+    style: manuscript.narrativeStyle || '',
+    mode: manuscript.mode || '',
+    introduction: clean(manuscript.introduction),
+    closingMessage: clean(manuscript.closingMessage),
+    chapters,
+  });
+}
+
+/**
+ * V5.2 — Prepares an approved manuscript for saving from the layout studio.
+ *
+ * The audited narrative (introduction, chapters, chapter titles, closing message and photo
+ * placements — everything in `buildManuscriptApprovalDigestPayload`) is taken from `approved`
+ * UNCHANGED. Only editorial fields outside the audited content (title, subtitle, authors and
+ * dedication) are carried over from the studio's working copy, so a different introduction in the
+ * preview can never silently replace the approved one and invalidate its approval evidence.
+ * Deliberate edits to audited text are made in the studio's own manuscript and are re-audited by
+ * the server through the same hybrid policy.
+ */
+export function mergeEditorialFieldsIntoApprovedManuscript(params: {
+  approved: DemoManuscript;
+  studio: Partial<DemoManuscript> | null | undefined;
+  narrativeStyle: DemoNarrativeStyleId;
+}): DemoManuscript {
+  const { approved, studio, narrativeStyle } = params;
+  return {
+    ...approved,
+    title: studio?.title || approved.title,
+    subtitle: studio?.subtitle || approved.subtitle,
+    authors: studio?.authors || approved.authors,
+    dedication: studio?.dedication || approved.dedication,
+    narrativeStyle,
+    aiGenerated: approved.aiGenerated ?? true,
+    generationStatus: approved.generationStatus,
+    useOfficialForeverYouLogo: true,
+  };
 }

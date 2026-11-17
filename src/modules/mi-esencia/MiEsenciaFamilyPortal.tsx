@@ -19,6 +19,7 @@ import {
   X,
 } from 'lucide-react';
 import { ForeverYouLogo } from '../../components/ForeverYouLogo';
+import { MiEsenciaChatPhotos } from './MiEsenciaChatPhotos.tsx';
 import { ThemeToggleButton, useTheme } from '../../context/ThemeContext';
 import {
   isGenericAdministrativeInterlocutorName,
@@ -100,11 +101,14 @@ export const MiEsenciaFamilyPortal: React.FC<MiEsenciaFamilyPortalProps> = ({
 
     setIsVerifying(true);
     setAuthError(null);
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 15000);
     try {
       const res = await fetch('/api/mi-esencia/family/verify-code', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ personalCode: code }),
+        signal: controller.signal,
       });
       const json = await res.json();
       if (!res.ok || !json.success) {
@@ -150,8 +154,17 @@ export const MiEsenciaFamilyPortal: React.FC<MiEsenciaFamilyPortalProps> = ({
       }
       setIsAuthenticated(true);
     } catch (err: any) {
-      setAuthError(err?.message || 'No pudimos verificar tu código en este momento. Inténtalo nuevamente.');
+      if (err?.name === 'AbortError') {
+        setAuthError(
+          'La verificación tardó más de lo esperado. Por favor intenta ingresar nuevamente.'
+        );
+      } else {
+        setAuthError(
+          err?.message || 'No pudimos verificar tu código en este momento. Inténtalo nuevamente.'
+        );
+      }
     } finally {
+      window.clearTimeout(timeoutId);
       setIsVerifying(false);
     }
   };
@@ -1096,6 +1109,11 @@ export const MiEsenciaFamilyPortal: React.FC<MiEsenciaFamilyPortalProps> = ({
                   }`}
                 >
                   <p className="text-sm whitespace-pre-wrap leading-relaxed">{msg.content}</p>
+
+                  {/* V5.4.0: fotografías reales del testimonio que el avatar comparte. */}
+                  {!isUser && msg.photoAttachments && msg.photoAttachments.length > 0 && (
+                    <MiEsenciaChatPhotos personalCode={personalCode} photos={msg.photoAttachments} />
+                  )}
 
                   {!isUser && msgIndex === 0 && (
                     <div className="flex flex-wrap gap-1.5 pt-1 font-sans">

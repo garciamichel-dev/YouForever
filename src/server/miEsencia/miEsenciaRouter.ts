@@ -10,16 +10,22 @@ import {
 export const miEsenciaRouter: Router = express.Router();
 
 function requireMiEsenciaAdmin(req: Request, res: Response, next: express.NextFunction): void {
-  const admin = getAdminUser(req);
-  if (!admin) {
+  const deny = () =>
     res.status(401).json({
       success: false,
       error: 'Acceso administrativo requerido para gestionar Mi Esencia.',
     });
-    return;
-  }
-  (req as any).adminUser = admin;
-  next();
+  // V5.3.1: verified server-side identity (see ../adminAuth.ts).
+  getAdminUser(req)
+    .then((admin) => {
+      if (!admin) {
+        deny();
+        return;
+      }
+      (req as any).adminUser = admin;
+      next();
+    })
+    .catch(deny);
 }
 
 // ============================================================================
@@ -730,7 +736,11 @@ miEsenciaRouter.post('/family/verify-code', async (req: Request, res: Response) 
 
     await miEsenciaStore.ensureInitialized();
     const { personalCode } = req.body || {};
-    const check = miEsenciaStore.verifyPersonalAccessCode(personalCode);
+    let check = miEsenciaStore.verifyPersonalAccessCode(personalCode);
+    if (!check.valid) {
+      await miEsenciaStore.syncFromFirestore(true);
+      check = miEsenciaStore.verifyPersonalAccessCode(personalCode);
+    }
     if (!check.valid || !check.interlocutor || !check.subscription || !check.persons) {
       recordAccessCodeFailure(req);
       res.status(401).json({
@@ -750,16 +760,11 @@ miEsenciaRouter.post('/family/verify-code', async (req: Request, res: Response) 
       });
     }
 
-    const overview = miEsenciaStore.getAdminOverviewData();
-    const sessions = overview.conversations
-      .filter(
-        (s) =>
-          s.avatarId === check.subscription!.avatarId &&
-          s.interlocutorId === check.interlocutor!.interlocutorId
-      )
-      .sort((a, b) => a.startedAt.localeCompare(b.startedAt));
-    const openContradictions = overview.contradictions.filter(
-      (c) => c.avatarId === check.subscription!.avatarId && c.status === 'abierta'
+    // V5.4.2: only this family member's data (before, the whole admin overview of EVERY avatar was
+    // built — re-syncing all of them — just to filter these conversations).
+    const { sessions, openContradictions } = miEsenciaStore.getFamilyPortalData(
+      check.subscription.avatarId,
+      check.interlocutor.interlocutorId
     );
 
     res.json({
@@ -844,6 +849,25 @@ miEsenciaRouter.post('/family/converse', async (req: Request, res: Response) => 
     res.json({ success: true, data: result });
   } catch (err: unknown) {
     res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
+// V5.4.0 — Fotografía real del testimonio mostrada en el chat (validada contra el código personal;
+// se pide por POST para que el código nunca viaje en una URL).
+miEsenciaRouter.post('/family/photo', async (req: Request, res: Response) => {
+  try {
+    await miEsenciaStore.ensureInitialized();
+    const { personalCode, photoId } = req.body || {};
+    const photo = await miEsenciaStore.getFamilyChatPhoto({ personalCode, photoId });
+    if (!photo) {
+      res.status(404).json({ success: false, error: 'Fotografía no disponible.' });
+      return;
+    }
+    res.setHeader('Content-Type', photo.mimeType);
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.send(photo.buffer);
+  } catch (err: unknown) {
+    res.status(401).json({ success: false, error: (err as Error).message });
   }
 });
 

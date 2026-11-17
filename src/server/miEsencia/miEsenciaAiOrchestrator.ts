@@ -162,14 +162,20 @@ async function callGeminiProvider(params: {
     },
   });
 
-  const requestedModel = (params.model || 'gemini-3-flash-preview').trim();
+  const rawRequestedModel = (params.model || 'gemini-3-flash-preview').trim();
+  const normalizedGeminiModel =
+    rawRequestedModel === 'gemini-3.8-flash' || rawRequestedModel === 'gemini-2.5-flash'
+      ? 'gemini-3-flash-preview'
+      : rawRequestedModel === 'gemini-3.1-flash-lite'
+      ? 'gemini-3.1-flash-lite-preview'
+      : rawRequestedModel;
   const multiTurnContents = buildGeminiMultiTurnContents(
     params.structuredTurns,
     params.userContextAndMessage
   );
 
   const candidateModels = Array.from(
-    new Set([requestedModel, 'gemini-3-flash-preview', 'gemini-3.8-flash', 'gemini-flash-latest'])
+    new Set([normalizedGeminiModel, 'gemini-3-flash-preview', 'gemini-flash-latest'])
   );
 
   let lastErr: unknown = null;
@@ -242,22 +248,22 @@ async function callOpenAiProvider(params: {
 
   const client = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY,
+    timeout: 15000,
+    maxRetries: 0,
   });
 
-  const requestedModel = (params.model || 'gpt-6').trim();
+  const requestedModel = (params.model || 'gpt-4.1').trim();
+  const isUnpublishedAlias = (id: string) =>
+    /^(gpt-6|gpt-6-luna|gpt-6-astra|gpt-6\.1-sol|gpt-6\.1-terra)$/i.test(id);
 
   // Descubrir y cachear por 5 minutos qué modelos tiene permitidos el proyecto de OpenAI
   let baseCandidates = [
-    requestedModel,
-    'gpt-6-luna',
-    'gpt-6-astra',
-    'gpt-6.1-sol',
-    'gpt-6.1-terra',
+    ...(isUnpublishedAlias(requestedModel) ? [] : [requestedModel]),
     'gpt-5',
-    'gpt-5-mini',
     'gpt-4.1',
-    'gpt-4.1-mini',
     'gpt-4o',
+    'gpt-5-mini',
+    'gpt-4.1-mini',
     'gpt-4o-mini',
   ];
   try {
@@ -270,20 +276,30 @@ async function callOpenAiProvider(params: {
     const availableIds = cachedOpenAiProjectModels || [];
     if (availableIds.length > 0) {
       const exactRequestedAvailable = availableIds.includes(requestedModel);
+      // V5.4.2: within each family, full models before "mini"/"nano" ones, so an unavailable
+      // model is never silently replaced by a much smaller one when a full one exists.
+      const fullFirst = (ids: string[]) =>
+        [...ids].sort((a, b) => Number(/mini|nano/i.test(a)) - Number(/mini|nano/i.test(b)));
       const preferredOrder = [
         ...(exactRequestedAvailable ? [requestedModel] : []),
-        ...availableIds.filter((id) => /^gpt-6/i.test(id)),
-        ...availableIds.filter(
-          (id) => /^gpt-5/i.test(id) && !/realtime|audio|transcribe|tts|search/i.test(id)
+        ...fullFirst(availableIds.filter((id) => /^gpt-6/i.test(id))),
+        ...fullFirst(
+          availableIds.filter(
+            (id) => /^gpt-5/i.test(id) && !/realtime|audio|transcribe|tts|search/i.test(id)
+          )
         ),
-        ...availableIds.filter((id) => /^gpt-4\.1/i.test(id)),
-        ...availableIds.filter(
-          (id) => /^gpt-4o/i.test(id) && !/realtime|audio|transcribe|tts|search/i.test(id)
+        ...fullFirst(availableIds.filter((id) => /^gpt-4\.1/i.test(id))),
+        ...fullFirst(
+          availableIds.filter(
+            (id) => /^gpt-4o/i.test(id) && !/realtime|audio|transcribe|tts|search/i.test(id)
+          )
         ),
         ...availableIds.filter((id) =>
           /^(o4-mini|o3-mini|o3|gpt-4-turbo|gpt-4|gpt-3\.5-turbo)$/i.test(id)
         ),
-        ...(!exactRequestedAvailable ? [requestedModel] : []),
+        ...(!exactRequestedAvailable && !isUnpublishedAlias(requestedModel)
+          ? [requestedModel]
+          : []),
       ];
       baseCandidates = Array.from(new Set([...preferredOrder, ...baseCandidates]));
     }
@@ -948,4 +964,45 @@ export async function executeCustomAvatarTurnWithFallback(params: {
       adminFallbackNotice: disabledFallbackNotice,
     };
   }
+}
+
+/**
+ * V5.4.2 — Short text generated with the avatar's configured engine (selected provider and model,
+ * falling back to the other provider), e.g. the description of a photo shown in the chat.
+ * Returns null when no provider can answer in time; the caller keeps its own safe fallback.
+ */
+export async function generateAvatarShortText(params: {
+  aiConfig: MiEsenciaAvatarAiConfig | undefined;
+  systemInstructions: string;
+  userText: string;
+  timeoutMs?: number;
+}): Promise<{ text: string; providerUsed: MiEsenciaAiProvider; modelUsed: string } | null> {
+  const ai = params.aiConfig;
+  const primary: MiEsenciaAiProvider = ai?.primaryProvider || 'gemini';
+  const order: MiEsenciaAiProvider[] =
+    ai?.enableAutomaticFallback === false ? [primary] : [primary, primary === 'gemini' ? 'openai' : 'gemini'];
+  const timeoutMs = params.timeoutMs ?? 12_000;
+  for (const provider of order) {
+    const model =
+      provider === 'gemini' ? ai?.geminiModel || 'gemini-3-flash-preview' : ai?.openaiModel || 'gpt-6';
+    if (provider === 'gemini' ? !hasValidGeminiApiKey() : !hasValidOpenAiApiKey()) continue;
+    try {
+      const call =
+        provider === 'gemini'
+          ? callGeminiProvider({ model, systemInstructions: params.systemInstructions, userContextAndMessage: params.userText })
+          : callOpenAiProvider({ model, systemInstructions: params.systemInstructions, userContextAndMessage: params.userText });
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const result = await Promise.race([
+        call,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error('timeout')), timeoutMs);
+        }),
+      ]).finally(() => timer && clearTimeout(timer));
+      const text = String(result.text || '').trim();
+      if (text) return { text, providerUsed: provider, modelUsed: result.respondedModel || model };
+    } catch (_err) {
+      // try the next provider
+    }
+  }
+  return null;
 }

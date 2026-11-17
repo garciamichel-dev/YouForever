@@ -46,6 +46,7 @@ import {
   ParticipantBookVersionRecord,
   buildParticipantInitialManuscriptFromAnswers,
   composeBookPages,
+  mergeEditorialFieldsIntoApprovedManuscript,
   hasUpdatedAnswersSinceBookVersion,
 } from '../logic/demoStoryRules.ts';
 import {
@@ -55,6 +56,18 @@ import {
 } from './DemoBookPageRenderer.tsx';
 import { generateRealDemoBookPdf, preloadBookResourcesForPdf } from '../utils/demoPdfGenerator.ts';
 import { ForeverYouLogo } from './ForeverYouLogo';
+import { BookProgressOverlay, type BookProgressState } from './BookProgressOverlay.tsx';
+
+/** V5.3.1: shown in the preview and before saving the final book. */
+/**
+ * V5.3.3: the only message a participant sees while their book is not ready yet. Technical causes
+ * are recorded in the administrator log; the participant is never told about errors.
+ */
+const BOOK_IN_PROGRESS_MESSAGE =
+  'Tu libro sigue en preparación. Pulsa «Continuar preparando» y seguiremos desde donde avanzamos.';
+
+const AI_DOCUMENT_REVIEW_NOTICE =
+  'Este documento se redacta con ayuda de inteligencia artificial y puede contener errores. Siempre será necesaria una revisión exhaustiva por parte del autor de la autobiografía.';
 
 interface ParticipantBookStudioProps {
   token: string;
@@ -70,6 +83,8 @@ interface ParticipantBookStudioProps {
     allVersions: ParticipantBookVersionRecord[];
   }) => void;
   onViewReadOnlyAnswers?: () => void;
+  /** V5.3.6: loads a saved version's full book (the session only lists the versions). */
+  onRequestFullBookVersion?: (versionId: string) => Promise<ParticipantBookVersionRecord | null>;
 }
 
 export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
@@ -82,6 +97,7 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
   bookVersions,
   onBookVersionSaved,
   onViewReadOnlyAnswers,
+  onRequestFullBookVersion,
 }) => {
   const participantNames = useMemo(() => {
     const names = [participant.name];
@@ -121,6 +137,14 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
     if (!hasSavedVersions) return null;
     return bookVersions.find((v) => v.id === selectedVersionId) || bookVersions[0];
   }, [hasSavedVersions, bookVersions, selectedVersionId]);
+
+  // V5.3.6: a version opened from the list is loaded on demand.
+  const activeSavedVersionNeedsContent = Boolean(activeSavedVersion && !activeSavedVersion.manuscript);
+  useEffect(() => {
+    if (activeSavedVersion && !activeSavedVersion.manuscript && onRequestFullBookVersion) {
+      void onRequestFullBookVersion(activeSavedVersion.id);
+    }
+  }, [activeSavedVersion?.id, activeSavedVersionNeedsContent]);
 
   const hasUpdatedAnswers = useMemo(() => {
     return hasUpdatedAnswersSinceBookVersion({
@@ -292,6 +316,17 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
     totalRepairChapters: number;
   } | null>(null);
   const activeJobIdRef = useRef<string | null>(null);
+  // V5.3.5: floating, non-dismissable progress alert for every book creation step.
+  const [progressOverlay, setProgressOverlay] = useState<BookProgressState | null>(null);
+  const pdfCancelRequestedRef = useRef<boolean>(false);
+  const startProgress = (kind: BookProgressState['kind'], stage: BookProgressState['stage'] = 'job') =>
+    setProgressOverlay({ kind, stage, status: 'running', cancellable: true });
+  const updateProgress = (patch: Partial<BookProgressState>) =>
+    setProgressOverlay((prev) => (prev ? { ...prev, ...patch } : prev));
+  const pauseProgress = () =>
+    setProgressOverlay((prev) =>
+      prev ? { ...prev, status: 'paused', cancellable: true, pausedMessage: BOOK_IN_PROGRESS_MESSAGE } : prev
+    );
   const isUnmountedRef = useRef<boolean>(false);
 
   const safeReadJsonResponse = async (res: Response): Promise<any> => {
@@ -299,7 +334,7 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
     if (!rawText || !rawText.trim()) {
       return {
         success: false,
-        error: 'No recibimos respuesta en este momento. Por favor intenta nuevamente.',
+        error: BOOK_IN_PROGRESS_MESSAGE,
       };
     }
     try {
@@ -307,7 +342,7 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
     } catch (_parseErr) {
       return {
         success: false,
-        error: 'Ocurrió un inconveniente temporal al preparar tu libro. Por favor intenta nuevamente.',
+        error: BOOK_IN_PROGRESS_MESSAGE,
       };
     }
   };
@@ -594,7 +629,7 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
 
       if (consecutiveNetworkErrors >= 6) {
         throw new Error(
-          'Perdimos brevemente la conexión mientras preparábamos tu libro. Puedes intentar de nuevo y continuaremos desde el último avance guardado.'
+BOOK_IN_PROGRESS_MESSAGE
         );
       }
     }
@@ -606,8 +641,7 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
     }
     if (currentJob.status === 'failed' || !currentJob.result) {
       throw new Error(
-        currentJob.error ||
-          'No pudimos reunir todos tus recuerdos en este momento. Por favor intenta nuevamente.'
+BOOK_IN_PROGRESS_MESSAGE
       );
     }
 
@@ -631,6 +665,20 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
       setIsGeneratingAI(false);
       setIsSavingBook(false);
       setGenerationJobProgress(null);
+      setProgressOverlay(null);
+    }
+  };
+
+  // V5.3.5: «Cancelar» in the floating alert stops whatever is being created.
+  const handleCancelProgressOverlay = () => {
+    pdfCancelRequestedRef.current = true;
+    if (activeJobIdRef.current) {
+      void handleCancelActiveGeneration();
+    } else {
+      styleRequestIdRef.current += 1;
+      setIsGeneratingAI(false);
+      setGenerationJobProgress(null);
+      setProgressOverlay(null);
     }
   };
 
@@ -657,6 +705,7 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
           setNarrativeStyle(styleId);
           setEditorialConfig((prev) => ({ ...prev, narrativeStyle: styleId }));
           setIsGeneratingAI(true);
+          startProgress(job.scope === 'full' ? 'full' : 'preview');
           try {
             const payload = await pollBookGenerationJob(
               job,
@@ -670,12 +719,24 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
               payload.manuscript
             ) {
               applyGeneratedManuscriptPayload(payload, styleId);
+              setProgressOverlay((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      status: 'done',
+                      doneTitle: '¡Tus páginas están listas!',
+                      doneMessage: 'Ya puedes revisar el resultado en el visor.',
+                    }
+                  : prev
+              );
+            } else if (!cancelledEffect && reqId === styleRequestIdRef.current && payload?.cancelled) {
+              setProgressOverlay(null);
             }
           } catch (resumeErr: any) {
             if (!cancelledEffect && reqId === styleRequestIdRef.current) {
+              pauseProgress();
               setStudioError(
-                resumeErr?.message ||
-                  'No pudimos retomar la preparación de tu libro. Puedes intentarlo nuevamente.'
+BOOK_IN_PROGRESS_MESSAGE
               );
               setRetryAction('preview');
             }
@@ -740,6 +801,7 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
 
     setHasAiDraftLoadedForSession(false);
     setIsGeneratingAI(true);
+    startProgress('preview');
     setGenerationJobProgress({
       jobId: 'starting',
       phase: 'preparing_sources',
@@ -770,10 +832,10 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
 
       if (!startRes.ok || !startData.success || !startData.data) {
         setStudioError(
-          startData.error ||
-            'No pudimos reunir todos tus recuerdos en este momento. Por favor intenta nuevamente.'
+          startData.error || BOOK_IN_PROGRESS_MESSAGE
         );
         setRetryAction('preview');
+        pauseProgress();
         return;
       }
 
@@ -781,21 +843,38 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
         startData.data,
         () => reqId !== styleRequestIdRef.current
       );
-      if (reqId !== styleRequestIdRef.current || !payload || payload.cancelled) return;
+      if (reqId !== styleRequestIdRef.current) return;
+      if (!payload || payload.cancelled) {
+        setProgressOverlay(null);
+        return;
+      }
 
       if (payload.manuscript) {
+        updateProgress({ stage: 'compose', cancellable: false });
         applyGeneratedManuscriptPayload(payload, styleId);
+        const stillInPreparation =
+          payload.manuscript.generationStatus === 'incomplete_draft' ||
+          payload.manuscript.status === 'incomplete_draft';
+        if (stillInPreparation) {
+          pauseProgress();
+        } else {
+          updateProgress({
+            status: 'done',
+            doneTitle: '¡Tu muestra editorial está lista!',
+            doneMessage:
+              'Pulsa «Aceptar» para revisar tus primeras páginas con el estilo que elegiste.',
+          });
+        }
       } else {
-        setStudioError(
-          'No pudimos reunir todos tus recuerdos en este momento. Por favor intenta nuevamente.'
-        );
+        setStudioError(BOOK_IN_PROGRESS_MESSAGE);
         setRetryAction('preview');
+        pauseProgress();
       }
     } catch (err: any) {
       if (reqId === styleRequestIdRef.current && err?.name !== 'AbortError') {
+        pauseProgress();
         setStudioError(
-          err?.message ||
-            'Ocurrió un inconveniente al preparar tu vista previa. Puedes intentarlo nuevamente desde donde nos quedamos.'
+BOOK_IN_PROGRESS_MESSAGE
         );
         setRetryAction('preview');
       }
@@ -883,6 +962,8 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
 
   // Download the 6-page sample preview PDF for the currently selected Literary Style
   const handleDownloadPreviewSamplePdf = async () => {
+    pdfCancelRequestedRef.current = false;
+    startProgress('pdf');
     try {
       setStudioError(null);
       const resolvedCover = await ensureDataUrlForPdf(coverPhoto);
@@ -896,6 +977,8 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
         if (resPh) resolvedAllPhotos[k] = resPh;
       }
 
+      if (pdfCancelRequestedRef.current) return;
+      updateProgress({ stage: 'compose' });
       const previewComposed = composeBookPages({
         manuscript,
         editorialConfig,
@@ -908,6 +991,8 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
       });
 
       await preloadBookResourcesForPdf(previewComposed);
+      if (pdfCancelRequestedRef.current) return;
+      updateProgress({ stage: 'pdf' });
 
       const styleSuffix =
         narrativeStyle === 'first_person_simple'
@@ -936,12 +1021,22 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
       const a = document.createElement('a');
       a.href = pdfResult.blobUrl;
       a.download = pdfResult.filename.replace(/\.pdf$/i, `_Muestra_${styleSuffix}.pdf`);
+      if (pdfCancelRequestedRef.current) {
+        URL.revokeObjectURL(pdfResult.blobUrl);
+        return;
+      }
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       setTimeout(() => URL.revokeObjectURL(pdfResult.blobUrl), 10000);
+      updateProgress({
+        status: 'done',
+        doneTitle: '¡Tu PDF de muestra está listo!',
+        doneMessage: 'La descarga de tu muestra editorial ya comenzó.',
+      });
     } catch (err: any) {
-      setStudioError(err?.message || 'Error al descargar el PDF de muestra.');
+      console.warn('[ParticipantBookStudio] PDF de muestra no disponible:', err);
+      pauseProgress();
     }
   };
 
@@ -949,9 +1044,20 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
   const handleDownloadBookVersionPdf = async (
     version: ParticipantBookVersionRecord,
     preComposedBook?: ReturnType<typeof composeBookPages>
-  ) => {
+  ): Promise<boolean> => {
+    // V5.3.5: inside the save flow the alert is already open (step «Creando el PDF»).
+    const standalone = !preComposedBook;
+    if (standalone) {
+      pdfCancelRequestedRef.current = false;
+      startProgress('pdf');
+    }
     try {
       let composedForVersion = preComposedBook;
+      if (!composedForVersion && !version.manuscript && onRequestFullBookVersion) {
+        const loaded = await onRequestFullBookVersion(version.id);
+        if (!loaded) throw new Error(BOOK_IN_PROGRESS_MESSAGE);
+        version = loaded;
+      }
       if (!composedForVersion) {
         const resolvedCover = await ensureDataUrlForPdf(version.coverPhoto);
         const resolvedChapterPhotos: Record<string, DemoInMemoryPhoto | null> = {};
@@ -964,6 +1070,8 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
           if (resPh) resolvedAllPhotos[k] = resPh;
         }
 
+        if (pdfCancelRequestedRef.current) return false;
+        updateProgress({ stage: 'compose' });
         composedForVersion = composeBookPages({
           manuscript: version.manuscript,
           editorialConfig: version.editorialConfig,
@@ -978,6 +1086,8 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
       }
 
       await preloadBookResourcesForPdf(composedForVersion);
+      if (pdfCancelRequestedRef.current) return false;
+      if (standalone) updateProgress({ stage: 'pdf' });
 
       const pdfResult = generateRealDemoBookPdf({
         composed: composedForVersion,
@@ -995,12 +1105,26 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
       const a = document.createElement('a');
       a.href = pdfResult.blobUrl;
       a.download = version.fileName || pdfResult.filename;
+      if (pdfCancelRequestedRef.current) {
+        URL.revokeObjectURL(pdfResult.blobUrl);
+        return false;
+      }
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       setTimeout(() => URL.revokeObjectURL(pdfResult.blobUrl), 10000);
+      if (standalone) {
+        updateProgress({
+          status: 'done',
+          doneTitle: '¡Tu PDF está listo!',
+          doneMessage: 'La descarga de tu libro ya comenzó.',
+        });
+      }
+      return true;
     } catch (err: any) {
-      setStudioError(err?.message || 'Error al generar la descarga del PDF.');
+      console.warn('[ParticipantBookStudio] PDF no disponible:', err);
+      if (standalone) pauseProgress();
+      return false;
     }
   };
 
@@ -1052,6 +1176,8 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
     setIsSavingBook(true);
     setStudioError(null);
     setStudioSuccessMsg(null);
+    pdfCancelRequestedRef.current = false;
+    startProgress('full');
 
     const activeStyle: DemoNarrativeStyleId =
       narrativeStyle || editorialConfig.narrativeStyle || 'first_person_literary';
@@ -1104,7 +1230,7 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
         } catch (_fetchErr: any) {
           setRetryAction('save');
           throw new Error(
-            'No pudimos conectar para preparar tu libro completo. No se guardó ninguna versión incompleta. Por favor intenta de nuevo.'
+BOOK_IN_PROGRESS_MESSAGE
           );
         }
 
@@ -1112,8 +1238,7 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
         if (!startRes.ok || !startData.success || !startData.data) {
           setRetryAction('save');
           throw new Error(
-            startData.error ||
-              'No fue posible finalizar tu libro completo en este momento. No se guardó ninguna versión incompleta ni afectó tus libros disponibles.'
+            startData.error || BOOK_IN_PROGRESS_MESSAGE
           );
         }
 
@@ -1121,14 +1246,15 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
         activeJobIdRef.current = null;
         setGenerationJobProgress(null);
 
-        if (payload?.cancelled) {
+        if (payload?.cancelled || pdfCancelRequestedRef.current) {
+          setProgressOverlay(null);
           return;
         }
 
         if (!payload || !payload.manuscript) {
           setRetryAction('save');
           throw new Error(
-            'No fue posible finalizar tu libro completo en este momento. No se guardó ninguna versión incompleta ni afectó tus libros disponibles.'
+BOOK_IN_PROGRESS_MESSAGE
           );
         }
 
@@ -1157,8 +1283,7 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
           setHasAiDraftLoadedForSession(true);
           setRetryAction('full');
           throw new Error(
-            candidateManu.incompleteDraftNotice ||
-              'Este libro aún es un borrador preliminar y necesita una nueva revisión para reunir todos tus recuerdos antes de guardarlo como versión definitiva.'
+BOOK_IN_PROGRESS_MESSAGE
           );
         }
         if (
@@ -1170,21 +1295,27 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
         ) {
           setRetryAction('save');
           throw new Error(
-            'No pudimos completar la revisión de todos tus recuerdos en este intento. No se guardó una versión incompleta.'
+BOOK_IN_PROGRESS_MESSAGE
           );
         }
 
-        fullManuscriptToSave = {
-          ...candidateManu,
-          title: manuscript.title || candidateManu.title,
-          subtitle: manuscript.subtitle || candidateManu.subtitle,
-          introduction: manuscript.introduction || candidateManu.introduction,
+        // V5.2: the approved narrative (introduction, chapters, chapter titles, closing message
+        // and photo placements) is kept EXACTLY as the server approved and signed it. Only
+        // editorial fields outside the audited content are carried over from the studio, so
+        // the approval evidence still matches and saving does not trigger a re-audit.
+        fullManuscriptToSave = mergeEditorialFieldsIntoApprovedManuscript({
+          approved: candidateManu,
+          studio: manuscript,
           narrativeStyle: activeStyle,
-          aiGenerated: candidateManu.aiGenerated ?? true,
-          generationStatus: candidateManu.generationStatus,
-          useOfficialForeverYouLogo: true,
-        };
+        });
       }
+
+      // V5.3.5: from here on the book is being saved; «Cancelar» waits until the PDF step.
+      if (pdfCancelRequestedRef.current) {
+        setProgressOverlay(null);
+        return;
+      }
+      updateProgress({ stage: 'save', cancellable: false });
 
       // 2. Compose the complete book directly from the canonical manuscript (Pages 1..5 are 100% identical to preview)
       const fullComposedBook = composeBookPages({
@@ -1226,16 +1357,21 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
         throw new Error(data.error || 'No se pudo guardar la versión del libro.');
       }
 
+      // V5.2: the version the SERVER persisted is the canonical one (its manuscript carries the
+      // server's approval evidence and any normalization applied by the audit). It replaces the
+      // local copy everywhere: React state, version history, browser caches, preview and export.
+      const serverVersion = data.data.bookVersion as ParticipantBookVersionRecord;
       const savedVersion: ParticipantBookVersionRecord = {
-        ...(data.data.bookVersion as ParticipantBookVersionRecord),
-        editorialConfig: currentEditorialConfig,
-        narrativeStyle: activeStyle,
-        manuscript: fullManuscriptToSave,
+        ...serverVersion,
+        editorialConfig: serverVersion.editorialConfig || currentEditorialConfig,
+        narrativeStyle: serverVersion.narrativeStyle || activeStyle,
+        manuscript: serverVersion.manuscript || fullManuscriptToSave,
       };
       const updatedInterview = data.data.interview as InterviewRecord;
       const allVersions = (data.data.allVersions as ParticipantBookVersionRecord[]).map((v) =>
         v.id === savedVersion.id ? savedVersion : v
       );
+      setManuscript(savedVersion.manuscript);
 
       // Sync lightweight book version refs to browser localStorage cache so Admin Panel & future sessions preserve versions without bloating storage/payloads
       try {
@@ -1308,17 +1444,53 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
         `¡Tu libro completo en PDF (Versión ${savedVersion.versionNumber}) ha sido generado y guardado en tu Portal del Participante!`
       );
 
-      // Automatically trigger PDF download using the exact fullComposedBook
-      await handleDownloadBookVersionPdf(savedVersion, fullComposedBook);
+      // Automatically trigger PDF download composed from the CANONICAL saved manuscript (V5.2),
+      // so the exported book is exactly the version stored on the server.
+      const canonicalComposedBook =
+        savedVersion.manuscript === fullManuscriptToSave
+          ? fullComposedBook
+          : composeBookPages({
+              manuscript: savedVersion.manuscript,
+              editorialConfig: savedVersion.editorialConfig || currentEditorialConfig,
+              coverPhoto: resolvedCover,
+              chapterPhotos: resolvedChapters,
+              allPhotosById: resolvedAllPhotos,
+              customClosingPageText: closingDedicationText,
+              maxContentPages: 500,
+              previewSampleOnly: false,
+            });
+      updateProgress({ stage: 'pdf', cancellable: true });
+      const pdfDelivered = await handleDownloadBookVersionPdf(savedVersion, canonicalComposedBook);
+      updateProgress({
+        status: 'done',
+        doneTitle: '¡Tu libro está listo!',
+        doneMessage: pdfDelivered
+          ? `Tu libro completo (Versión ${savedVersion.versionNumber}) se guardó en tu Portal del Participante y la descarga del PDF ya comenzó.`
+          : `Tu libro completo (Versión ${savedVersion.versionNumber}) se guardó en tu Portal del Participante. Puedes descargar el PDF desde tu lista de versiones.`,
+      });
       scrollAndFocusActionArea('viewer');
     } catch (err: any) {
       const rawMsg = String(err?.message || '');
       const cleanMsg = /aborted/i.test(rawMsg)
-        ? 'La generación tardó más de lo esperado. Por favor haz clic nuevamente en «Generar y Descargar Libro Completo en PDF».'
-        : rawMsg || 'Error al guardar la versión del libro.';
+        ? BOOK_IN_PROGRESS_MESSAGE
+        : rawMsg || BOOK_IN_PROGRESS_MESSAGE;
       setStudioError(cleanMsg);
+      setRetryAction((prev) => prev || 'save');
+      pauseProgress();
     } finally {
       setIsSavingBook(false);
+    }
+  };
+
+  // V5.3.5: «Continuar preparando» (inline notice or floating alert) resumes the right process.
+  const handleContinuePreparing = () => {
+    setStudioError(null);
+    if (retryAction === 'full' || retryAction === 'save') {
+      void handleSaveAndGenerateBookVersion();
+    } else if (narrativeStyle) {
+      void handleSelectNarrativeStyle(narrativeStyle, true);
+    } else {
+      setProgressOverlay(null);
     }
   };
 
@@ -1425,25 +1597,28 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
       </div>
 
       {studioError && (
-        <div className="bg-red-50 border border-red-200 text-red-800 rounded-2xl p-4 text-sm flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div
+          data-testid={retryAction ? 'book-in-progress-notice' : 'studio-error'}
+          className={`${
+            retryAction ? 'bg-amber-50 border-amber-200 text-amber-950' : 'bg-red-50 border-red-200 text-red-800'
+          } border rounded-2xl p-4 text-sm flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3`}
+        >
           <div className="flex items-start gap-3">
-            <ShieldAlert className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
+            {retryAction ? (
+              <Loader2 className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
+            ) : (
+              <ShieldAlert className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
+            )}
             <div>{studioError}</div>
           </div>
           {retryAction && (
             <button
               type="button"
-              onClick={() => {
-                if (retryAction === 'full') {
-                  void handleSaveAndGenerateBookVersion();
-                } else if (narrativeStyle) {
-                  void handleSelectNarrativeStyle(narrativeStyle);
-                }
-              }}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-red-700 hover:bg-red-800 text-white text-xs font-semibold shrink-0 cursor-pointer"
+              onClick={handleContinuePreparing}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-amber-800 hover:bg-amber-900 text-white text-xs font-semibold shrink-0 cursor-pointer"
             >
               <RefreshCw className="w-3.5 h-3.5" />
-              <span>Reintentar operación</span>
+              <span>Continuar preparando</span>
             </button>
           )}
         </div>
@@ -1457,85 +1632,28 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
         </div>
       )}
 
-      {(isGeneratingAI || isSavingBook) && generationJobProgress && (
-        <div
-          data-testid="book-generation-step-progress"
-          className="bg-amber-50/90 border border-amber-200 text-amber-950 rounded-2xl p-4 sm:p-5 text-sm space-y-3 shadow-xs"
-        >
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-            <div className="flex items-start gap-3">
-              <Loader2 className="w-5 h-5 text-amber-700 animate-spin shrink-0 mt-0.5" />
-              <div className="space-y-1">
-                <div className="text-xs font-bold uppercase tracking-wide text-amber-900">
-                  Preparando tu libro paso a paso
-                </div>
-                <p className="text-xs sm:text-sm text-amber-900 font-medium">
-                  {generationJobProgress.userMessage}
-                </p>
-                {generationJobProgress.totalBatches > 0 && (
-                  <p className="text-[11px] text-amber-800">
-                    Avance de capítulos: parte{' '}
-                    {Math.min(
-                      generationJobProgress.completedBatches + 1,
-                      generationJobProgress.totalBatches
-                    )}{' '}
-                    de {generationJobProgress.totalBatches}
-                    {generationJobProgress.repairPass > 0
-                      ? ` • Revisando detalles (ronda ${generationJobProgress.repairPass})`
-                      : ''}
-                  </p>
-                )}
-              </div>
-            </div>
-            {generationJobProgress.jobId && generationJobProgress.jobId !== 'starting' && (
-              <button
-                type="button"
-                onClick={() => void handleCancelActiveGeneration()}
-                className="px-3 py-1.5 rounded-xl border border-amber-300 bg-white hover:bg-amber-100 text-amber-900 text-xs font-semibold shrink-0 cursor-pointer"
-              >
-                Pausar por ahora
-              </button>
-            )}
-          </div>
-          {generationJobProgress.totalBatches > 0 && (
-            <div className="w-full h-2 rounded-full bg-amber-200/70 overflow-hidden">
-              <div
-                className="h-full bg-amber-700 transition-all duration-500 rounded-full"
-                style={{
-                  width: `${Math.min(
-                    100,
-                    Math.max(
-                      8,
-                      Math.round(
-                        (generationJobProgress.completedBatches /
-                          generationJobProgress.totalBatches) *
-                          100
-                      )
-                    )
-                  )}%`,
-                }}
-              />
-            </div>
-          )}
-        </div>
-      )}
+      {/* V5.3.5: progress of every book creation step is shown in the floating alert. */}
+      <BookProgressOverlay
+        state={progressOverlay}
+        job={generationJobProgress}
+        onCancel={handleCancelProgressOverlay}
+        onAccept={() => setProgressOverlay(null)}
+        onContinue={handleContinuePreparing}
+      />
 
       {(manuscript.generationStatus === 'incomplete_draft' ||
         manuscript.status === 'incomplete_draft') && (
         <div
           data-testid="incomplete-draft-banner"
-          className="bg-amber-50 border-2 border-amber-300 text-amber-950 rounded-2xl p-4 sm:p-5 text-sm flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 shadow-xs"
+          className="bg-amber-50 border border-amber-200 text-amber-950 rounded-2xl p-4 sm:p-5 text-sm flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 shadow-xs"
         >
           <div className="flex items-start gap-3">
-            <ShieldAlert className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
+            <Loader2 className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
             <div className="space-y-1">
               <div className="text-xs font-extrabold tracking-wide uppercase text-amber-900">
-                BORRADOR INCOMPLETO — PENDIENTE DE REVISIÓN
+                TU LIBRO SIGUE EN PREPARACIÓN
               </div>
-              <p className="text-xs text-amber-900 leading-relaxed">
-                {manuscript.incompleteDraftNotice ||
-                  'Puedes leer este borrador preliminar aquí, pero todavía necesita una nueva revisión para incluir todos tus recuerdos con fidelidad y fluidez antes de guardarlo como libro definitivo.'}
-              </p>
+              <p className="text-xs text-amber-900 leading-relaxed">{BOOK_IN_PROGRESS_MESSAGE}</p>
             </div>
           </div>
           {narrativeStyle && (
@@ -1547,7 +1665,7 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
               className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-amber-800 hover:bg-amber-900 disabled:opacity-50 text-white text-xs font-semibold shrink-0 cursor-pointer"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isGeneratingAI ? 'animate-spin' : ''}`} />
-              <span>Intentar de nuevo</span>
+              <span>Continuar preparando</span>
             </button>
           )}
         </div>
@@ -1622,7 +1740,7 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
                         Paso 1: Elige el Estilo Literario de tu Obra
                       </h3>
                       <p className="text-xs text-stone-500">
-                        Haz clic en un estilo literario para generar las primeras 5 páginas de muestra. Para continuar a las siguientes secciones, primero debes elegir una opción.
+                        Haz clic en un estilo literario para generar las primeras 5 páginas de muestra. La muestra sirve para conocer el estilo: el libro completo se redactará después de forma independiente. Para continuar a las siguientes secciones, primero debes elegir una opción.
                       </p>
                     </div>
                     {isGeneratingAI && (
@@ -2230,6 +2348,9 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
                       isEditingLayout ? ' de muestra' : ' totales'
                     }`}
               </h4>
+              <p className="text-[11px] text-amber-100/90 leading-relaxed" data-testid="viewer-ai-review-notice">
+                {AI_DOCUMENT_REVIEW_NOTICE}
+              </p>
               <div className="flex flex-wrap items-center gap-2 text-[11px] text-stone-300">
                 <span className="px-2 py-0.5 rounded bg-white/10">
                   Diseño interior: <strong>{composedBook.interiorStyle.name}</strong>
@@ -2293,6 +2414,14 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
               <p className="text-sm font-serif font-semibold text-white max-w-xs mx-auto">
                 Selecciona un Estilo Literario a la izquierda para generar tu primer borrador editorial de 6 páginas.
               </p>
+            </div>
+          ) : !isEditingLayout && activeSavedVersionNeedsContent ? (
+            <div
+              data-testid="viewer-loading-saved-version"
+              className="py-16 px-6 rounded-2xl border border-amber-400/30 bg-amber-500/10 text-center space-y-3 my-4"
+            >
+              <Loader2 className="w-6 h-6 animate-spin text-amber-300 mx-auto" />
+              <p className="text-sm font-serif font-semibold text-white">Abriendo esta versión de tu libro...</p>
             </div>
           ) : isEditingLayout && (isGeneratingAI || !hasAiDraftLoadedForSession) ? (
             <div
@@ -2558,8 +2687,11 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
                 </strong>{' '}
                 disponible(s).
               </p>
-              <p className="text-xs text-stone-600">
-                Se conservarán intactas las primeras 5 páginas de tu vista previa y se integrarán todos tus capítulos, respuestas de profundización, diseño interior («{composedBook.interiorStyle.name}») y formato físico («{composedBook.format.name}»).
+              <p className="text-xs text-stone-600" data-testid="save-modal-independent-generation-text">
+                La vista previa es solo una muestra del estilo elegido: el libro completo se redacta de nuevo, de forma independiente, a partir de todas tus respuestas, por lo que sus primeras páginas pueden no coincidir exactamente con la muestra. Se integrarán todos tus capítulos, respuestas de profundización, diseño interior («{composedBook.interiorStyle.name}») y formato físico («{composedBook.format.name}»).
+              </p>
+              <p className="text-xs text-stone-700 font-medium" data-testid="save-modal-ai-review-notice">
+                {AI_DOCUMENT_REVIEW_NOTICE}
               </p>
             </div>
 

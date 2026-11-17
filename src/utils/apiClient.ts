@@ -5,6 +5,8 @@
  * and provides retry logic for transient NetworkErrors.
  */
 
+import { attachAdminAuthHeaders } from '../firebase/adminSession.ts';
+
 export interface ApiResponse<T = any> {
   ok: boolean;
   status: number;
@@ -26,7 +28,8 @@ export async function apiFetch<T = any>(
   let attempt = 0;
   while (true) {
     try {
-      const res = await fetch(url, fetchInit);
+      const authedInit = await attachAdminAuthHeaders(url, fetchInit);
+      const res = await fetch(url, authedInit);
       const contentType = res.headers.get('content-type') || '';
 
       let payload: any = null;
