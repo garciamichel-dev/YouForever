@@ -106,6 +106,8 @@ import {
   executeCustomAvatarTurnWithFallback,
   generateAvatarShortText,
   testLiveProviderConnection,
+  buildMiEsenciaGeminiModelChain,
+  MI_ESENCIA_DEFAULT_GEMINI_MODEL,
 } from './miEsenciaAiOrchestrator.ts';
 
 const serverDb = getServerFirestore();
@@ -340,7 +342,7 @@ class MiEsenciaStore {
       const file = this.getDiskPath();
       if (!fs.existsSync(file)) return;
       const raw = JSON.parse(fs.readFileSync(file, 'utf-8'));
-      if (raw.config) this.config = { ...DEFAULT_MI_ESENCIA_CONFIG, ...raw.config };
+      if (raw.config) this.config = this.migrateConfigDefaults({ ...DEFAULT_MI_ESENCIA_CONFIG, ...raw.config });
       if (raw.deletedRegistry) {
         if (Array.isArray(raw.deletedRegistry.persons)) {
           raw.deletedRegistry.persons.forEach((id: string) => this.deletedRegistry.persons.add(id));
@@ -905,7 +907,7 @@ class MiEsenciaStore {
     if (!person.aiConfig) {
       person.aiConfig = buildDefaultAvatarAiConfig({
         mode: 'modo_existente',
-        defaultGeminiModel: this.config.defaultGeminiModel || 'gemini-3-flash-preview',
+        defaultGeminiModel: this.config.defaultGeminiModel || MI_ESENCIA_DEFAULT_GEMINI_MODEL,
         defaultOpenAiModel: this.config.defaultOpenAiModel || 'gpt-6',
       });
       changed = true;
@@ -1118,7 +1120,7 @@ class MiEsenciaStore {
         if (configSnap) {
           configSnap.forEach((d) => {
             if (d.id === 'global') {
-              this.config = { ...DEFAULT_MI_ESENCIA_CONFIG, ...(d.data() as any) };
+              this.config = this.migrateConfigDefaults({ ...DEFAULT_MI_ESENCIA_CONFIG, ...(d.data() as any) });
             } else if (d.id === 'deleted_registry') {
               const reg = d.data() as any;
               if (Array.isArray(reg?.persons)) {
@@ -1334,6 +1336,23 @@ class MiEsenciaStore {
 
   public getConfig(): MiEsenciaGlobalConfig {
     return { ...this.config };
+  }
+
+  /**
+   * V5.5.1: the default Gemini model becomes gemini-3.8-flash. A saved configuration that still
+   * holds the previous default (gemini-3-flash-preview, or none) is moved once; the marker keeps
+   * an explicit later choice of the administrator from being changed again.
+   */
+  private migrateConfigDefaults(config: MiEsenciaGlobalConfig): MiEsenciaGlobalConfig {
+    const marked = config as MiEsenciaGlobalConfig & { geminiDefaultModelV551Applied?: boolean };
+    if (marked.geminiDefaultModelV551Applied) return config;
+    const current = String(config.defaultGeminiModel || '').trim();
+    return {
+      ...config,
+      defaultGeminiModel:
+        !current || current === 'gemini-3-flash-preview' ? MI_ESENCIA_DEFAULT_GEMINI_MODEL : current,
+      geminiDefaultModelV551Applied: true,
+    } as MiEsenciaGlobalConfig;
   }
 
   public async updateConfig(
@@ -1784,7 +1803,7 @@ class MiEsenciaStore {
           defaultGeminiModel:
             params.initialGeminiModel ||
             this.config.defaultGeminiModel ||
-            'gemini-3-flash-preview',
+            MI_ESENCIA_DEFAULT_GEMINI_MODEL,
           defaultOpenAiModel:
             params.initialOpenAiModel || this.config.defaultOpenAiModel || 'gpt-6',
           primaryProvider: params.initialPrimaryProvider || 'gemini',
@@ -4237,12 +4256,24 @@ Mensaje del interlocutor: "${userMessage}"
 ${photoContextNote ? `\n${photoContextNote}\n` : ''}
 Respuesta directa en primera persona singular:`;
 
-        const response = await ai.models.generateContent({
-          model: 'gemini-3-flash-preview',
-          contents: prompt,
-        });
+        // V5.5.1: the avatar's model (gemini-3.8-flash by default) first; if it fails for this
+        // message, the backups answer transparently. The next message starts again from the first.
+        let response: { text?: string } | null = null;
+        for (const candidateModel of buildMiEsenciaGeminiModelChain(person.aiConfig?.geminiModel)) {
+          try {
+            const r = await ai.models.generateContent({ model: candidateModel, contents: prompt });
+            if (r.text && r.text.trim()) {
+              response = r;
+              break;
+            }
+          } catch (modelErr: any) {
+            if (/\b401\b|\b403\b|API_KEY_INVALID|PERMISSION_DENIED/i.test(String(modelErr?.message || ''))) {
+              throw modelErr;
+            }
+          }
+        }
 
-        if (response.text) {
+        if (response?.text) {
           return sanitizeAvatarResponseText(response.text, person.preferredName);
         }
       } catch (err) {
@@ -4922,7 +4953,7 @@ Respuesta directa en primera persona singular:`;
       person.aiConfig ||
       buildDefaultAvatarAiConfig({
         mode: 'modo_existente',
-        defaultGeminiModel: this.config.defaultGeminiModel || 'gemini-3-flash-preview',
+        defaultGeminiModel: this.config.defaultGeminiModel || MI_ESENCIA_DEFAULT_GEMINI_MODEL,
         defaultOpenAiModel: this.config.defaultOpenAiModel || 'gpt-6',
       });
 
@@ -4997,7 +5028,7 @@ Respuesta directa en primera persona singular:`;
         typeof params.enableAutomaticFallback === 'boolean'
           ? params.enableAutomaticFallback
           : currentAi.enableAutomaticFallback ?? true,
-      geminiModel: params.geminiModel || currentAi.geminiModel || 'gemini-3-flash-preview',
+      geminiModel: params.geminiModel || currentAi.geminiModel || MI_ESENCIA_DEFAULT_GEMINI_MODEL,
       geminiPromptName: nextGemName,
       geminiPromptContent: nextGemContent,
       geminiPromptVersion: nextGemVersion,
@@ -5045,7 +5076,7 @@ Respuesta directa en primera persona singular:`;
       person.aiConfig ||
       buildDefaultAvatarAiConfig({
         mode: 'modo_existente',
-        defaultGeminiModel: this.config.defaultGeminiModel || 'gemini-3-flash-preview',
+        defaultGeminiModel: this.config.defaultGeminiModel || MI_ESENCIA_DEFAULT_GEMINI_MODEL,
         defaultOpenAiModel: this.config.defaultOpenAiModel || 'gpt-4o',
       });
 
@@ -5245,7 +5276,7 @@ Respuesta directa en primera persona singular:`;
       person.aiConfig ||
       buildDefaultAvatarAiConfig({
         mode: 'modo_existente',
-        defaultGeminiModel: this.config.defaultGeminiModel || 'gemini-3-flash-preview',
+        defaultGeminiModel: this.config.defaultGeminiModel || MI_ESENCIA_DEFAULT_GEMINI_MODEL,
         defaultOpenAiModel: this.config.defaultOpenAiModel || 'gpt-4o',
       });
 
@@ -5456,7 +5487,7 @@ Respuesta directa en primera persona singular:`;
       person.aiConfig ||
       buildDefaultAvatarAiConfig({
         mode: 'modo_existente',
-        defaultGeminiModel: this.config.defaultGeminiModel || 'gemini-3-flash-preview',
+        defaultGeminiModel: this.config.defaultGeminiModel || MI_ESENCIA_DEFAULT_GEMINI_MODEL,
         defaultOpenAiModel: this.config.defaultOpenAiModel || 'gpt-4o',
       });
 
@@ -5642,7 +5673,7 @@ Respuesta directa en primera persona singular:`;
       person.aiConfig ||
       buildDefaultAvatarAiConfig({
         mode: 'modo_personalizado',
-        defaultGeminiModel: this.config.defaultGeminiModel || 'gemini-3-flash-preview',
+        defaultGeminiModel: this.config.defaultGeminiModel || MI_ESENCIA_DEFAULT_GEMINI_MODEL,
         defaultOpenAiModel: this.config.defaultOpenAiModel || 'gpt-6',
       });
 
@@ -5804,7 +5835,7 @@ Respuesta directa en primera persona singular:`;
     }
 
     if (raw.config) {
-      this.config = { ...DEFAULT_MI_ESENCIA_CONFIG, ...raw.config };
+      this.config = this.migrateConfigDefaults({ ...DEFAULT_MI_ESENCIA_CONFIG, ...raw.config });
     }
     if (raw.deletedRegistry) {
       if (Array.isArray(raw.deletedRegistry.persons)) {

@@ -38,19 +38,20 @@ export interface MiEsenciaModelOption {
 
 export const AVAILABLE_GEMINI_MODELS: MiEsenciaModelOption[] = [
   {
-    id: 'gemini-3-flash-preview',
+    id: 'gemini-3.8-flash',
     provider: 'gemini',
-    label: 'Gemini 3 Flash Preview (Predeterminado actual)',
-    description: 'Alta velocidad, baja latencia y amplio contexto documental para conversación biográfica.',
+    label: 'Gemini 3.8 Flash (Predeterminado)',
+    description:
+      'Modelo Flash más reciente. Si falla en un mensaje, responde un modelo de respaldo sin que el visitante lo note; el siguiente mensaje vuelve a intentar con 3.8 Flash.',
     contextWindowTokens: 1_000_000,
     supportsFullDocumentContext: true,
     recommended: true,
   },
   {
-    id: 'gemini-3.8-flash',
+    id: 'gemini-3-flash-preview',
     provider: 'gemini',
-    label: 'Gemini 3.8 Flash',
-    description: 'Modelo rápido multimodal de última generación con excelente seguimiento de instrucciones.',
+    label: 'Gemini 3 Flash Preview (Respaldo automático)',
+    description: 'Alta velocidad, baja latencia y amplio contexto documental para conversación biográfica.',
     contextWindowTokens: 1_000_000,
     supportsFullDocumentContext: true,
   },
@@ -433,7 +434,7 @@ export function buildDefaultAvatarAiConfig(params?: {
     conversationConfigMode: params?.mode || 'modo_existente',
     primaryProvider: params?.primaryProvider || 'gemini',
     enableAutomaticFallback: true,
-    geminiModel: params?.defaultGeminiModel || 'gemini-3-flash-preview',
+    geminiModel: params?.defaultGeminiModel || 'gemini-3.8-flash',
     geminiPromptName: params?.geminiPromptName || 'Prompt Gemini del Avatar',
     geminiPromptContent: geminiContent,
     geminiPromptVersion: geminiContent ? 1 : 0,

@@ -4112,7 +4112,7 @@ export const MiEsenciaAdminSection: React.FC<MiEsenciaAdminSectionProps> = ({ ad
                     Modelo Gemini por Defecto Global
                   </label>
                   <select
-                    value={overview.config.defaultGeminiModel || 'gemini-3-flash-preview'}
+                    value={overview.config.defaultGeminiModel || 'gemini-3.8-flash'}
                     onChange={async (e) => {
                       const nextModel = e.target.value;
                       await fetch('/api/mi-esencia/admin/config', {
@@ -4142,7 +4142,7 @@ export const MiEsenciaAdminSection: React.FC<MiEsenciaAdminSectionProps> = ({ ad
                     onClick={() =>
                       handleTestGlobalApiConnection(
                         'gemini',
-                        overview.config.defaultGeminiModel || 'gemini-3-flash-preview'
+                        overview.config.defaultGeminiModel || 'gemini-3.8-flash'
                       )
                     }
                     disabled={testingGlobalProvider === 'gemini'}

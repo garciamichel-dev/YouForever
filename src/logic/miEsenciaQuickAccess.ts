@@ -10,9 +10,9 @@ import type { MiEsenciaSpontaneityLevel } from './miEsenciaRules.ts';
 import { CANONICAL_PUBLIC_ORIGIN } from './freeRegistration.ts';
 
 export const MI_ESENCIA_QUICK_ACCESS_DEFAULTS = {
-  /** IA: Gemini (gemini-3.1-flash-lite). */
+  /** IA: Gemini (gemini-3.8-flash); if it fails for a message, a backup model answers transparently. */
   primaryProvider: 'gemini' as const,
-  geminiModel: 'gemini-3.1-flash-lite',
+  geminiModel: 'gemini-3.8-flash',
   /** Active prompt, looked up by name in the prompt library. */
   libraryPromptName: 'GPT V6',
   /** Initial commercial plan: monthly (1 month; the administrator renews it). */

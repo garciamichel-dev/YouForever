@@ -146,7 +146,7 @@ test('V5.5.0-I1: sin avatar previo, crea uno con la configuración por defecto d
   const person = me.persons.get(sub.personIds[0]);
   assert.equal(person.spontaneityLevel, 'moderado', 'espontaneidad moderada');
   assert.equal(person.aiConfig.primaryProvider, 'gemini');
-  assert.equal(person.aiConfig.geminiModel, 'gemini-3.1-flash-lite');
+  assert.equal(person.aiConfig.geminiModel, 'gemini-3.8-flash');
   assert.equal(person.aiConfig.conversationConfigMode, 'modo_personalizado');
   assert.equal(person.aiConfig.geminiPromptName, 'GPT V6', 'prompt activo GPT V6');
   assert.equal(person.aiConfig.geminiPromptSourceLibraryId, 'lib_prompt_gpt_v6');

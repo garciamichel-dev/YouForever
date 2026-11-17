@@ -75,7 +75,7 @@ export const MiEsenciaAvatarAiConfigPanel: React.FC<MiEsenciaAvatarAiConfigPanel
     ai?.enableAutomaticFallback ?? true
   );
   const [geminiModel, setGeminiModel] = useState<string>(
-    ai?.geminiModel || 'gemini-3-flash-preview'
+    ai?.geminiModel || 'gemini-3.8-flash'
   );
   const [openaiModel, setOpenaiModel] = useState<string>(ai?.openaiModel || 'gpt-6');
   const [customOpenaiModelMode, setCustomOpenaiModelMode] = useState<boolean>(

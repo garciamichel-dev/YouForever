@@ -70,7 +70,7 @@ export const MiEsenciaSimulatorPanel: React.FC<MiEsenciaSimulatorPanelProps> = (
     initialProvider || 'gemini'
   );
   const [selectedModel, setSelectedModel] = useState<string>(
-    initialModel || (initialProvider === 'openai' ? 'gpt-6' : 'gemini-3-flash-preview')
+    initialModel || (initialProvider === 'openai' ? 'gpt-6' : 'gemini-3.8-flash')
   );
   const [customModelMode, setCustomModelMode] = useState<boolean>(false);
   const [draftPrompt, setDraftPrompt] = useState<string>(initialDraftPrompt || '');
@@ -113,7 +113,7 @@ export const MiEsenciaSimulatorPanel: React.FC<MiEsenciaSimulatorPanelProps> = (
       setCustomModelMode(!AVAILABLE_OPENAI_MODELS.some((m) => m.id === targetModel));
       setDraftPrompt(ai?.openaiPromptContent || '');
     } else {
-      const targetModel = ai?.geminiModel || 'gemini-3-flash-preview';
+      const targetModel = ai?.geminiModel || 'gemini-3.8-flash';
       setSelectedModel(targetModel);
       setCustomModelMode(!AVAILABLE_GEMINI_MODELS.some((m) => m.id === targetModel));
       setDraftPrompt(ai?.geminiPromptContent || '');
@@ -431,7 +431,7 @@ export const MiEsenciaSimulatorPanel: React.FC<MiEsenciaSimulatorPanelProps> = (
                 setSelectedProvider(nextProv);
                 setCustomModelMode(false);
                 setSelectedModel(
-                  nextProv === 'openai' ? 'gpt-6' : 'gemini-3-flash-preview'
+                  nextProv === 'openai' ? 'gpt-6' : 'gemini-3.8-flash'
                 );
               }}
               className="w-full px-3 py-2 rounded-xl border border-stone-300 bg-white font-semibold"

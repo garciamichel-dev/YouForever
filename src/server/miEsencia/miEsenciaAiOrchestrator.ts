@@ -138,52 +138,98 @@ function buildGeminiMultiTurnContents(
 }
 
 /**
+ * V5.5.1 — Default Gemini model of Mi Esencia and its automatic backups.
+ *
+ * Every message starts again from the avatar's configured model (by default `gemini-3.8-flash`).
+ * Only if that model fails for THAT message (timeout, outage, exhausted quota of that model, empty
+ * answer…) the next model of the chain answers, transparently for the visitor; the administrator
+ * gets the notice. Nothing is remembered between messages, so the next message checks again
+ * whether the original model already works.
+ */
+export const MI_ESENCIA_DEFAULT_GEMINI_MODEL = 'gemini-3.8-flash';
+export const MI_ESENCIA_GEMINI_BACKUP_MODELS = ['gemini-3-flash-preview', 'gemini-3.1-flash-lite-preview'];
+
+/** Legacy aliases kept for older avatars (never applied to gemini-3.8-flash any more). */
+export function normalizeMiEsenciaGeminiModel(requested: string | undefined): string {
+  const clean = String(requested || '').trim() || MI_ESENCIA_DEFAULT_GEMINI_MODEL;
+  if (clean === 'gemini-2.5-flash') return 'gemini-3-flash-preview';
+  if (clean === 'gemini-3.1-flash-lite') return 'gemini-3.1-flash-lite-preview';
+  return clean;
+}
+
+/** Models tried, in order, for ONE message: the configured one first, then the backups. */
+export function buildMiEsenciaGeminiModelChain(requested: string | undefined): string[] {
+  return Array.from(new Set([normalizeMiEsenciaGeminiModel(requested), ...MI_ESENCIA_GEMINI_BACKUP_MODELS]));
+}
+
+type GeminiGenerateFn = (request: {
+  model: string;
+  contents: unknown;
+  config: { systemInstruction: string };
+}) => Promise<{ text?: string; usageMetadata?: { totalTokenCount?: number } }>;
+
+let geminiGenerateOverrideForTests: GeminiGenerateFn | null = null;
+
+/** Tests only: replaces the real Gemini call (no network, no API key needed). */
+export function __setGeminiGenerateForTests(fn: GeminiGenerateFn | null): void {
+  geminiGenerateOverrideForTests = fn;
+}
+
+/**
  * Ejecuta una llamada al motor Google Gemini enviando el prompt del administrador
  * mediante el mecanismo oficial de instrucciones de sistema (systemInstruction) y el historial multi-turno completo.
+ * V5.5.1: recorre la cadena de modelos del mensaje (configurado → respaldos) y reporta cuál respondió.
  */
 async function callGeminiProvider(params: {
   model: string;
   systemInstructions: string;
   userContextAndMessage: string;
   structuredTurns?: MiEsenciaStructuredConversationTurn[];
-}): Promise<{ text: string; tokensEstimated: number; respondedModel: string }> {
-  if (!hasValidGeminiApiKey()) {
+}): Promise<{
+  text: string;
+  tokensEstimated: number;
+  respondedModel: string;
+  requestedModel: string;
+  /** Why the configured model did not answer this message (only when a backup answered). */
+  primaryFailureReason?: string;
+}> {
+  if (!geminiGenerateOverrideForTests && !hasValidGeminiApiKey()) {
     throw new Error(
       'GEMINI_API_KEY no está configurada en el entorno seguro del servidor (Settings > Secrets).'
     );
   }
 
-  const ai = new GoogleGenAI({
-    apiKey: process.env.GEMINI_API_KEY,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      },
-    },
-  });
+  const generate: GeminiGenerateFn =
+    geminiGenerateOverrideForTests ||
+    ((request) => {
+      const ai = new GoogleGenAI({
+        apiKey: process.env.GEMINI_API_KEY,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'aistudio-build',
+          },
+        },
+      });
+      return ai.models.generateContent(request as any) as any;
+    });
 
-  const rawRequestedModel = (params.model || 'gemini-3-flash-preview').trim();
-  const normalizedGeminiModel =
-    rawRequestedModel === 'gemini-3.8-flash' || rawRequestedModel === 'gemini-2.5-flash'
-      ? 'gemini-3-flash-preview'
-      : rawRequestedModel === 'gemini-3.1-flash-lite'
-      ? 'gemini-3.1-flash-lite-preview'
-      : rawRequestedModel;
   const multiTurnContents = buildGeminiMultiTurnContents(
     params.structuredTurns,
     params.userContextAndMessage
   );
 
-  const candidateModels = Array.from(
-    new Set([normalizedGeminiModel, 'gemini-3-flash-preview'])
-  ).slice(0, 2);
+  const candidateModels = buildMiEsenciaGeminiModelChain(params.model);
+  const requestedModel = candidateModels[0];
 
   let lastErr: unknown = null;
-  for (const candidateModel of candidateModels) {
+  let primaryFailureReason: string | undefined;
+  for (const [index, candidateModel] of candidateModels.entries()) {
     let timer: ReturnType<typeof setTimeout> | undefined;
+    // The configured model gets a bit more time (it may think longer); backups answer fast.
+    const timeoutMs = index === 0 ? 25_000 : 20_000;
     try {
       const response = await Promise.race([
-        ai.models.generateContent({
+        generate({
           model: candidateModel,
           contents: multiTurnContents,
           config: {
@@ -193,18 +239,18 @@ async function callGeminiProvider(params: {
         new Promise<never>((_resolve, reject) => {
           timer = setTimeout(
             () => reject(new Error(`Tiempo de espera agotado en Gemini (${candidateModel}).`)),
-            20000
+            timeoutMs
           );
         }),
       ]).finally(() => timer && clearTimeout(timer));
 
       const outputText = (response.text || '').trim();
       if (!outputText) {
-        throw new Error('El modelo Gemini devolvió una respuesta vacía.');
+        throw new Error(`El modelo Gemini ${candidateModel} devolvió una respuesta vacía.`);
       }
 
       const usageTotal =
-        (response as any)?.usageMetadata?.totalTokenCount ||
+        response?.usageMetadata?.totalTokenCount ||
         Math.ceil(
           (params.systemInstructions.length +
             params.userContextAndMessage.length +
@@ -216,12 +262,16 @@ async function callGeminiProvider(params: {
         text: outputText,
         tokensEstimated: usageTotal,
         respondedModel: candidateModel,
+        requestedModel,
+        ...(index > 0 ? { primaryFailureReason } : {}),
       };
     } catch (err: any) {
       lastErr = err;
-      const msg = String(err?.message || '');
-      // Si es error de autenticación o cuota, no ciclar modelos
-      if (/401|403|API_KEY_INVALID|PERMISSION_DENIED|RESOURCE_EXHAUSTED/i.test(msg)) {
+      const msg = String(err?.message || err || '');
+      if (index === 0) primaryFailureReason = isRecoverableProviderError(err).sanitizedReason;
+      // Invalid key or missing permissions affect every Gemini model: go straight to the other
+      // provider. An exhausted quota (429 / RESOURCE_EXHAUSTED) is per model, so the next model is tried.
+      if (/\b401\b|\b403\b|API_KEY_INVALID|PERMISSION_DENIED/i.test(msg)) {
         throw err;
       }
     }
@@ -473,7 +523,7 @@ export async function testLiveProviderConnection(params: {
   const provider = params.provider || 'openai';
   const requestedModel =
     (params.model || '').trim() ||
-    (provider === 'openai' ? 'gpt-6' : 'gemini-3-flash-preview');
+    (provider === 'openai' ? 'gpt-6' : MI_ESENCIA_DEFAULT_GEMINI_MODEL);
   const nowIso = new Date().toISOString();
 
   if (provider === 'openai') {
@@ -736,7 +786,7 @@ export async function executeCustomAvatarTurnWithFallback(params: {
       isPrimary && overrideModel
         ? overrideModel
         : prov === 'gemini'
-        ? aiConfig.geminiModel || 'gemini-3-flash-preview'
+        ? aiConfig.geminiModel || MI_ESENCIA_DEFAULT_GEMINI_MODEL
         : aiConfig.openaiModel || 'gpt-6';
 
     const promptTemplate =
@@ -817,6 +867,32 @@ export async function executeCustomAvatarTurnWithFallback(params: {
         structuredTurns: primaryOrchestration.structuredTurns,
       });
 
+      // V5.5.1: a backup Gemini model answered THIS message (the configured one failed). The
+      // visitor only sees the reply; the administrator gets the notice and the log entry. The
+      // next message starts again from the configured model.
+      const backupModelAnswered = Boolean(result.respondedModel && result.respondedModel !== result.requestedModel);
+      const backupNotice = backupModelAnswered
+        ? `AVISO AL ADMINISTRADOR: El modelo configurado ${result.requestedModel} no respondió este mensaje (${
+            result.primaryFailureReason || 'fallo temporal'
+          }). Respondió automáticamente ${result.respondedModel}; el siguiente mensaje vuelve a intentar con ${result.requestedModel}.`
+        : undefined;
+      const backupLog: MiEsenciaProviderFallbackLog | undefined = backupModelAnswered
+        ? {
+            logId: `fblog_${crypto.randomBytes(5).toString('hex')}`,
+            avatarId: person.avatarId,
+            personId: person.personId,
+            primaryProvider: 'gemini',
+            fallbackProviderUsed: 'gemini',
+            primaryModel: result.requestedModel,
+            fallbackModelUsed: result.respondedModel,
+            sanitizedReason: result.primaryFailureReason || 'Fallo temporal del modelo configurado.',
+            timestamp: new Date().toISOString(),
+            fallbackProvider: 'gemini',
+            fallbackModel: result.respondedModel,
+            reason: result.primaryFailureReason || 'Fallo temporal del modelo configurado.',
+          }
+        : undefined;
+
       return {
         replyText: result.text.trim(),
         providerUsed: 'gemini',
@@ -829,9 +905,11 @@ export async function executeCustomAvatarTurnWithFallback(params: {
         totalDocumentBlocksCount: primaryOrchestration.totalDocumentBlocksCount,
         durationMs: Date.now() - startTime,
         tokensEstimated: result.tokensEstimated,
-        fallbackTriggered: false,
+        fallbackTriggered: backupModelAnswered,
+        ...(backupLog ? { fallbackLog: backupLog } : {}),
         resolvedSystemPromptPreview: primaryOrchestration.resolvedAdminPrompt,
         sessionContextSummary: primaryOrchestration.sessionContextSummary,
+        ...(backupNotice ? { sanitizedErrorWarning: backupNotice, adminFallbackNotice: backupNotice } : {}),
       };
     } else {
       const result = await callOpenAiProvider({
@@ -1030,7 +1108,7 @@ export async function generateAvatarShortText(params: {
   const timeoutMs = params.timeoutMs ?? 12_000;
   for (const provider of order) {
     const model =
-      provider === 'gemini' ? ai?.geminiModel || 'gemini-3-flash-preview' : ai?.openaiModel || 'gpt-6';
+      provider === 'gemini' ? ai?.geminiModel || MI_ESENCIA_DEFAULT_GEMINI_MODEL : ai?.openaiModel || 'gpt-6';
     if (provider === 'gemini' ? !hasValidGeminiApiKey() : !hasValidOpenAiApiKey()) continue;
     try {
       const call =
