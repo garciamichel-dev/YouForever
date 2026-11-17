@@ -30,6 +30,7 @@ import { miEsenciaStore } from './miEsencia/miEsenciaStore.ts';
 import {
   getEmailConfigStatus,
   sendSelfRegisterParticipantEmail,
+  sendTransactionalEmail,
   type EmailSendResult,
 } from './emailService.ts';
 import { buildUserManualPdfBuffer } from './manualPdfBuilder.ts';
@@ -2119,6 +2120,100 @@ apiRouter.get('/privacy/policy', (req: Request, res: Response) => {
     res.json({ success: true, data: policy });
   } catch (err: unknown) {
     res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
+// ============================================================================
+// V5.5.0 — Interviewee quick access to «Mi Esencia» (after saving the final PDF of the book)
+// ============================================================================
+
+/** The participant (token) and whether their interview already has a saved final book. */
+function resolveMiEsenciaQuickAccessContext(token: unknown) {
+  const { interview, participant } = storage.resolveToken(String(token || ''));
+  const hasFinalBook =
+    Boolean(interview.userDeclaredComplete) && storage.getBookVersionsForInterview(interview.id).length > 0;
+  return { interview, participant, hasFinalBook };
+}
+
+apiRouter.post('/participant/mi-esencia/status', async (req: Request, res: Response) => {
+  try {
+    const { interview, hasFinalBook } = resolveMiEsenciaQuickAccessContext(req.body?.token);
+    await miEsenciaStore.ensureInitialized();
+    const enabled = miEsenciaStore.getConfig().miEsenciaEnabled;
+    const access = hasFinalBook ? miEsenciaStore.getParticipantQuickAccess(interview.id) : null;
+    res.json({
+      success: true,
+      data: {
+        eligible: hasFinalBook && enabled,
+        activated: Boolean(access),
+        access,
+        accessUrl: access?.privateLinkPath ? `${resolvePublicBaseUrl(req)}${access.privateLinkPath}` : null,
+      },
+    });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
+apiRouter.post('/participant/mi-esencia/activate', async (req: Request, res: Response) => {
+  try {
+    const { interview, participant, hasFinalBook } = resolveMiEsenciaQuickAccessContext(req.body?.token);
+    if (!hasFinalBook) {
+      res.status(403).json({
+        success: false,
+        error: 'Mi Esencia se habilita en cuanto guardes la versión final de tu libro en PDF.',
+      });
+      return;
+    }
+    await miEsenciaStore.ensureInitialized();
+    const access = await miEsenciaStore.activateParticipantQuickAccess({
+      interviewId: interview.id,
+      participantId: participant.id,
+    });
+    res.json({
+      success: true,
+      data: {
+        access,
+        accessUrl: access.privateLinkPath ? `${resolvePublicBaseUrl(req)}${access.privateLinkPath}` : null,
+        suggestedEmail: participant.email || '',
+      },
+    });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
+apiRouter.post('/participant/mi-esencia/send-email', async (req: Request, res: Response) => {
+  try {
+    const { interview, participant, hasFinalBook } = resolveMiEsenciaQuickAccessContext(req.body?.token);
+    if (!hasFinalBook) {
+      res.status(403).json({ success: false, error: 'Primero guarda la versión final de tu libro en PDF.' });
+      return;
+    }
+    await miEsenciaStore.ensureInitialized();
+    const result = await miEsenciaStore.sendParticipantQuickAccessEmail({
+      interviewId: interview.id,
+      participantId: participant.id,
+      participantName: participant.name,
+      recipientEmail: String(req.body?.email || participant.email || ''),
+      publicBaseUrl: resolvePublicBaseUrl(req),
+      send: (content, to) => sendTransactionalEmail({ recipientEmail: to, ...content }),
+    });
+    if (!result.sent) {
+      // The technical detail stays in the server log; the participant gets a plain message.
+      console.warn(`[Mi Esencia] Correo de acceso rápido no enviado (${interview.id}): ${result.error}`);
+      res.status(400).json({
+        success: false,
+        error:
+          result.error && !/SMTP|Gmail|configur/i.test(result.error)
+            ? result.error
+            : 'No pudimos enviar el correo en este momento. Guarda tu enlace y tu código; puedes intentarlo más tarde.',
+      });
+      return;
+    }
+    res.json({ success: true, data: { recipientEmail: result.recipientEmail } });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
   }
 });
 

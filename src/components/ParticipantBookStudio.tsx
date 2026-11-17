@@ -57,6 +57,7 @@ import {
 import { generateRealDemoBookPdf, preloadBookResourcesForPdf } from '../utils/demoPdfGenerator.ts';
 import { ForeverYouLogo } from './ForeverYouLogo';
 import { BookProgressOverlay, type BookProgressState } from './BookProgressOverlay.tsx';
+import { MiEsenciaQuickAccessCard } from './MiEsenciaQuickAccessCard.tsx';
 
 /** V5.3.1: shown in the preview and before saving the final book. */
 /**
@@ -1595,6 +1596,15 @@ BOOK_IN_PROGRESS_MESSAGE
           </div>
         </div>
       </div>
+
+      {/* V5.5.0: once the final PDF is saved, direct access to «Mi Esencia». */}
+      {hasSavedVersions && !isEditingLayout && (
+        <MiEsenciaQuickAccessCard
+          token={token}
+          participantEmail={participant.email}
+          refreshKey={bookVersions.length}
+        />
+      )}
 
       {studioError && (
         <div

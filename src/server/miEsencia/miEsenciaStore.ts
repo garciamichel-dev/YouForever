@@ -18,6 +18,14 @@ import { GoogleGenAI } from '@google/genai';
 import { getServerFirestore, collection, doc } from '../firestoreAdmin.ts';
 import { storage } from '../storage.ts';
 import { decodeImageDataUrl, isArchivalPlaceholderPng } from '../photoIntegrity.ts';
+import {
+  MI_ESENCIA_QUICK_ACCESS_DEFAULTS,
+  buildMiEsenciaAccessEmail,
+  countRecentEmailDeliveries,
+  findLibraryPromptByName,
+  isValidQuickAccessEmail,
+  type MiEsenciaParticipantQuickAccess,
+} from '../../logic/miEsenciaQuickAccess.ts';
 import { firestoreTelemetry } from '../firestoreTelemetry.ts';
 import { generateQACompilationMarkdown } from '../backupService.ts';
 import {
@@ -1925,6 +1933,210 @@ class MiEsenciaStore {
       relations: createdRelations,
       credentials: createdCredentials,
     };
+  }
+
+  // ============================================================================
+  // V5.5.0 — INTERVIEWEE QUICK ACCESS (from the Book Studio, after the final PDF)
+  // ============================================================================
+
+  private quickAccessInFlight: Map<string, Promise<MiEsenciaParticipantQuickAccess>> = new Map();
+
+  private findSubscriptionForInterview(interviewId: string): MiEsenciaSubscriptionRecord | undefined {
+    return Array.from(this.subscriptions.values()).find((s) => s.sourceInterviewId === interviewId);
+  }
+
+  /** The avatar's general code (not linked to any relative); an active one is preferred. */
+  private findGeneralCredential(avatarId: string): MiEsenciaAccessCredential | undefined {
+    const general = Array.from(this.credentials.values()).filter(
+      (c) => c.avatarId === avatarId && this.interlocutors.get(c.interlocutorId)?.isGeneralAccess === true
+    );
+    return general.find((c) => c.status === 'activo') || general[0];
+  }
+
+  private describeQuickAccess(
+    sub: MiEsenciaSubscriptionRecord,
+    cred: MiEsenciaAccessCredential | undefined
+  ): MiEsenciaParticipantQuickAccess {
+    const verification = cred ? this.verifyPersonalAccessCode(cred.personalCodePlain) : null;
+    return {
+      avatarId: sub.avatarId,
+      avatarDisplayName: sub.avatarDisplayName,
+      personalCode: cred?.personalCodePlain || '',
+      privateLinkPath: cred?.privateLinkPath || '',
+      available: Boolean(verification?.valid),
+      unavailableReason: verification?.valid
+        ? undefined
+        : verification?.error || 'Tu acceso a Mi Esencia aún no tiene un código activo.',
+      subscriptionStatus: sub.status,
+      expiresAt: sub.expiresAt,
+      planName: sub.planName,
+      dailyMessageQuota: sub.dailyMessageQuotaPerInterlocutor,
+      createdAvatar: Boolean(sub.participantQuickAccess?.createdAvatar),
+      activatedAt: sub.participantQuickAccess?.activatedAt,
+    };
+  }
+
+  /** Access already opened by the interviewee for this interview (null if not opened yet). */
+  public getParticipantQuickAccess(interviewId: string): MiEsenciaParticipantQuickAccess | null {
+    const sub = this.findSubscriptionForInterview(interviewId);
+    if (!sub || !sub.participantQuickAccess) return null;
+    return this.describeQuickAccess(sub, this.findGeneralCredential(sub.avatarId));
+  }
+
+  /**
+   * Opens the interviewee's access to «Mi Esencia». Without an avatar for the interview, one is
+   * created with MI_ESENCIA_QUICK_ACCESS_DEFAULTS (Gemini gemini-3.1-flash-lite, prompt «GPT V6»,
+   * monthly plan, 30 messages a day, moderate spontaneity, general access). An avatar the
+   * administrator already created is reused WITHOUT changing its configuration; only a general
+   * code is added if it had none. Concurrent requests for the same interview share one creation.
+   */
+  public async activateParticipantQuickAccess(params: {
+    interviewId: string;
+    participantId: string;
+  }): Promise<MiEsenciaParticipantQuickAccess> {
+    const running = this.quickAccessInFlight.get(params.interviewId);
+    if (running) return running;
+    const job = this.doActivateParticipantQuickAccess(params).finally(() =>
+      this.quickAccessInFlight.delete(params.interviewId)
+    );
+    this.quickAccessInFlight.set(params.interviewId, job);
+    return job;
+  }
+
+  private async doActivateParticipantQuickAccess(params: {
+    interviewId: string;
+    participantId: string;
+  }): Promise<MiEsenciaParticipantQuickAccess> {
+    if (!this.config.miEsenciaEnabled) {
+      throw new Error('Mi Esencia no está disponible en este momento.');
+    }
+    const D = MI_ESENCIA_QUICK_ACCESS_DEFAULTS;
+    let sub = this.findSubscriptionForInterview(params.interviewId);
+    let createdAvatar = false;
+
+    if (!sub) {
+      await storage.ensureInterviewPhotosHydrated(params.interviewId).catch(() => undefined);
+      const plan =
+        Array.from(this.plans.values()).find((p) => p.code === D.planCode && p.isActive) ||
+        this.plans.get(D.fallbackPlanId);
+      const prompt = findLibraryPromptByName(this.promptLibrary.values(), D.libraryPromptName);
+      if (!prompt) {
+        console.warn(
+          `[Mi Esencia] Acceso rápido: no se encontró el prompt «${D.libraryPromptName}» en la biblioteca; el avatar usa el comportamiento base.`
+        );
+      }
+      const created = await this.createOrSyncAvatarFromInterview({
+        interviewId: params.interviewId,
+        planId: plan?.planId || D.fallbackPlanId,
+        spontaneityLevel: D.spontaneityLevel,
+        initialConversationConfigMode: prompt ? 'modo_personalizado' : 'modo_existente',
+        initialPrimaryProvider: D.primaryProvider,
+        initialGeminiModel: D.geminiModel,
+        initialGeminiLibraryPromptId: prompt?.promptId,
+        adminEmail: D.performedBy,
+      });
+      await this.updateSubscriptionDailyUsage({
+        avatarId: created.subscription.avatarId,
+        dailyMessageQuotaPerInterlocutor: D.dailyMessageQuota,
+        propagateToAllAvatarInterlocutors: true,
+        adminEmail: D.performedBy,
+      });
+      sub = this.subscriptions.get(created.subscription.avatarId);
+      createdAvatar = true;
+      if (!sub) throw new Error('No se pudo preparar tu acceso a Mi Esencia.');
+    }
+
+    let cred = this.findGeneralCredential(sub.avatarId);
+    if (!cred) {
+      const { credential } = await this.createInterlocutorWithCode({
+        avatarId: sub.avatarId,
+        fullName: MI_ESENCIA_GENERAL_ACCESS_NAME,
+        relationshipToPerson: MI_ESENCIA_GENERAL_ACCESS_RELATIONSHIP,
+        isGeneralAccess: true,
+        adminEmail: D.performedBy,
+      });
+      cred = credential;
+    }
+
+    if (!sub.participantQuickAccess) {
+      const nowIso = new Date().toISOString();
+      sub.participantQuickAccess = {
+        activatedAt: nowIso,
+        activatedByParticipantId: params.participantId,
+        createdAvatar,
+        emailDeliveries: [],
+      };
+      sub.historyLog.push({
+        id: `log_${crypto.randomBytes(4).toString('hex')}`,
+        action: 'acceso_rapido_entrevistado',
+        performedBy: D.performedBy,
+        notes: createdAvatar
+          ? 'El entrevistado activó Mi Esencia desde su libro PDF: avatar creado con la configuración por defecto del acceso rápido.'
+          : 'El entrevistado activó Mi Esencia desde su libro PDF: se reutilizó el avatar existente sin cambiar su configuración.',
+        timestamp: nowIso,
+      });
+      sub.updatedAt = nowIso;
+      this.subscriptions.set(sub.avatarId, sub);
+      await this.persistDoc('mi_esencia_subscriptions', sub.avatarId, sub);
+    }
+
+    return this.describeQuickAccess(sub, cred);
+  }
+
+  /**
+   * Sends the interviewee their access (link + code) by email. Limited to
+   * MI_ESENCIA_QUICK_ACCESS_DEFAULTS.maxEmailsPer24h per avatar; every delivery is logged.
+   */
+  public async sendParticipantQuickAccessEmail(params: {
+    interviewId: string;
+    participantId: string;
+    participantName: string;
+    recipientEmail: string;
+    publicBaseUrl: string;
+    send: (
+      content: { subject: string; text: string; html: string },
+      to: string
+    ) => Promise<{ sent: boolean; error?: string }>;
+  }): Promise<{ sent: boolean; recipientEmail: string; error?: string }> {
+    const to = String(params.recipientEmail || '').trim();
+    if (!isValidQuickAccessEmail(to)) {
+      return { sent: false, recipientEmail: to, error: 'Escribe un correo electrónico válido.' };
+    }
+    const sub = this.findSubscriptionForInterview(params.interviewId);
+    if (!sub || !sub.participantQuickAccess) {
+      return { sent: false, recipientEmail: to, error: 'Primero activa tu acceso a Mi Esencia.' };
+    }
+    const access = this.describeQuickAccess(sub, this.findGeneralCredential(sub.avatarId));
+    if (!access.personalCode) {
+      return { sent: false, recipientEmail: to, error: access.unavailableReason };
+    }
+    const D = MI_ESENCIA_QUICK_ACCESS_DEFAULTS;
+    if (countRecentEmailDeliveries(sub.participantQuickAccess.emailDeliveries) >= D.maxEmailsPer24h) {
+      return {
+        sent: false,
+        recipientEmail: to,
+        error: 'Ya se enviaron varios correos con tu acceso hoy. Inténtalo de nuevo mañana.',
+      };
+    }
+
+    const content = buildMiEsenciaAccessEmail({
+      participantName: params.participantName,
+      avatarDisplayName: access.avatarDisplayName,
+      personalCode: access.personalCode,
+      accessUrl: `${String(params.publicBaseUrl || '').replace(/\/+$/, '')}${access.privateLinkPath}`,
+      expiresAtIso: access.expiresAt,
+      dailyMessageQuota: access.dailyMessageQuota,
+    });
+    const result = await params.send(content, to);
+    if (result.sent) {
+      sub.participantQuickAccess.emailDeliveries = [
+        ...(sub.participantQuickAccess.emailDeliveries || []).slice(-19),
+        { to, sentAt: new Date().toISOString(), participantId: params.participantId },
+      ];
+      this.subscriptions.set(sub.avatarId, sub);
+      await this.persistDoc('mi_esencia_subscriptions', sub.avatarId, sub);
+    }
+    return { sent: result.sent, recipientEmail: to, error: result.sent ? undefined : result.error };
   }
 
   // ============================================================================

@@ -217,3 +217,72 @@ export async function sendSelfRegisterParticipantEmail(params: {
     };
   }
 }
+
+/**
+ * V5.5.0 — Generic transactional email (same Gmail SMTP transport and headers as the /free
+ * welcome email). Used for the interviewee's access to «Mi Esencia».
+ */
+export async function sendTransactionalEmail(params: {
+  recipientEmail: string;
+  subject: string;
+  text: string;
+  html: string;
+  transporterOverride?: MailTransporterLike;
+}): Promise<{ sent: boolean; messageId?: string; error?: string; attemptedAt: string }> {
+  const attemptedAt = new Date().toISOString();
+  const to = (params.recipientEmail || '').trim();
+  if (!to) return { sent: false, error: 'No se indicó un correo electrónico.', attemptedAt };
+  const headers = { 'X-Auto-Response-Suppress': 'OOF, AutoReply' };
+
+  if (params.transporterOverride) {
+    try {
+      const from = (process.env.EMAIL_FROM || 'YouForever <youforever.team@gmail.com>').trim();
+      const info = await params.transporterOverride.sendMail({
+        from,
+        to,
+        replyTo: 'youforever.team@gmail.com',
+        subject: params.subject,
+        text: params.text,
+        html: params.html,
+        headers,
+      });
+      return { sent: true, messageId: info?.messageId, attemptedAt };
+    } catch (err: unknown) {
+      return { sent: false, error: err instanceof Error ? err.message : 'Error al enviar correo SMTP.', attemptedAt };
+    }
+  }
+
+  const config = getEmailConfigStatus();
+  if (!config.configured) {
+    return {
+      sent: false,
+      error: config.missingReason || 'El servicio de correo SMTP de Gmail no está configurado en el servidor.',
+      attemptedAt,
+    };
+  }
+  const pass = (process.env.SMTP_PASS || process.env.GMAIL_APP_PASSWORD || '').trim();
+  try {
+    const transporter = nodemailer.createTransport({
+      host: config.host,
+      port: config.port,
+      secure: config.secure,
+      auth: { user: config.user, pass },
+      connectionTimeout: 12000,
+      greetingTimeout: 12000,
+      socketTimeout: 15000,
+    });
+    const info = await transporter.sendMail({
+      from: config.from,
+      to,
+      replyTo: config.user,
+      subject: params.subject,
+      text: params.text,
+      html: params.html,
+      headers,
+    });
+    return { sent: true, messageId: info.messageId, attemptedAt };
+  } catch (err: unknown) {
+    const rawMsg = err instanceof Error ? err.message : String(err);
+    return { sent: false, error: `No se pudo enviar el correo vía Gmail SMTP: ${rawMsg}`, attemptedAt };
+  }
+}

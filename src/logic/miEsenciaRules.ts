@@ -277,6 +277,16 @@ export interface MiEsenciaSubscriptionRecord {
   tokensEstimatedThisMonth: number;
   autoRenewEnabled: boolean;
   adminNotes?: string;
+  /**
+   * V5.5.0: quick access opened by the interviewee from their Book Studio (after saving the final
+   * PDF of their book). Emails with the access are logged here (abuse limit per 24 h).
+   */
+  participantQuickAccess?: {
+    activatedAt: string;
+    activatedByParticipantId: string;
+    createdAvatar: boolean;
+    emailDeliveries: Array<{ to: string; sentAt: string; participantId: string }>;
+  };
   historyLog: Array<{
     id: string;
     action: string;
