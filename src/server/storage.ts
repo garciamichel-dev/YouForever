@@ -7316,7 +7316,7 @@ export class StorageManager {
     restoreQuota: boolean,
     performedBy: string
   ): Promise<{
-    interview: InterviewRecord;
+    interview?: InterviewRecord;
     allVersions: ParticipantBookVersionRecord[];
     deletedVersionId: string;
     restoredQuota: boolean;
@@ -7327,19 +7327,20 @@ export class StorageManager {
     }
 
     const interviewId = version.interviewId;
-    const interview = this.interviews.get(interviewId);
-    if (!interview) {
-      throw new Error('Entrevista asociada a la versión no encontrada.');
+    const interview = interviewId ? this.interviews.get(interviewId) : undefined;
+
+    const synthVersionId = interviewId ? `pbv_${interviewId}_v${version.versionNumber}` : '';
+    this.deletedBookVersionIds.add(versionId);
+    if (synthVersionId) {
+      this.deletedBookVersionIds.add(synthVersionId);
     }
 
-    const synthVersionId = `pbv_${interviewId}_v${version.versionNumber}`;
-    this.deletedBookVersionIds.add(versionId);
-    this.deletedBookVersionIds.add(synthVersionId);
-
     this.participantBookVersions.delete(versionId);
-    this.participantBookVersions.delete(synthVersionId);
+    if (synthVersionId) {
+      this.participantBookVersions.delete(synthVersionId);
+    }
     await this.removeDoc('participantBookVersions', versionId);
-    if (synthVersionId !== versionId) {
+    if (synthVersionId && synthVersionId !== versionId) {
       await this.removeDoc('participantBookVersions', synthVersionId);
     }
     // V5.3.1: chunk documents of a large version (orphan chunks are ignored on load anyway). The
@@ -7351,46 +7352,54 @@ export class StorageManager {
 
     // Also remove any matching manuscript with the same version number so ensureSynthesizedBookVersionsForInterview
     // never resurrects this deleted version
-    const matchingManuId = `manu_${interviewId}_v${version.versionNumber}`;
-    if (this.manuscripts.has(matchingManuId)) {
-      this.deletedManuscriptIds.add(matchingManuId);
-      this.manuscripts.delete(matchingManuId);
-      await this.removeDoc('manuscripts', matchingManuId);
+    if (interviewId) {
+      const matchingManuId = `manu_${interviewId}_v${version.versionNumber}`;
+      if (this.manuscripts.has(matchingManuId)) {
+        this.deletedManuscriptIds.add(matchingManuId);
+        this.manuscripts.delete(matchingManuId);
+        await this.removeDoc('manuscripts', matchingManuId);
+      }
     }
 
     // Compute remaining versions directly from participantBookVersions BEFORE calling getBookVersionsForInterview
-    const remainingDirect = Array.from(this.participantBookVersions.values()).filter(
-      (v) => v.interviewId === interviewId && !this.deletedBookVersionIds.has(v.id)
-    );
-    interview.bookGeneratedCount = remainingDirect.length;
+    const remainingDirect = interviewId
+      ? Array.from(this.participantBookVersions.values()).filter(
+          (v) => v.interviewId === interviewId && !this.deletedBookVersionIds.has(v.id)
+        )
+      : [];
 
-    if (restoreQuota) {
-      if ((interview.layoutEditsUsed ?? 0) > 0) {
-        interview.layoutEditsUsed = Math.max(0, (interview.layoutEditsUsed ?? 1) - 1);
-      } else {
-        interview.layoutEditsAllowed = (interview.layoutEditsAllowed ?? 1) + 1;
+    if (interview) {
+      interview.bookGeneratedCount = remainingDirect.length;
+
+      if (restoreQuota) {
+        if ((interview.layoutEditsUsed ?? 0) > 0) {
+          interview.layoutEditsUsed = Math.max(0, (interview.layoutEditsUsed ?? 1) - 1);
+        } else {
+          interview.layoutEditsAllowed = (interview.layoutEditsAllowed ?? 1) + 1;
+        }
       }
+      // V5.3.2: quota-affecting administrative change → new quota revision (other instances' older
+      // views can no longer overwrite it), and the deleted version is no longer a replay target.
+      const trackedInterview = interview as QuotaTrackedInterview & { bookVersionsClearedUpTo?: number };
+      trackedInterview.quotaRevision = (Number(trackedInterview.quotaRevision ?? 0) || 0) + 1;
+      if (remainingDirect.length === 0) {
+        trackedInterview.bookVersionsClearedUpTo = Math.max(
+          Number(trackedInterview.bookVersionsClearedUpTo ?? 0) || 0,
+          Number(version.versionNumber) || 1
+        );
+      }
+      if (trackedInterview.lastBookSaveVersionId === versionId) {
+        delete trackedInterview.lastBookSaveKey;
+        delete trackedInterview.lastBookSaveVersionId;
+      }
+      interview.lastActivityAt = new Date().toISOString();
+      this.interviews.set(interviewId, interview);
+      await this.persistDoc('interviews', interviewId, interview);
     }
-    // V5.3.2: quota-affecting administrative change → new quota revision (other instances' older
-    // views can no longer overwrite it), and the deleted version is no longer a replay target.
-    const trackedInterview = interview as QuotaTrackedInterview & { bookVersionsClearedUpTo?: number };
-    trackedInterview.quotaRevision = (Number(trackedInterview.quotaRevision ?? 0) || 0) + 1;
-    if (remainingDirect.length === 0) {
-      trackedInterview.bookVersionsClearedUpTo = Math.max(
-        Number(trackedInterview.bookVersionsClearedUpTo ?? 0) || 0,
-        Number(version.versionNumber) || 1
-      );
-    }
-    if (trackedInterview.lastBookSaveVersionId === versionId) {
-      delete trackedInterview.lastBookSaveKey;
-      delete trackedInterview.lastBookSaveVersionId;
-    }
-    interview.lastActivityAt = new Date().toISOString();
-    this.interviews.set(interviewId, interview);
-    await this.persistDoc('interviews', interviewId, interview);
+
     void this.persistDeletedRegistry();
 
-    const remainingVersions = this.getBookVersionsForInterview(interviewId);
+    const remainingVersions = interview ? this.getBookVersionsForInterview(interviewId) : [];
 
     await this.addAuditLog(
       'DELETE_PARTICIPANT_BOOK_VERSION',
@@ -7401,8 +7410,9 @@ export class StorageManager {
         interviewId,
         versionNumber: version.versionNumber,
         title: version.title,
-        restoreQuota,
-        newRemainingEdits: computeLayoutEditQuotaStatus(interview).remainingEdits,
+        restoreQuota: Boolean(restoreQuota && interview),
+        orphanedInterview: !interview,
+        newRemainingEdits: interview ? computeLayoutEditQuotaStatus(interview).remainingEdits : 0,
       }
     );
 
@@ -7412,7 +7422,7 @@ export class StorageManager {
       interview,
       allVersions: remainingVersions,
       deletedVersionId: versionId,
-      restoredQuota: Boolean(restoreQuota),
+      restoredQuota: Boolean(restoreQuota && interview),
     };
   }
 
@@ -7677,8 +7687,24 @@ export class StorageManager {
     // 4. Delete all manuscripts
     const manuscriptsToDelete = Array.from(this.manuscripts.values()).filter((m) => m.interviewId === interviewId);
     for (const manu of manuscriptsToDelete) {
+      this.deletedManuscriptIds.add(manu.id);
       this.manuscripts.delete(manu.id);
       await this.removeDoc('manuscripts', manu.id);
+    }
+
+    // 4b. Delete all participant book versions
+    const bookVersionsToDelete = Array.from(this.participantBookVersions.values()).filter(
+      (bv) => bv.interviewId === interviewId
+    );
+    for (const bv of bookVersionsToDelete) {
+      this.deletedBookVersionIds.add(bv.id);
+      this.deletedBookVersionIds.add(`pbv_${interviewId}_v${bv.versionNumber}`);
+      this.participantBookVersions.delete(bv.id);
+      await this.removeDoc('participantBookVersions', bv.id);
+      const remoteChunks = this.bookAuditReports.get(bv.id)?.durability?.versionDocument?.chunks || 0;
+      for (let i = 0; i < remoteChunks; i++) {
+        await this.removeDoc('participantBookVersions', chunkDocId(bv.id, i));
+      }
     }
 
     // 5. Delete all tokens
@@ -7700,6 +7726,8 @@ export class StorageManager {
     // 7. Delete the interview itself
     this.interviews.delete(interviewId);
     await this.removeDoc('interviews', interviewId);
+    void this.persistDeletedRegistry();
+    this.saveStateToDisk();
 
     await this.addAuditLog('DELETE_INTERVIEW', 'interview', interviewId, performedBy, {
       title: interview.title,
@@ -7707,6 +7735,7 @@ export class StorageManager {
       photosDeleted: photosToDelete.length,
       audiosDeleted: audiosToDelete.length,
       manuscriptsDeleted: manuscriptsToDelete.length,
+      bookVersionsDeleted: bookVersionsToDelete.length,
       participantsDeleted: partsToDelete.length,
     });
   }

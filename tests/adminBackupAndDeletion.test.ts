@@ -124,3 +124,38 @@ test('Full Database Backup creation, listing, restoration, and deletion', async 
   const deleted = await storage.deleteDatabaseBackup(backupMeta.id, 'test-suite@foreveryou.mx');
   assert.equal(deleted.deletedId, backupMeta.id);
 });
+
+test('Orphaned participant book versions can be deleted individually and in batch without failing', async () => {
+  await storage.ensureInitialized();
+
+  const orphanInterviewId = `int_orphan_${Date.now()}`;
+  const orphanVersionId = `pbv_${orphanInterviewId}_v1_${Date.now()}_0`;
+  const nowIso = new Date().toISOString();
+
+  // Inject an orphaned book version whose interview does not exist
+  const mapRef = (storage as any).participantBookVersions as Map<string, any>;
+  mapRef.set(orphanVersionId, {
+    id: orphanVersionId,
+    interviewId: orphanInterviewId,
+    participantId: 'part_orphan',
+    participantName: 'Orphan Test',
+    versionNumber: 1,
+    narrativeStyle: 'fiel_testimonio',
+    title: 'Libro Huérfano de Prueba',
+    createdAt: nowIso,
+    manuscript: {
+      title: 'Libro Huérfano de Prueba',
+      narrativeStyle: 'fiel_testimonio',
+      chapters: [],
+    },
+  });
+
+  const batchRes = await storage.deleteParticipantBookVersionsBatch(
+    [orphanVersionId],
+    false,
+    'test-suite@foreveryou.mx'
+  );
+  assert.equal(batchRes.deletedCount, 1);
+  assert.deepEqual(batchRes.deletedVersionIds, [orphanVersionId]);
+  assert.equal(mapRef.has(orphanVersionId), false);
+});

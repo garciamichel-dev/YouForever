@@ -1,5 +1,5 @@
 {
-  "savedAt": "2026-11-17T02:05:08.758Z",
+  "savedAt": "2026-11-18T05:24:23.879Z",
   "config": {
     "miEsenciaEnabled": true,
     "defaultSpontaneityLevel": "moderado",
@@ -24,7 +24,8 @@
     "externalEmailConnectorStatus": "pendiente_configuracion_externa",
     "externalWhatsappConnectorStatus": "pendiente_configuracion_externa",
     "updatedAt": "2026-11-09T03:16:25.352Z",
-    "updatedBy": "garcia.michel@gmail.com"
+    "updatedBy": "garcia.michel@gmail.com",
+    "geminiDefaultModelV551Applied": true
   },
   "deletedRegistry": {
     "persons": [

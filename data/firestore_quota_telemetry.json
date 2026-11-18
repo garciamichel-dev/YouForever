@@ -1,27 +1,27 @@
 {
-  "dateKey": "2026-11-16",
-  "reads": 1069,
-  "writes": 63,
-  "deletes": 10,
-  "readsSavedByIncremental": 21143,
+  "dateKey": "2026-11-17",
+  "reads": 2480,
+  "writes": 211,
+  "deletes": 39,
+  "readsSavedByIncremental": 21518,
   "bySource": {
     "storage": {
-      "reads": 1069,
-      "writes": 53,
-      "deletes": 10
+      "reads": 822,
+      "writes": 192,
+      "deletes": 39
     },
     "miEsencia": {
-      "reads": 0,
-      "writes": 0,
+      "reads": 1658,
+      "writes": 2,
       "deletes": 0
     },
     "probe": {
       "reads": 0,
-      "writes": 10,
+      "writes": 17,
       "deletes": 0
     }
   },
-  "lastUpdatedAt": "2026-11-17T02:05:09.179Z",
+  "lastUpdatedAt": "2026-11-18T05:24:26.153Z",
   "lastProbe": null,
   "sharedCounters": null
 }
