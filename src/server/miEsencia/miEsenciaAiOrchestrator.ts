@@ -10,6 +10,7 @@ import type {
   MiEsenciaConfirmedInterlocutorIdentity,
 } from '../../logic/miEsenciaRules.ts';
 import { sanitizeAvatarResponseText } from '../../logic/miEsenciaRules.ts';
+import { OPENAI_DEFAULT_MODEL, isOpenAiModelAccessError, normalizeOpenAiModelId } from '../../logic/openAiModelIds.ts';
 import {
   AVAILABLE_GEMINI_MODELS,
   AVAILABLE_OPENAI_MODELS,
@@ -51,6 +52,8 @@ export interface MiEsenciaLiveConnectionTestResult {
   errorDetail?: string;
   diagnosticAdvice: string;
   timestamp: string;
+  /** V5.6.3: true when OpenAI answered with a different model than the one requested. */
+  modelSubstituted?: boolean;
 }
 
 let cachedOpenAiProjectModels: string[] | null = null;
@@ -288,13 +291,9 @@ async function callGeminiProvider(params: {
  * de la cuenta de OpenAI del usuario, intenta de forma transparente con la cadena oficial de OpenAI
  * y reporta el modelo exacto que respondió.
  */
-const forbiddenOpenAiModels = new Set<string>([
-  'gpt-6',
-  'gpt-6-luna',
-  'gpt-6-astra',
-  'gpt-6.1-sol',
-  'gpt-6.1-terra',
-]);
+// V5.6.3: starts EMPTY — only models the OpenAI API itself rejected (403/404) are skipped. Before,
+// the whole GPT-6 family was blocked here and silently replaced by another model.
+const forbiddenOpenAiModels = new Set<string>();
 
 async function callOpenAiProvider(params: {
   model: string;
@@ -319,14 +318,14 @@ async function callOpenAiProvider(params: {
     maxRetries: 0,
   });
 
-  const requestedModel = (params.model || 'gpt-4o').trim();
-  const isUnpublishedAlias = (id: string) =>
-    /^(gpt-6|gpt-6-luna|gpt-6-astra|gpt-6\.1-sol|gpt-6\.1-terra)$/i.test(id) ||
-    forbiddenOpenAiModels.has(id);
+  // V5.6.3: legacy "gpt-6" → gpt-6-luna (see openAiModelIds.ts).
+  const requestedModel = normalizeOpenAiModelId(params.model);
+  const isUnpublishedAlias = (id: string) => forbiddenOpenAiModels.has(id);
 
   // Descubrir y cachear por 5 minutos qué modelos tiene permitidos el proyecto de OpenAI
   let baseCandidates = [
     ...(isUnpublishedAlias(requestedModel) ? [] : [requestedModel]),
+    OPENAI_DEFAULT_MODEL,
     'gpt-4o',
     'gpt-4o-mini',
     'gpt-4.1-mini',
@@ -360,6 +359,8 @@ async function callOpenAiProvider(params: {
         [...ids].sort((a, b) => Number(/mini|nano/i.test(a)) - Number(/mini|nano/i.test(b)));
       const preferredOrder = [
         ...(exactRequestedAvailable ? [requestedModel] : []),
+        // V5.6.3: the default model (gpt-6-luna) is the first replacement when it is available.
+        ...(availableIds.includes(OPENAI_DEFAULT_MODEL) ? [OPENAI_DEFAULT_MODEL] : []),
         ...fullFirst(
           availableIds.filter(
             (id) => /^gpt-4o/i.test(id) && !/realtime|audio|transcribe|tts|search/i.test(id)
@@ -452,7 +453,7 @@ async function callOpenAiProvider(params: {
         throw responsesErr;
       }
       // If the model itself does not exist or is forbidden, record it and move immediately to the next candidate model
-      if (/does not exist|not have access|model_not_found|404|403/i.test(errMsg)) {
+      if (isOpenAiModelAccessError(responsesErr)) {
         forbiddenOpenAiModels.add(targetModel);
         continue;
       }
@@ -498,7 +499,7 @@ async function callOpenAiProvider(params: {
       }
       lastError = chatErr;
       const errMsg = String(chatErr?.message || '');
-      if (/does not exist|not have access|model_not_found|404|403/i.test(errMsg)) {
+      if (isOpenAiModelAccessError(chatErr)) {
         forbiddenOpenAiModels.add(targetModel);
       }
       if (/401|invalid_api_key|incorrect api key|insufficient_quota/i.test(errMsg)) {
@@ -522,8 +523,9 @@ export async function testLiveProviderConnection(params: {
   const startTime = Date.now();
   const provider = params.provider || 'openai';
   const requestedModel =
-    (params.model || '').trim() ||
-    (provider === 'openai' ? 'gpt-6' : MI_ESENCIA_DEFAULT_GEMINI_MODEL);
+    provider === 'openai'
+      ? normalizeOpenAiModelId(params.model)
+      : (params.model || '').trim() || MI_ESENCIA_DEFAULT_GEMINI_MODEL;
   const nowIso = new Date().toISOString();
 
   if (provider === 'openai') {
@@ -552,6 +554,12 @@ export async function testLiveProviderConnection(params: {
           'Confirma en español que estás conectado correctamente a la API de OpenAI.',
       });
 
+      // V5.6.3: say plainly when another model answered (OpenAI may report a dated snapshot of the
+      // same model, e.g. gpt-6-luna-2026-09-22, which is NOT a substitution).
+      const responded = String(res.respondedModel || '');
+      const modelSubstituted =
+        Boolean(res.modelCompatibilityNote) ||
+        (Boolean(responded) && responded !== requestedModel && !responded.startsWith(`${requestedModel}-`));
       return {
         connected: true,
         provider: 'openai',
@@ -560,9 +568,11 @@ export async function testLiveProviderConnection(params: {
         apiKeyConfiguredOnServer: true,
         latencyMs: Date.now() - startTime,
         sampleResponse: res.text,
-        diagnosticAdvice:
-          res.modelCompatibilityNote ||
-          `Conexión verificada exitosamente con la API oficial de OpenAI (${res.respondedModel}).`,
+        modelSubstituted,
+        diagnosticAdvice: modelSubstituted
+          ? res.modelCompatibilityNote ||
+            `La conexión funciona, pero respondió "${responded}" en lugar del modelo solicitado "${requestedModel}".`
+          : `Conexión verificada exitosamente con la API oficial de OpenAI (${res.respondedModel}).`,
         timestamp: nowIso,
       };
     } catch (err: unknown) {
@@ -787,7 +797,7 @@ export async function executeCustomAvatarTurnWithFallback(params: {
         ? overrideModel
         : prov === 'gemini'
         ? aiConfig.geminiModel || MI_ESENCIA_DEFAULT_GEMINI_MODEL
-        : aiConfig.openaiModel || 'gpt-6';
+        : normalizeOpenAiModelId(aiConfig.openaiModel);
 
     const promptTemplate =
       isPrimary && typeof overridePromptContent === 'string'
@@ -1108,7 +1118,7 @@ export async function generateAvatarShortText(params: {
   const timeoutMs = params.timeoutMs ?? 12_000;
   for (const provider of order) {
     const model =
-      provider === 'gemini' ? ai?.geminiModel || MI_ESENCIA_DEFAULT_GEMINI_MODEL : ai?.openaiModel || 'gpt-6';
+      provider === 'gemini' ? ai?.geminiModel || MI_ESENCIA_DEFAULT_GEMINI_MODEL : normalizeOpenAiModelId(ai?.openaiModel);
     if (provider === 'gemini' ? !hasValidGeminiApiKey() : !hasValidOpenAiApiKey()) continue;
     try {
       const call =

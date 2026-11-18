@@ -72,12 +72,13 @@ const sampleRelations: MiEsenciaRelatedPerson[] = [
   },
 ];
 
-test('PRUEBA 1 & 20: buildDefaultAvatarAiConfig preserva modo_existente por defecto y usa gpt-6 como modelo OpenAI por defecto', () => {
+test('PRUEBA 1 & 20: buildDefaultAvatarAiConfig preserva modo_existente por defecto y usa gpt-6-luna como modelo OpenAI por defecto (V5.6.3: "gpt-6" no es un modelo de la API)', () => {
   const cfg = buildDefaultAvatarAiConfig();
   assert.equal(cfg.conversationConfigMode, 'modo_existente');
   assert.equal(cfg.primaryProvider, 'gemini');
-  assert.equal(cfg.geminiModel, 'gemini-3-flash-preview');
-  assert.equal(cfg.openaiModel, 'gpt-6');
+  assert.equal(cfg.geminiModel, 'gemini-3.8-flash');
+  assert.equal(cfg.openaiModel, 'gpt-6-luna');
+  assert.equal(buildDefaultAvatarAiConfig({ defaultOpenAiModel: 'gpt-6' } as any).openaiModel, 'gpt-6-luna');
 });
 
 test('PRUEBA 16: resolvePromptDynamicVariables sustituye variables reconocidas sin inventar datos faltantes', () => {

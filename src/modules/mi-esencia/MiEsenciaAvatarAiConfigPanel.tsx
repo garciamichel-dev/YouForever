@@ -1,3 +1,4 @@
+import { normalizeOpenAiModelId } from '../../logic/openAiModelIds.ts';
 import React, { useState } from 'react';
 import {
   Cpu,
@@ -77,7 +78,7 @@ export const MiEsenciaAvatarAiConfigPanel: React.FC<MiEsenciaAvatarAiConfigPanel
   const [geminiModel, setGeminiModel] = useState<string>(
     ai?.geminiModel || 'gemini-3.8-flash'
   );
-  const [openaiModel, setOpenaiModel] = useState<string>(ai?.openaiModel || 'gpt-6');
+  const [openaiModel, setOpenaiModel] = useState<string>(normalizeOpenAiModelId(ai?.openaiModel));
   const [customOpenaiModelMode, setCustomOpenaiModelMode] = useState<boolean>(
     Boolean(ai?.openaiModel && !AVAILABLE_OPENAI_MODELS.some((m) => m.id === ai.openaiModel))
   );
@@ -163,7 +164,10 @@ export const MiEsenciaAvatarAiConfigPanel: React.FC<MiEsenciaAvatarAiConfigPanel
           ...prev,
           [provider]: json.data,
         }));
-        if (json.data.connected) {
+        if (json.data.connected && json.data.modelSubstituted) {
+          // V5.6.3: the connection works but another model answered — never shown as plain success.
+          onNotify('err', json.data.diagnosticAdvice);
+        } else if (json.data.connected) {
           onNotify(
             'ok',
             `Conexión exitosa con ${provider === 'openai' ? 'OpenAI GPT' : 'Google Gemini'} (${json.data.respondedModel} • ${json.data.latencyMs} ms).`
@@ -689,7 +693,7 @@ export const MiEsenciaAvatarAiConfigPanel: React.FC<MiEsenciaAvatarAiConfigPanel
                     type="text"
                     value={openaiModel}
                     onChange={(e) => setOpenaiModel(e.target.value)}
-                    placeholder="Ej. gpt-6, gpt-6-astra, gpt-5, gpt-5.5-pro..."
+                    placeholder="Ej. gpt-6-luna, gpt-6-astra, gpt-6.1-sol..."
                     className="w-full px-3 py-2 rounded-lg border border-amber-400 bg-amber-50/40 font-mono text-xs"
                   />
                 ) : (

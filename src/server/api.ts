@@ -378,7 +378,7 @@ apiRouter.post('/config/test-ai-engines', requireAdmin, async (req: Request, res
     const openaiModel =
       typeof req.body?.bookAiOpenAiModel === 'string' && req.body.bookAiOpenAiModel.trim()
         ? req.body.bookAiOpenAiModel.trim()
-        : currentConfig.bookAiOpenAiModel || 'gpt-4o';
+        : currentConfig.bookAiOpenAiModel || 'gpt-6-luna';
 
     const diagnostic = await testConfiguredBookAiEngines({
       primaryProvider,

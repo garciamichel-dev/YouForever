@@ -70,7 +70,7 @@ export const MiEsenciaSimulatorPanel: React.FC<MiEsenciaSimulatorPanelProps> = (
     initialProvider || 'gemini'
   );
   const [selectedModel, setSelectedModel] = useState<string>(
-    initialModel || (initialProvider === 'openai' ? 'gpt-6' : 'gemini-3.8-flash')
+    initialModel || (initialProvider === 'openai' ? 'gpt-6-luna' : 'gemini-3.8-flash')
   );
   const [customModelMode, setCustomModelMode] = useState<boolean>(false);
   const [draftPrompt, setDraftPrompt] = useState<string>(initialDraftPrompt || '');
@@ -108,7 +108,7 @@ export const MiEsenciaSimulatorPanel: React.FC<MiEsenciaSimulatorPanelProps> = (
 
     const ai = person.aiConfig;
     if (selectedProvider === 'openai') {
-      const targetModel = ai?.openaiModel || 'gpt-6';
+      const targetModel = ai?.openaiModel || 'gpt-6-luna';
       setSelectedModel(targetModel);
       setCustomModelMode(!AVAILABLE_OPENAI_MODELS.some((m) => m.id === targetModel));
       setDraftPrompt(ai?.openaiPromptContent || '');
@@ -431,7 +431,7 @@ export const MiEsenciaSimulatorPanel: React.FC<MiEsenciaSimulatorPanelProps> = (
                 setSelectedProvider(nextProv);
                 setCustomModelMode(false);
                 setSelectedModel(
-                  nextProv === 'openai' ? 'gpt-6' : 'gemini-3.8-flash'
+                  nextProv === 'openai' ? 'gpt-6-luna' : 'gemini-3.8-flash'
                 );
               }}
               className="w-full px-3 py-2 rounded-xl border border-stone-300 bg-white font-semibold"
@@ -459,7 +459,7 @@ export const MiEsenciaSimulatorPanel: React.FC<MiEsenciaSimulatorPanelProps> = (
                 type="text"
                 value={selectedModel}
                 onChange={(e) => setSelectedModel(e.target.value)}
-                placeholder="Ej. gpt-6, gpt-6-pro, gpt-5..."
+                placeholder="Ej. gpt-6-luna, gpt-6-astra, gpt-6.1-sol..."
                 className="w-full px-3 py-2 rounded-xl border border-amber-400 bg-amber-50/40 font-mono text-xs"
               />
             ) : (

@@ -19,6 +19,12 @@ import {
   MiEsenciaArchivedCompilationPdf,
 } from '../logic/miEsenciaRules.ts';
 import {
+  OPENAI_DEFAULT_MODEL,
+  isOpenAiModelAccessError,
+  isOpenAiReasoningModel,
+  normalizeOpenAiModelId,
+} from '../logic/openAiModelIds.ts';
+import {
   computeBookBatchSignature,
   computeBookGenerationFingerprint,
   computeBookSourceFingerprint,
@@ -669,7 +675,7 @@ export async function generateManuscriptDraft(params: {
     literaryPromptText,
     configuredProvider = 'gemini',
     geminiModel = 'gemini-3-flash-preview',
-    openaiModel = 'gpt-4o',
+    openaiModel = OPENAI_DEFAULT_MODEL,
     bookStructureMode = 'prompt_autonomous',
     onProgress,
   } = params;
@@ -1072,7 +1078,7 @@ DIRECTRICES PARA LA CREACIÓN DEL LIBRO COMPLETO DE HISTORIA Y LEGADO:
       const alternateProvider: BookAiProvider =
         configuredProvider === 'openai' ? 'gemini' : 'openai';
       const resolvedOpenAiFallback =
-        resolveOpenAiCandidateModels(openaiModel)[0] || 'gpt-4o';
+        resolveOpenAiCandidateModels(openaiModel)[0] || OPENAI_DEFAULT_MODEL;
       const alternateModel =
         configuredProvider === 'openai'
           ? normalizeGeminiModelId(geminiModel)
@@ -1497,32 +1503,15 @@ interface CachedAiManuscriptEntry {
 
 const manuscriptAiMemoryCache = new Map<string, CachedAiManuscriptEntry>();
 let openAiModelsCache: { models: string[]; fetchedAt: number } | null = null;
-const openAiForbiddenModels = new Set<string>([
-  'gpt-6',
-  'gpt-6-luna',
-  'gpt-6-astra',
-  'gpt-6.1-sol',
-  'gpt-6.1-terra',
-]);
+// V5.6.3: starts EMPTY. Only models the OpenAI API itself rejected (403/404) during this process
+// are skipped. Before, the whole GPT-6 family was blocked here by a hard-coded list even when the
+// account had it (the source of the false "NO existe en la API de OpenAI" diagnosis).
+const openAiForbiddenModels = new Set<string>();
 let openAiProjectBlockedUntil = 0;
-
-function isUnpublishedOpenAiAlias(modelId: string): boolean {
-  return /^(gpt-6|gpt-6-luna|gpt-6-astra|gpt-6\.1-sol|gpt-6\.1-terra)$/i.test(
-    String(modelId || '').trim()
-  );
-}
 
 export function recordOpenAiModelAccessError(model: string, err: unknown): boolean {
   const cleanModel = String(model || '').trim();
-  const status = (err as any)?.status;
-  const msg = String((err as any)?.message || err || '');
-  if (
-    status === 403 ||
-    status === 404 ||
-    /does not have access to model|PermissionDeniedError|model_not_found|does not exist|not have access|403|404/i.test(
-      msg
-    )
-  ) {
+  if (isOpenAiModelAccessError(err)) {
     if (cleanModel) {
       openAiForbiddenModels.add(cleanModel);
       if (openAiModelsCache) {
@@ -1538,21 +1527,20 @@ export function resolveOpenAiCandidateModels(
   requestedModel: string,
   availableModels: string[] = []
 ): string[] {
-  const cleanReq = String(requestedModel || '').trim();
+  const cleanReq = normalizeOpenAiModelId(requestedModel);
   const allowedAvailable = availableModels.filter(
     (m) =>
       !openAiForbiddenModels.has(m) &&
-      !isUnpublishedOpenAiAlias(m) &&
       !/realtime|audio|transcribe|tts|search|embedding|whisper|dall-e|moderation/i.test(m)
   );
   const canUse = (m: string) =>
     Boolean(m) &&
     !openAiForbiddenModels.has(m) &&
-    !isUnpublishedOpenAiAlias(m) &&
     (allowedAvailable.length === 0 || allowedAvailable.includes(m));
 
   const preferredPool = [
     ...(canUse(cleanReq) ? [cleanReq] : []),
+    OPENAI_DEFAULT_MODEL,
     'gpt-4o',
     'gpt-4o-mini',
     'gpt-4.1-mini',
@@ -1566,7 +1554,7 @@ export function resolveOpenAiCandidateModels(
   }
 
   const fromAvailable = allowedAvailable.filter((m) =>
-    /^(gpt-4o|gpt-4\.1|gpt-4|gpt-3\.5|o3|o4)/i.test(m)
+    /^(gpt-6|gpt-5|gpt-4o|gpt-4\.1|gpt-4|gpt-3\.5|o3|o4)/i.test(m)
   );
   return Array.from(new Set(fromAvailable)).slice(0, 2);
 }
@@ -1827,20 +1815,23 @@ async function callOpenAiBookModelBatch(params: {
     throw new Error('OPENAI_API_KEY no está configurada en el servidor.');
   }
 
-  // Fast pre-flight check against enabled OpenAI models so non-existent models like 'gpt-6-luna'
-  // or project-restricted models resolve immediately or fail fast without hanging.
+  // V5.6.3: legacy "gpt-6" → gpt-6-luna (see openAiModelIds.ts).
+  const requestedModel = normalizeOpenAiModelId(params.modelName);
+
+  // Fast pre-flight check against the models the connected OpenAI account really lists, so a
+  // misspelled or project-restricted model fails fast without hanging.
   const availableModels = await getAvailableOpenAiModels(apiKey);
   if (
     !params.allowBackupModels &&
     availableModels.length > 0 &&
-    !availableModels.includes(params.modelName)
+    !availableModels.includes(requestedModel)
   ) {
     const suggested = availableModels
-      .filter((m) => /^gpt-4o|^gpt-4\.1|^o3|^o4/i.test(m))
+      .filter((m) => /^gpt-6|^gpt-5|^gpt-4o|^gpt-4\.1|^o3|^o4/i.test(m))
       .slice(0, 4)
       .join(', ');
     throw new Error(
-      `El modelo '${params.modelName}' no existe o no está habilitado en la cuenta de OpenAI conectada${
+      `El modelo '${requestedModel}' no existe o no está habilitado en la cuenta de OpenAI conectada${
         suggested ? ` (modelos disponibles recomendados: ${suggested})` : ''
       }.`
     );
@@ -1848,8 +1839,8 @@ async function callOpenAiBookModelBatch(params: {
 
   const openai = new OpenAI({ apiKey, maxRetries: 0 });
   const candidateModels = params.allowBackupModels
-    ? resolveOpenAiCandidateModels(params.modelName, availableModels)
-    : [params.modelName].filter((m) => Boolean(m) && !openAiForbiddenModels.has(m));
+    ? resolveOpenAiCandidateModels(requestedModel, availableModels)
+    : [requestedModel].filter((m) => Boolean(m) && !openAiForbiddenModels.has(m));
 
   let lastError: any = null;
   for (const candidateModel of candidateModels) {
@@ -3759,7 +3750,7 @@ export async function generateParticipantBookManuscriptWithAI(params: {
     customLiteraryPromptText,
     configuredProvider = 'gemini',
     geminiModel = 'gemini-3-flash-preview',
-    openaiModel = 'gpt-4o',
+    openaiModel = OPENAI_DEFAULT_MODEL,
     bookStructureMode = 'prompt_autonomous',
     onProgress,
     initialBatchCheckpoints,
@@ -5426,8 +5417,9 @@ export async function testConfiguredBookAiEngines(params: {
   const {
     primaryProvider = 'gemini',
     geminiModel = 'gemini-3-flash-preview',
-    openaiModel = 'gpt-4o',
   } = params;
+  // V5.6.3: legacy "gpt-6" → gpt-6-luna; default is gpt-6-luna.
+  const openaiModel = normalizeOpenAiModelId(params.openaiModel);
 
   const testGemini = async (): Promise<SingleAiEngineDiagnosticResult> => {
     const startMs = Date.now();
@@ -5575,8 +5567,8 @@ export async function testConfiguredBookAiEngines(params: {
         contextCachingSupported: true,
         contextCachingExplanation:
           'Activo: Prompt Prefix Caching de OpenAI + Caché de Manuscritos por Estilo y Prompt de YouForever.',
-        diagnosticMessage: `La conexión con OpenAI es válida, pero el modelo configurado "${openaiModel}" NO existe en la API de OpenAI de tu cuenta. Por eso ocurre el aviso de conmutación automática a Gemini. Selecciona un modelo disponible de la lista inferior.`,
-        errorDetail: `Modelo "${openaiModel}" no encontrado en la cuenta de OpenAI.`,
+        diagnosticMessage: `La conexión con OpenAI es válida, pero el modelo configurado "${openaiModel}" no aparece en la lista de modelos que OpenAI reporta para esta clave (revisa el nombre exacto o el proyecto de la clave). Mientras tanto se usa la conmutación automática a Gemini. Selecciona un modelo de la lista inferior.`,
+        errorDetail: `Modelo "${openaiModel}" no listado por OpenAI para esta clave.`,
       };
     }
 
@@ -5585,8 +5577,11 @@ export async function testConfiguredBookAiEngines(params: {
       const abortController = new AbortController();
       const timer = setTimeout(() => abortController.abort(), 22000);
       let completion: any;
-      try {
-        completion = await openai.chat.completions.create(
+      // V5.6.3: reasoning models (gpt-6/gpt-5/o-series) spend part of the output budget thinking;
+      // 250 tokens could leave the visible answer empty. Low effort + a larger budget.
+      const isReasoning = isOpenAiReasoningModel(openaiModel);
+      const request = (withEffort: boolean) =>
+        openai.chat.completions.create(
           {
             model: openaiModel,
             messages: [
@@ -5601,16 +5596,27 @@ export async function testConfiguredBookAiEngines(params: {
                   'Escribe una sola oración breve y cálida en español confirmando que has recibido esta prueba de conexión y estás listo para redactar memorias biográficas.',
               },
             ],
-            max_completion_tokens: 250,
-          },
+            max_completion_tokens: isReasoning ? 2000 : 250,
+            ...(withEffort ? reasoningEffortParams(openaiModel, 'low') : {}),
+          } as any,
           { signal: abortController.signal }
         );
+      try {
+        try {
+          completion = await request(true);
+        } catch (firstErr) {
+          if (!noteReasoningEffortRejection(openaiModel, firstErr)) throw firstErr;
+          completion = await request(false);
+        }
       } finally {
         clearTimeout(timer);
       }
       const latencyMs = Date.now() - startMs;
       const sampleText = completion.choices?.[0]?.message?.content?.trim() || '';
       const respondedModel = completion.model || openaiModel;
+      // OpenAI may answer with a dated snapshot of the same model (e.g. gpt-6-luna-2026-09-22).
+      const sameModel =
+        respondedModel === openaiModel || respondedModel.startsWith(`${openaiModel}-`);
       return {
         provider: 'openai',
         providerLabel: 'OpenAI (ChatGPT)',
@@ -5618,13 +5624,17 @@ export async function testConfiguredBookAiEngines(params: {
         respondedModel,
         ok: true,
         latencyMs,
-        sampleResponse: sampleText || 'Conexión verificada correctamente con OpenAI.',
+        sampleResponse:
+          sampleText ||
+          'OpenAI respondió correctamente, pero sin texto visible (el modelo usó el presupuesto de salida en razonamiento).',
         availableModels: displayModels,
         isConfiguredModelAvailable: true,
         contextCachingSupported: true,
         contextCachingExplanation:
           'Activo: Prompt Prefix Caching de OpenAI + Caché de Manuscritos por Estilo y Prompt de YouForever.',
-        diagnosticMessage: `Conexión exitosa con ${respondedModel} en ${latencyMs} ms.`,
+        diagnosticMessage: sameModel
+          ? `Conexión exitosa con ${openaiModel} en ${latencyMs} ms.`
+          : `OpenAI respondió, pero con el modelo "${respondedModel}" en lugar de "${openaiModel}" (${latencyMs} ms).`,
       };
     } catch (err: any) {
       const latencyMs = Date.now() - startMs;

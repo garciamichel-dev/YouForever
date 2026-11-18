@@ -130,7 +130,7 @@ export const INITIAL_APP_CONFIG: AppConfig = {
   allowAdditionalMemories: true,
   bookAiProvider: 'gemini',
   bookAiGeminiModel: 'gemini-3-flash-preview',
-  bookAiOpenAiModel: 'gpt-6',
+  bookAiOpenAiModel: 'gpt-6-luna',
   bookStructureMode: 'prompt_autonomous',
   literaryPrompts: {
     first_person_simple: { ...DEFAULT_LITERARY_PROMPTS_CONFIG.first_person_simple },

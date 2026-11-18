@@ -8,6 +8,7 @@ import type {
   MiEsenciaConfirmedInterlocutorIdentity,
 } from './miEsenciaRules.ts';
 import { retrieveRelevantTestimonies, queryFamilyMapFromLegacy } from './miEsenciaRules.ts';
+import { normalizeOpenAiModelId } from './openAiModelIds.ts';
 
 // ============================================================================
 // MI ESENCIA — DUAL AI PROVIDERS (GEMINI & OPENAI), PROMPT LIBRARY,
@@ -74,45 +75,47 @@ export const AVAILABLE_GEMINI_MODELS: MiEsenciaModelOption[] = [
 ];
 
 export const AVAILABLE_OPENAI_MODELS: MiEsenciaModelOption[] = [
+  // V5.6.3: real OpenAI API identifiers of the GPT-6 family ("gpt-6" alone is not an API model;
+  // configurations saved with it use gpt-6-luna — see openAiModelIds.ts).
   {
-    id: 'gpt-6',
+    id: 'gpt-6-luna',
     provider: 'openai',
-    label: 'GPT-6 (Recomendado OpenAI — Última Generación)',
-    description: 'Modelo insignia de última generación de OpenAI con máxima fidelidad al PDF, razonamiento profundo y naturalidad conversacional.',
-    contextWindowTokens: 2_000_000,
+    label: 'GPT-6 Luna (Predeterminado — Ágil y Eficiente)',
+    description: 'El modelo más rápido y económico de la familia GPT-6, pensado para conversaciones frecuentes y de alto volumen.',
+    contextWindowTokens: 1_050_000,
     supportsFullDocumentContext: true,
     recommended: true,
   },
   {
     id: 'gpt-6-astra',
     provider: 'openai',
-    label: 'GPT-6 Astra (Razonamiento Profundo y Empatía)',
-    description: 'Variante avanzada de la familia GPT-6 para matices emocionales complejos y apego estricto al prompt.',
-    contextWindowTokens: 2_000_000,
+    label: 'GPT-6 Astra (El más capaz de OpenAI)',
+    description: 'Modelo insignia de OpenAI para el razonamiento más exigente; también el de mayor costo.',
+    contextWindowTokens: 1_050_000,
     supportsFullDocumentContext: true,
   },
   {
     id: 'gpt-6.1-sol',
     provider: 'openai',
-    label: 'GPT-6.1 Sol (Conversación Biográfica Avanzada)',
-    description: 'Optimizado para narración autobiográfica extensa con lectura íntegra de documentos PDF.',
-    contextWindowTokens: 2_000_000,
+    label: 'GPT-6.1 Sol (Calidad cercana a Astra)',
+    description: 'Alta calidad de redacción y razonamiento a un costo menor que Astra.',
+    contextWindowTokens: 1_050_000,
+    supportsFullDocumentContext: true,
+  },
+  {
+    id: 'gpt-6-sol',
+    provider: 'openai',
+    label: 'GPT-6 Sol',
+    description: 'Nivel intermedio de la familia GPT-6 para razonamiento cotidiano.',
+    contextWindowTokens: 1_050_000,
     supportsFullDocumentContext: true,
   },
   {
     id: 'gpt-6.1-terra',
     provider: 'openai',
-    label: 'GPT-6.1 Terra (Alta Velocidad y Contexto Extenso)',
-    description: 'Equilibrio superior entre baja latencia y comprensión de entrevistas completas.',
-    contextWindowTokens: 1_000_000,
-    supportsFullDocumentContext: true,
-  },
-  {
-    id: 'gpt-6-luna',
-    provider: 'openai',
-    label: 'GPT-6 Luna (Ágil y Eficiente)',
-    description: 'Modelo ligero de nueva generación para diálogos cotidianos fluidos.',
-    contextWindowTokens: 1_000_000,
+    label: 'GPT-6.1 Terra (Equilibrio velocidad / capacidad)',
+    description: 'Equilibrio entre baja latencia y comprensión de entrevistas completas.',
+    contextWindowTokens: 1_050_000,
     supportsFullDocumentContext: true,
   },
   {
@@ -439,7 +442,7 @@ export function buildDefaultAvatarAiConfig(params?: {
     geminiPromptContent: geminiContent,
     geminiPromptVersion: geminiContent ? 1 : 0,
     geminiConfigStatus: geminiContent ? 'configurado' : 'sin_configurar',
-    openaiModel: params?.defaultOpenAiModel || 'gpt-6',
+    openaiModel: normalizeOpenAiModelId(params?.defaultOpenAiModel),
     openaiPromptName: params?.openaiPromptName || 'Prompt OpenAI GPT del Avatar',
     openaiPromptContent: openaiContent,
     openaiPromptVersion: openaiContent ? 1 : 0,

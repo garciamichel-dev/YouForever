@@ -6,8 +6,8 @@
  * GET /api/admin/version, so a stale deployment (old frontend or old server) is visible at once.
  * Participants never see this label.
  */
-export const APP_VERSION = '5.6.2';
+export const APP_VERSION = '5.6.3';
 export const APP_VERSION_LABEL = `V${APP_VERSION}`;
 export const APP_RELEASE_DATE = '2026-11-17';
 export const APP_RELEASE_SUMMARY =
-  'Seguridad de accesos: solo el código o enlace real da acceso (ya no el ID de la entrevista, del participante ni el hash), la revocación es definitiva hasta reactivarla, límite anti-fuerza bruta en todas las rutas con código e historias de prueba con códigos aleatorios y sin sembrado automático en producción.';
+  'Modelos GPT-6 activos de verdad: se quitó el bloqueo fijo que reportaba gpt-6-luna como inexistente y lo cambiaba por otro modelo; "gpt-6" (nombre de familia) pasa a gpt-6-luna; las pruebas de conexión avisan cuando responde un modelo distinto al elegido.';

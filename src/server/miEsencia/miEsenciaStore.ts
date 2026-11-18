@@ -18,6 +18,7 @@ import { GoogleGenAI } from '@google/genai';
 import { getServerFirestore, collection, doc } from '../firestoreAdmin.ts';
 import { storage } from '../storage.ts';
 import { decodeImageDataUrl, isArchivalPlaceholderPng } from '../photoIntegrity.ts';
+import { OPENAI_DEFAULT_MODEL } from '../../logic/openAiModelIds.ts';
 import {
   MI_ESENCIA_QUICK_ACCESS_DEFAULTS,
   buildMiEsenciaAccessEmail,
@@ -912,18 +913,28 @@ class MiEsenciaStore {
     }
 
     // Asegurar que cada perfil disponga de aiConfig retrocompatible y actualice el modelo OpenAI legado gpt-4o a gpt-6
-    if (this.config.defaultOpenAiModel === 'gpt-4o' || !this.config.defaultOpenAiModel) {
-      this.config.defaultOpenAiModel = 'gpt-6';
+    // V5.6.3: "gpt-6" is a family name, not an API model — it becomes gpt-6-luna (administrator's
+    // decision); "gpt-4o" and empty values keep being upgraded, now to gpt-6-luna as well.
+    if (
+      this.config.defaultOpenAiModel === 'gpt-4o' ||
+      this.config.defaultOpenAiModel === 'gpt-6' ||
+      !this.config.defaultOpenAiModel
+    ) {
+      this.config.defaultOpenAiModel = OPENAI_DEFAULT_MODEL;
     }
     if (!person.aiConfig) {
       person.aiConfig = buildDefaultAvatarAiConfig({
         mode: 'modo_existente',
         defaultGeminiModel: this.config.defaultGeminiModel || MI_ESENCIA_DEFAULT_GEMINI_MODEL,
-        defaultOpenAiModel: this.config.defaultOpenAiModel || 'gpt-6',
+        defaultOpenAiModel: this.config.defaultOpenAiModel || OPENAI_DEFAULT_MODEL,
       });
       changed = true;
-    } else if (!person.aiConfig.openaiModel || person.aiConfig.openaiModel === 'gpt-4o') {
-      person.aiConfig.openaiModel = 'gpt-6';
+    } else if (
+      !person.aiConfig.openaiModel ||
+      person.aiConfig.openaiModel === 'gpt-4o' ||
+      person.aiConfig.openaiModel === 'gpt-6'
+    ) {
+      person.aiConfig.openaiModel = OPENAI_DEFAULT_MODEL;
       changed = true;
     }
 
@@ -1816,7 +1827,7 @@ class MiEsenciaStore {
             this.config.defaultGeminiModel ||
             MI_ESENCIA_DEFAULT_GEMINI_MODEL,
           defaultOpenAiModel:
-            params.initialOpenAiModel || this.config.defaultOpenAiModel || 'gpt-6',
+            params.initialOpenAiModel || this.config.defaultOpenAiModel || OPENAI_DEFAULT_MODEL,
           primaryProvider: params.initialPrimaryProvider || 'gemini',
           geminiPromptContent: gemText,
           geminiPromptName: geminiLib?.name || 'Prompt Gemini del Avatar',
@@ -4975,7 +4986,7 @@ Respuesta directa en primera persona singular:`;
       buildDefaultAvatarAiConfig({
         mode: 'modo_existente',
         defaultGeminiModel: this.config.defaultGeminiModel || MI_ESENCIA_DEFAULT_GEMINI_MODEL,
-        defaultOpenAiModel: this.config.defaultOpenAiModel || 'gpt-6',
+        defaultOpenAiModel: this.config.defaultOpenAiModel || OPENAI_DEFAULT_MODEL,
       });
 
     const createdVersions: MiEsenciaPromptVersionRecord[] = [];
@@ -5054,7 +5065,7 @@ Respuesta directa en primera persona singular:`;
       geminiPromptContent: nextGemContent,
       geminiPromptVersion: nextGemVersion,
       geminiConfigStatus: nextGemContent.trim() ? 'configurado' : 'sin_configurar',
-      openaiModel: params.openaiModel || currentAi.openaiModel || 'gpt-6',
+      openaiModel: params.openaiModel || currentAi.openaiModel || OPENAI_DEFAULT_MODEL,
       openaiPromptName: nextOaName,
       openaiPromptContent: nextOaContent,
       openaiPromptVersion: nextOaVersion,
@@ -5695,7 +5706,7 @@ Respuesta directa en primera persona singular:`;
       buildDefaultAvatarAiConfig({
         mode: 'modo_personalizado',
         defaultGeminiModel: this.config.defaultGeminiModel || MI_ESENCIA_DEFAULT_GEMINI_MODEL,
-        defaultOpenAiModel: this.config.defaultOpenAiModel || 'gpt-6',
+        defaultOpenAiModel: this.config.defaultOpenAiModel || OPENAI_DEFAULT_MODEL,
       });
 
     const assignedPdf = person.sourcePdfId

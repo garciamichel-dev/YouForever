@@ -308,7 +308,10 @@ export const MiEsenciaAdminSection: React.FC<MiEsenciaAdminSectionProps> = ({ ad
           ...prev,
           [provider]: json.data,
         }));
-        if (json.data.connected) {
+        if (json.data.connected && json.data.modelSubstituted) {
+          // V5.6.3: the connection works but another model answered — never shown as plain success.
+          showNotice('err', json.data.diagnosticAdvice);
+        } else if (json.data.connected) {
           showNotice(
             'ok',
             `Conexión exitosa con ${provider === 'openai' ? 'OpenAI GPT' : 'Google Gemini'} (${json.data.respondedModel} • ${json.data.latencyMs} ms).`
@@ -4219,10 +4222,10 @@ export const MiEsenciaAdminSection: React.FC<MiEsenciaAdminSectionProps> = ({ ad
                     <div className="flex gap-1.5">
                       <input
                         type="text"
-                        defaultValue={overview.config.defaultOpenAiModel || 'gpt-6'}
-                        placeholder="Ej. gpt-6, gpt-6-astra, gpt-5..."
+                        defaultValue={overview.config.defaultOpenAiModel || 'gpt-6-luna'}
+                        placeholder="Ej. gpt-6-luna, gpt-6-astra, gpt-6.1-sol..."
                         onBlur={async (e) => {
-                          const nextModel = e.target.value.trim() || 'gpt-6';
+                          const nextModel = e.target.value.trim() || 'gpt-6-luna';
                           await fetch('/api/mi-esencia/admin/config', {
                             method: 'POST',
                             headers: {
@@ -4242,7 +4245,7 @@ export const MiEsenciaAdminSection: React.FC<MiEsenciaAdminSectionProps> = ({ ad
                     </div>
                   ) : (
                     <select
-                      value={overview.config.defaultOpenAiModel || 'gpt-6'}
+                      value={overview.config.defaultOpenAiModel || 'gpt-6-luna'}
                       onChange={async (e) => {
                         if (e.target.value === '__custom__') {
                           setCustomGlobalOpenAiModel(true);
@@ -4278,7 +4281,7 @@ export const MiEsenciaAdminSection: React.FC<MiEsenciaAdminSectionProps> = ({ ad
                     onClick={() =>
                       handleTestGlobalApiConnection(
                         'openai',
-                        overview.config.defaultOpenAiModel || 'gpt-6'
+                        overview.config.defaultOpenAiModel || 'gpt-6-luna'
                       )
                     }
                     disabled={testingGlobalProvider === 'openai'}

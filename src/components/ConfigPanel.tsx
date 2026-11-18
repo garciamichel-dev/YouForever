@@ -1,3 +1,4 @@
+import { normalizeOpenAiModelId } from '../logic/openAiModelIds.ts';
 import React, { useState, useEffect, useRef } from 'react';
 import {
   Settings,
@@ -98,30 +99,33 @@ const GEMINI_BOOK_MODEL_PRESETS: BookModelPreset[] = [
 ];
 
 const OPENAI_BOOK_MODEL_PRESETS: BookModelPreset[] = [
+  // V5.6.3: real OpenAI API identifiers of the GPT-6 family. "gpt-6" alone is not an API model;
+  // configurations saved with it use gpt-6-luna. The list below the selector also shows the models
+  // the connected OpenAI account really reports.
   {
-    id: 'gpt-6',
-    label: 'GPT-6 (Recomendado OpenAI — Última Generación)',
-    description: 'Modelo insignia de OpenAI con máxima fidelidad al Compilado Testimonial y redacción literaria.',
+    id: 'gpt-6-luna',
+    label: 'GPT-6 Luna (Predeterminado — Ágil y Eficiente)',
+    description: 'El modelo más rápido y económico de la familia GPT-6, para redacción fluida de alto volumen.',
   },
   {
     id: 'gpt-6-astra',
-    label: 'GPT-6 Astra (Razonamiento Profundo y Empatía)',
-    description: 'Variante avanzada para matices emocionales complejos y apego estricto al prompt.',
+    label: 'GPT-6 Astra (El más capaz de OpenAI)',
+    description: 'Máxima capacidad de razonamiento y apego a instrucciones; también el de mayor costo.',
   },
   {
     id: 'gpt-6.1-sol',
-    label: 'GPT-6.1 Sol (Narración Autobiográfica Avanzada)',
-    description: 'Optimizado para redacción biográfica extensa con lectura íntegra de documentos.',
+    label: 'GPT-6.1 Sol (Calidad cercana a Astra)',
+    description: 'Alta calidad de redacción biográfica a un costo menor que Astra.',
+  },
+  {
+    id: 'gpt-6-sol',
+    label: 'GPT-6 Sol',
+    description: 'Nivel intermedio de la familia GPT-6 para razonamiento cotidiano.',
   },
   {
     id: 'gpt-6.1-terra',
-    label: 'GPT-6.1 Terra (Alta Velocidad y Contexto Extenso)',
+    label: 'GPT-6.1 Terra (Equilibrio velocidad / capacidad)',
     description: 'Equilibrio entre baja latencia y comprensión de entrevistas completas.',
-  },
-  {
-    id: 'gpt-6-luna',
-    label: 'GPT-6 Luna (Ágil y Eficiente)',
-    description: 'Modelo ligero de nueva generación para redacción fluida.',
   },
   {
     id: 'gpt-5',
@@ -211,7 +215,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ adminEmail }) => {
   // AI Provider & Model for Book Generation
   const [bookAiProvider, setBookAiProvider] = useState<BookAiProvider>('gemini');
   const [bookAiGeminiModel, setBookAiGeminiModel] = useState<string>('gemini-3-flash-preview');
-  const [bookAiOpenAiModel, setBookAiOpenAiModel] = useState<string>('gpt-6');
+  const [bookAiOpenAiModel, setBookAiOpenAiModel] = useState<string>('gpt-6-luna');
   const [bookStructureMode, setBookStructureMode] = useState<BookStructureMode>('prompt_autonomous');
   const [isCustomGeminiModel, setIsCustomGeminiModel] = useState<boolean>(false);
   const [isCustomOpenAiModel, setIsCustomOpenAiModel] = useState<boolean>(false);
@@ -337,7 +341,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ adminEmail }) => {
 
           const provider = data.bookAiProvider === 'openai' ? 'openai' : 'gemini';
           const gemModel = data.bookAiGeminiModel || 'gemini-3-flash-preview';
-          const oaiModel = data.bookAiOpenAiModel || 'gpt-6';
+          const oaiModel = normalizeOpenAiModelId(data.bookAiOpenAiModel);
           const structMode: BookStructureMode =
             data.bookStructureMode === 'fixed_five_stages' ? 'fixed_five_stages' : 'prompt_autonomous';
 
@@ -714,7 +718,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ adminEmail }) => {
               allowAdditionalMemories: allowAdditional,
               bookAiProvider,
               bookAiGeminiModel: bookAiGeminiModel.trim() || 'gemini-3-flash-preview',
-              bookAiOpenAiModel: bookAiOpenAiModel.trim() || 'gpt-6',
+              bookAiOpenAiModel: bookAiOpenAiModel.trim() || 'gpt-6-luna',
               bookStructureMode: structureModeToSave,
               literaryPrompts: promptsToSave,
               literaryPromptVersions: versionsToSave,

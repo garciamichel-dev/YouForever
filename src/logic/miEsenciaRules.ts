@@ -517,7 +517,7 @@ export const DEFAULT_MI_ESENCIA_CONFIG: MiEsenciaGlobalConfig = {
   defaultMonthlyMessageQuota: 1000,
   defaultDailyMessageQuota: 50,
   defaultGeminiModel: 'gemini-3.8-flash',
-  defaultOpenAiModel: 'gpt-6',
+  defaultOpenAiModel: 'gpt-6-luna',
   enableAutomaticProviderFallback: true,
   customPromptCategories: [
     'Conversación familiar',

@@ -143,6 +143,7 @@ import {
   validateAdminRegistrationUpdates,
 } from '../logic/freeRegistration.ts';
 import { DEFAULT_QUESTIONS } from './seedData.ts';
+import { normalizeOpenAiModelId } from '../logic/openAiModelIds.ts';
 import {
   buildCompleteTestStories,
   assignFreshTestStoryCredentials,
@@ -3164,7 +3165,8 @@ export class StorageManager {
 
   // --- Configuration ---
   public getConfig(): AppConfig {
-    return { ...this.config };
+    // V5.6.3: a configuration saved with the family name "gpt-6" is shown and used as gpt-6-luna.
+    return { ...this.config, bookAiOpenAiModel: normalizeOpenAiModelId(this.config.bookAiOpenAiModel) };
   }
 
   public async updateConfig(newConfig: Partial<AppConfig>, performedBy: string): Promise<AppConfig> {
@@ -3209,7 +3211,7 @@ export class StorageManager {
     }
 
     if (typeof newConfig.bookAiOpenAiModel === 'string' && newConfig.bookAiOpenAiModel.trim().length > 0) {
-      this.config.bookAiOpenAiModel = newConfig.bookAiOpenAiModel.trim();
+      this.config.bookAiOpenAiModel = normalizeOpenAiModelId(newConfig.bookAiOpenAiModel);
     }
 
     if (
@@ -6216,7 +6218,7 @@ export class StorageManager {
     const configuredProvider: BookAiProvider =
       this.config.bookAiProvider === 'openai' ? 'openai' : 'gemini';
     const geminiModel = this.config.bookAiGeminiModel || 'gemini-3-flash-preview';
-    const openaiModel = this.config.bookAiOpenAiModel || 'gpt-4o';
+    const openaiModel = normalizeOpenAiModelId(this.config.bookAiOpenAiModel);
     const alternateProvider: BookAiProvider = configuredProvider === 'openai' ? 'gemini' : 'openai';
     const sourceFingerprint = computeBookSourceFingerprint({
       interviewId: interview.id,
@@ -6339,7 +6341,7 @@ export class StorageManager {
     const configuredProvider: BookAiProvider =
       this.config.bookAiProvider === 'openai' ? 'openai' : 'gemini';
     const geminiModel = this.config.bookAiGeminiModel || 'gemini-3-flash-preview';
-    const openaiModel = this.config.bookAiOpenAiModel || 'gpt-4o';
+    const openaiModel = normalizeOpenAiModelId(this.config.bookAiOpenAiModel);
     const bookStructureMode: BookStructureMode =
       this.config.bookStructureMode === 'fixed_five_stages'
         ? 'fixed_five_stages'
@@ -7819,7 +7821,7 @@ export class StorageManager {
       literaryPromptText: activePrompt,
       configuredProvider: this.config.bookAiProvider,
       geminiModel: this.config.bookAiGeminiModel,
-      openaiModel: this.config.bookAiOpenAiModel,
+      openaiModel: normalizeOpenAiModelId(this.config.bookAiOpenAiModel),
       bookStructureMode: this.config.bookStructureMode,
       onProgress,
     });
