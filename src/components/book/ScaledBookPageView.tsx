@@ -14,7 +14,7 @@ export const ScaledBookPageView: React.FC<{
   page: ComposedBookPage;
   className?: string;
 }> = ({ composed, page, className = '' }) => {
-  const { width, height } = getBookReferencePageSizePx(composed.format);
+  const { width, height } = getBookReferencePageSizePx(composed.format, page.kind);
   const outerRef = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(1);
 

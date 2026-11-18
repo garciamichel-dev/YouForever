@@ -20,24 +20,43 @@ export const BOOK_REFERENCE_BODY_TEXT_PX: Record<string, number> = { a5: 12, '6x
 
 const MM_PER_PT = 25.4 / 72;
 
-/** Width (CSS px) at which every page of a format is laid out (viewer, pagination and PDF). */
-export function getBookReferencePageWidthPx(format: Pick<DemoBookFormatSpec, 'id' | 'widthMm'>): number {
+/**
+ * Width (CSS px) at which the COVER of each format is laid out: the width the viewer used to show it
+ * (V5.5.x), so the cover keeps the distribution the product owner approved (title, author, logo and
+ * ornament as large as in that viewer) while the interior uses the 12 pt book calibration.
+ */
+export const BOOK_COVER_REFERENCE_WIDTH_PX: Record<string, number> = { a5: 300, '6x9': 360, carta: 440 };
+
+type PageKindLike = string | undefined;
+
+/** Width (CSS px) at which a page of a format is laid out (viewer, pagination and PDF). */
+export function getBookReferencePageWidthPx(
+  format: Pick<DemoBookFormatSpec, 'id' | 'widthMm'>,
+  pageKind?: PageKindLike
+): number {
+  if (pageKind === 'cover' && BOOK_COVER_REFERENCE_WIDTH_PX[format.id]) return BOOK_COVER_REFERENCE_WIDTH_PX[format.id];
   const bodyPx = BOOK_REFERENCE_BODY_TEXT_PX[format.id] ?? 12.5;
   const mmPerPx = (BOOK_TARGET_BODY_TEXT_PT * MM_PER_PT) / bodyPx;
   return Math.round(format.widthMm / mmPerPx);
 }
 
-export function getBookReferencePageSizePx(format: Pick<DemoBookFormatSpec, 'id' | 'widthMm' | 'heightMm'>): {
+export function getBookReferencePageSizePx(
+  format: Pick<DemoBookFormatSpec, 'id' | 'widthMm' | 'heightMm'>,
+  pageKind?: PageKindLike
+): {
   width: number;
   height: number;
 } {
-  const width = getBookReferencePageWidthPx(format);
+  const width = getBookReferencePageWidthPx(format, pageKind);
   return { width, height: (width * format.heightMm) / format.widthMm };
 }
 
 /** Millimetres of paper per CSS px of the reference page. */
-export function getBookMmPerReferencePx(format: Pick<DemoBookFormatSpec, 'id' | 'widthMm'>): number {
-  return format.widthMm / getBookReferencePageWidthPx(format);
+export function getBookMmPerReferencePx(
+  format: Pick<DemoBookFormatSpec, 'id' | 'widthMm'>,
+  pageKind?: PageKindLike
+): number {
+  return format.widthMm / getBookReferencePageWidthPx(format, pageKind);
 }
 
 const TEXT_SIZE_VALUE = /^(xs|sm|base|lg|xl|\d?xl|\[[\d.]+(px|rem|em)\])$/;

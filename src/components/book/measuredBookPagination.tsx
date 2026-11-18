@@ -49,6 +49,9 @@ export function createBookPageStage(composed: ComposedBookDocument): BookPageSta
   const root: Root = createRoot(host);
 
   const render = (page: ComposedBookPage): HTMLElement => {
+    // The cover has its own reference width (see BOOK_COVER_REFERENCE_WIDTH_PX); the PDF scale is
+    // taken from the rendered width of each page, so it follows automatically.
+    host.style.width = `${getBookReferencePageWidthPx(composed.format, page.kind)}px`;
     flushSync(() => root.render(<DemoComposedPageView composed={composed} page={page} referenceLayout />));
     return host.firstElementChild as HTMLElement;
   };

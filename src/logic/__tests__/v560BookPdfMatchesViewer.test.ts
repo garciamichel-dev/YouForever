@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import {
   BOOK_TARGET_BODY_TEXT_PT,
   BOOK_REFERENCE_BODY_TEXT_PX,
+  BOOK_COVER_REFERENCE_WIDTH_PX,
   getBookMmPerReferencePx,
   getBookReferencePageWidthPx,
   resolveDesktopClasses,
@@ -59,6 +60,30 @@ test('V5.6.0-L3: el texto del libro impreso mide ~12 pt en los tres formatos', (
     assert.ok(Math.abs(pt - 12) < 0.1, `${f.id}: ${pt.toFixed(2)} pt`);
     assert.ok(getBookReferencePageWidthPx(f) >= 400, `${f.id}: ancho de referencia legible`);
   }
+});
+
+test('V5.6.0-L4: la portada conserva la distribución del visualizador anterior; el interior sigue a 12 pt', () => {
+  const previousViewerWidth: Record<string, number> = { a5: 300, '6x9': 360, carta: 440 };
+  for (const f of DEMO_BOOK_FORMATS) {
+    assert.equal(BOOK_COVER_REFERENCE_WIDTH_PX[f.id], previousViewerWidth[f.id], f.id);
+    assert.equal(getBookReferencePageWidthPx(f, 'cover'), previousViewerWidth[f.id], `${f.id}: portada`);
+    for (const kind of ['title_dedication', 'table_of_contents', 'chapter_content', 'editorial_credits', 'closing_mandatory']) {
+      assert.equal(getBookReferencePageWidthPx(f, kind), getBookReferencePageWidthPx(f), `${f.id}: ${kind} a 12 pt`);
+    }
+    // The cover fills the same paper: only the scale changes.
+    assert.ok(Math.abs(getBookMmPerReferencePx(f, 'cover') * previousViewerWidth[f.id] - f.widthMm) < 1e-9);
+  }
+  const stage = read('src/components/book/measuredBookPagination.tsx');
+  assert.match(stage, /host\.style\.width = `\$\{getBookReferencePageWidthPx\(composed\.format, page\.kind\)\}px`/);
+  assert.match(read('src/components/book/ScaledBookPageView.tsx'), /getBookReferencePageSizePx\(composed\.format, page\.kind\)/);
+  assert.match(read('src/utils/bookPdfExporter.ts'), /k: format\.widthMm \/ rr\.width/, 'la escala del PDF sale del ancho real de cada página');
+});
+
+test('V5.6.0-L5: el logo oficial de YouForever aparece en la portada de los libros guardados', () => {
+  assert.match(read('src/components/ParticipantBookStudio.tsx'), /useOfficialForeverYouLogo: true/);
+  const renderer = read('src/components/DemoBookPageRenderer.tsx');
+  const footer = renderer.slice(renderer.indexOf('data-testid="cover-footer-imprint"'));
+  assert.match(footer.slice(0, 600), /composed\.useOfficialForeverYouLogo && \(\s*<ForeverYouInfinitySymbol/);
 });
 
 test('V5.6.0-F1: cada diseño usa tipografías propias que existen en public/book-fonts (las mismas del PDF)', () => {
