@@ -858,8 +858,10 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
           id="vista-previa-legado"
           className="scroll-mt-20 max-w-7xl mx-auto px-6 py-14 lg:py-16 space-y-8"
         >
-          <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-6">
-            <div className="space-y-1.5 max-w-2xl">
+          {/* V5.8.2: text and page tabs stacked at every width. With 11 pages the tabs (shrink-0, side by
+              side with the text from lg up) left the text a very narrow column on desktop browsers. */}
+          <div data-testid="legacy-preview-header" className="flex flex-col gap-5">
+            <div className="space-y-1.5 max-w-3xl min-w-0">
               <div className="text-xs font-medium text-amber-900">
                 Visor Real de Páginas · Diseño Editorial Fijo de Muestra (Clásica Eterna · 6×9&quot;)
               </div>
@@ -872,7 +874,7 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
             </div>
 
             {/* Real Composed Book Page Selector Tabs */}
-            <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+            <div data-testid="legacy-preview-page-tabs" className="flex flex-wrap items-center gap-1.5 min-w-0 w-full">
               {composedSampleBook.pages.map((p, idx) => (
                 <button
                   key={`real-page-${p.pageNumber}`}

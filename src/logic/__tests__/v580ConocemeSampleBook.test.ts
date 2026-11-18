@@ -91,3 +91,11 @@ test('V5.8.1-L2: «Prueba gratuita» del encabezado lleva al registro gratuito /
   assert.match(link, /href="\/free"/);
   assert.match(link, /onNavigateToFree\(\)/);
 });
+
+test('V5.8.2-R1: el encabezado de la vista previa se apila en toda pantalla (las pestañas no aplastan el texto)', () => {
+  const view = read('src/components/ConocemeView.tsx');
+  assert.match(view, /data-testid="legacy-preview-header" className="flex flex-col gap-5"/);
+  assert.match(view, /data-testid="legacy-preview-page-tabs" className="flex flex-wrap items-center gap-1\.5 min-w-0 w-full"/);
+  const header = view.slice(view.indexOf('data-testid="legacy-preview-header"'), view.indexOf('data-testid="legacy-book-card"'));
+  assert.doesNotMatch(header, /lg:flex-row/);
+});
