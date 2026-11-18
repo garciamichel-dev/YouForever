@@ -50,6 +50,7 @@ import {
   DEMO_BOOK_FORMATS,
   DEMO_NARRATIVE_STYLES,
 } from '../logic/demoStoryRules.ts';
+import { withParticipantBookDefaults } from '../logic/participantBookConfig.ts';
 import { preloadBookResourcesForPdf } from '../utils/demoPdfGenerator.ts';
 import { generateBookPdfMatchingViewer } from '../utils/bookPdfExporter.ts';
 import { apiFetch } from '../utils/apiClient.ts';
@@ -618,7 +619,7 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
         task: async (updateStage) => {
           const composed = composeBookPages({
             manuscript: ver.manuscript,
-            editorialConfig: ver.editorialConfig,
+            editorialConfig: withParticipantBookDefaults(ver.editorialConfig),
             coverPhoto: ver.coverPhoto || null,
             chapterPhotos: ver.chapterPhotos || {},
             allPhotosById: (ver as any).allPhotosById || {},

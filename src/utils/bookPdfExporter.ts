@@ -327,12 +327,22 @@ async function drawTextNode(ctx: PageContext, node: Text, inheritedAlpha: number
     ctx.doc.setFontSize(fontSizePt);
     ctx.doc.setTextColor(Math.round(color.r), Math.round(color.g), Math.round(color.b));
   };
-  const drawAt = (text: string, xPx: number, baselinePx: number) => {
+  const drawAt = (text: string, xPx: number, baselinePx: number, browserWidthPx?: number) => {
     setTextStyle();
     setOpacity(ctx, alpha);
+    // V5.8.3: the browser kerns letter pairs («Vo», «Te»…) and jsPDF does not, so a word could come
+    // out wider than in the viewer and eat the following space («Voz de» → «Vozde»). Each word is
+    // fitted to the width the browser gave it by spreading the small difference between its letters.
+    let charSpace = letterSpacingMm;
+    if (browserWidthPx && text.length > 1) {
+      const natural = ctx.doc.getTextWidth(text) + letterSpacingMm * (text.length - 1);
+      const perGap = (browserWidthPx * ctx.k - natural) / (text.length - 1);
+      const fontMm = fontSizePt * (25.4 / 72);
+      if (Math.abs(perGap) < fontMm * 0.12) charSpace = letterSpacingMm + perGap;
+    }
     ctx.doc.text(text, mmX(ctx, xPx), mmY(ctx, baselinePx), {
       baseline: 'alphabetic',
-      ...(letterSpacingMm ? { charSpace: letterSpacingMm } : {}),
+      ...(charSpace ? { charSpace } : {}),
     });
     setOpacity(ctx, 1);
   };
@@ -380,7 +390,8 @@ async function drawTextNode(ctx: PageContext, node: Text, inheritedAlpha: number
         drawWordAsImage(ctx, word, r, cs, alpha);
         continue;
       }
-      drawAt(word, r.left, baseline);
+      // Width without the trailing letter-spacing the browser adds after the last letter.
+      drawAt(word, r.left, baseline, r.width - (letterSpacingMm ? letterSpacingMm / ctx.k : 0));
       if (clamp) {
         ctx.lastWordInClamp.set(clamp, { right: r.right, baseline, draw: (t, x) => drawAt(t, x, baseline) });
       }
@@ -455,7 +466,11 @@ function paintBox(
   const sides = (['Top', 'Right', 'Bottom', 'Left'] as const).map((s) => ({
     w: cs[`border${s}Style` as 'borderTopStyle'] === 'none' ? 0 : parseFloat(cs[`border${s}Width` as 'borderTopWidth']) || 0,
     c: parseColor(cs[`border${s}Color` as 'borderTopColor']),
+    style: cs[`border${s}Style` as 'borderTopStyle'],
   }));
+  // V5.8.3: dotted / dashed borders (e.g. the lines of the «Índice General») as in the browser.
+  const dashFor = (style: string, bwMm: number): number[] | null =>
+    style === 'dotted' ? [bwMm, bwMm] : style === 'dashed' ? [bwMm * 3, bwMm * 3] : null;
   const visible = sides.filter((s) => s.w > 0 && s.c && s.c.a > 0);
   if (visible.length === 0) return;
   const uniform =
@@ -467,18 +482,32 @@ function paintBox(
     doc.setDrawColor(Math.round(c.r), Math.round(c.g), Math.round(c.b));
     doc.setLineWidth(bw);
     setOpacity(ctx, alpha * c.a);
+    const uniformDash = dashFor(sides[0].style, bw);
+    if (uniformDash) doc.setLineDashPattern(uniformDash, 0);
     const inset = bw / 2;
     if (radius > 0.01) doc.roundedRect(x + inset, y + inset, w - bw, h - bw, Math.max(0, radius - inset), Math.max(0, radius - inset), 'S');
     else doc.rect(x + inset, y + inset, w - bw, h - bw, 'S');
+    if (uniformDash) doc.setLineDashPattern([], 0);
     setOpacity(ctx, 1);
     return;
   }
   const [top, right, bottom, left] = sides;
-  const fillSide = (s: { w: number; c: Rgba | null }, rx: number, ry: number, rw: number, rh: number) => {
+  const fillSide = (s: { w: number; c: Rgba | null; style: string }, rx: number, ry: number, rw: number, rh: number) => {
     if (!(s.w > 0 && s.c && s.c.a > 0)) return;
-    doc.setFillColor(Math.round(s.c.r), Math.round(s.c.g), Math.round(s.c.b));
+    const dash = dashFor(s.style, s.w * ctx.k);
     setOpacity(ctx, alpha * s.c.a);
-    doc.rect(rx, ry, rw, rh, 'F');
+    if (dash) {
+      // A line along the centre of the side, with the browser's dot / dash rhythm.
+      doc.setDrawColor(Math.round(s.c.r), Math.round(s.c.g), Math.round(s.c.b));
+      doc.setLineWidth(Math.min(rw, rh));
+      doc.setLineDashPattern(dash, 0);
+      if (rw >= rh) doc.line(rx, ry + rh / 2, rx + rw, ry + rh / 2);
+      else doc.line(rx + rw / 2, ry, rx + rw / 2, ry + rh);
+      doc.setLineDashPattern([], 0);
+    } else {
+      doc.setFillColor(Math.round(s.c.r), Math.round(s.c.g), Math.round(s.c.b));
+      doc.rect(rx, ry, rw, rh, 'F');
+    }
     setOpacity(ctx, 1);
   };
   fillSide(top, x, y, w, top.w * ctx.k);

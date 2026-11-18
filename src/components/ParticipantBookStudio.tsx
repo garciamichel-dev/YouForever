@@ -49,6 +49,7 @@ import {
   mergeEditorialFieldsIntoApprovedManuscript,
   hasUpdatedAnswersSinceBookVersion,
 } from '../logic/demoStoryRules.ts';
+import { withParticipantBookDefaults } from '../logic/participantBookConfig.ts';
 import {
   DemoCoverThumbnailCard,
   DemoInteriorThumbnailCard,
@@ -410,9 +411,9 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
     const targetManuscript = isEditingLayout
       ? manuscript
       : activeSavedVersion?.manuscript || manuscript;
-    const targetConfig = isEditingLayout
-      ? editorialConfig
-      : activeSavedVersion?.editorialConfig || editorialConfig;
+    const targetConfig = withParticipantBookDefaults(
+      isEditingLayout ? editorialConfig : activeSavedVersion?.editorialConfig || editorialConfig
+    );
     const targetCoverPhoto = isEditingLayout
       ? coverPhoto
       : activeSavedVersion?.coverPhoto || null;
@@ -1081,7 +1082,7 @@ BOOK_IN_PROGRESS_MESSAGE
         updateProgress({ stage: 'compose' });
         composedForVersion = composeBookPages({
           manuscript: version.manuscript,
-          editorialConfig: version.editorialConfig,
+          editorialConfig: withParticipantBookDefaults(version.editorialConfig),
           coverPhoto: resolvedCover,
           chapterPhotos: resolvedChapterPhotos,
           allPhotosById: resolvedAllPhotos,
@@ -1188,8 +1189,9 @@ BOOK_IN_PROGRESS_MESSAGE
 
     const activeStyle: DemoNarrativeStyleId =
       narrativeStyle || editorialConfig.narrativeStyle || 'first_person_literary';
+    // V5.8.3: the «Incluir índice» value is always saved explicitly (it could be missing before).
     const currentEditorialConfig: DemoEditorialConfig = {
-      ...editorialConfig,
+      ...withParticipantBookDefaults(editorialConfig),
       narrativeStyle: activeStyle,
     };
 
@@ -1463,7 +1465,7 @@ BOOK_IN_PROGRESS_MESSAGE
           ? fullComposedBook
           : composeBookPages({
               manuscript: savedVersion.manuscript,
-              editorialConfig: savedVersion.editorialConfig || currentEditorialConfig,
+              editorialConfig: withParticipantBookDefaults(savedVersion.editorialConfig || currentEditorialConfig),
               coverPhoto: resolvedCover,
               chapterPhotos: resolvedChapters,
               allPhotosById: resolvedAllPhotos,
@@ -1517,7 +1519,7 @@ BOOK_IN_PROGRESS_MESSAGE
   // so no 5-page PDF is generated until the user clicks a literary style option
   const handleConfirmAcceptQuotaAndEdit = () => {
     if (activeSavedVersion && !hasUpdatedAnswers) {
-      setEditorialConfig({ ...activeSavedVersion.editorialConfig });
+      setEditorialConfig(withParticipantBookDefaults({ ...activeSavedVersion.editorialConfig }));
       setManuscript(JSON.parse(JSON.stringify(activeSavedVersion.manuscript)));
       setAiOriginalManuscript(JSON.parse(JSON.stringify(activeSavedVersion.manuscript)));
       setCoverPhoto(activeSavedVersion.coverPhoto || null);
