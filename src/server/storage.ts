@@ -3221,6 +3221,14 @@ export class StorageManager {
       this.config.bookStructureMode = newConfig.bookStructureMode;
     }
 
+    // V5.7.0 — «Proporciones del libro» (Opción 1 / Opción 2). Unknown values are ignored.
+    if (
+      newConfig.bookLayoutMode === 'viewer_proportions' ||
+      newConfig.bookLayoutMode === 'cover_viewer_interior_12pt'
+    ) {
+      this.config.bookLayoutMode = newConfig.bookLayoutMode;
+    }
+
     if (newConfig.literaryPrompts && typeof newConfig.literaryPrompts === 'object') {
       const currentPrompts = this.config.literaryPrompts || { ...DEFAULT_LITERARY_PROMPTS_CONFIG };
       const styles: LiteraryPromptStyleId[] = [

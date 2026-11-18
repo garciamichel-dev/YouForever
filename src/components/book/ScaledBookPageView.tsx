@@ -6,6 +6,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { ComposedBookDocument, ComposedBookPage } from '../../logic/demoStoryRules.ts';
 import { getBookReferencePageSizePx } from '../../logic/bookReferenceLayout.ts';
+import { useBookLayoutMode } from './bookLayoutModeClient.ts';
 import { DemoComposedPageView } from '../DemoBookPageRenderer.tsx';
 import { paginateComposedBookByMeasurement } from './measuredBookPagination.tsx';
 
@@ -14,7 +15,12 @@ export const ScaledBookPageView: React.FC<{
   page: ComposedBookPage;
   className?: string;
 }> = ({ composed, page, className = '' }) => {
-  const { width, height } = getBookReferencePageSizePx(composed.format, page.kind);
+  const activeMode = useBookLayoutMode();
+  const { width, height } = getBookReferencePageSizePx(
+    composed.format,
+    page.kind,
+    composed.referenceLayoutMode ?? activeMode
+  );
   const outerRef = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(1);
 
@@ -49,6 +55,7 @@ export const ScaledBookPageView: React.FC<{
  */
 export function useMeasuredBook(composed: ComposedBookDocument): ComposedBookDocument {
   const [state, setState] = useState<{ source: ComposedBookDocument; book: ComposedBookDocument } | null>(null);
+  const mode = useBookLayoutMode(); // re-measure if the proportions change (Configuración Global)
   useEffect(() => {
     let alive = true;
     paginateComposedBookByMeasurement(composed)
@@ -59,6 +66,6 @@ export function useMeasuredBook(composed: ComposedBookDocument): ComposedBookDoc
     return () => {
       alive = false;
     };
-  }, [composed]);
+  }, [composed, mode]);
   return state?.book ?? composed;
 }

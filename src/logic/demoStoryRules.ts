@@ -1703,6 +1703,11 @@ export interface ComposedBookDocument {
   exceededMaxPagesWarning: boolean;
   isPreviewSample?: boolean;
   useOfficialForeverYouLogo?: boolean;
+  /**
+   * V5.7.0 — Proportions the measured pages were laid out with (set by the measured pagination), so
+   * the viewer, the page count and the PDF of one book always use the same mode.
+   */
+  referenceLayoutMode?: 'viewer_proportions' | 'cover_viewer_interior_12pt';
 }
 
 /**

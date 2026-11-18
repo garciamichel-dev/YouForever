@@ -9,6 +9,11 @@ export type BookAiProvider = 'gemini' | 'openai';
 
 export type BookStructureMode = 'prompt_autonomous' | 'fixed_five_stages';
 
+
+/** V5.7.0 — Proportions of the book (Configuración Global); see bookReferenceLayout.ts. */
+export type { BookLayoutMode } from './bookReferenceLayout.ts';
+import type { BookLayoutMode } from './bookReferenceLayout.ts';
+
 export interface LiteraryPromptVersion {
   id: string;
   name: string;
@@ -39,6 +44,7 @@ export interface AppConfig {
   bookAiGeminiModel?: string;
   bookAiOpenAiModel?: string;
   bookStructureMode?: BookStructureMode;
+  bookLayoutMode?: BookLayoutMode;
   literaryPrompts?: Record<LiteraryPromptStyleId, LiteraryStylePromptConfig>;
   literaryPromptVersions?: LiteraryPromptVersion[];
   updatedAt?: string;
@@ -132,6 +138,7 @@ export const INITIAL_APP_CONFIG: AppConfig = {
   bookAiGeminiModel: 'gemini-3-flash-preview',
   bookAiOpenAiModel: 'gpt-6-luna',
   bookStructureMode: 'prompt_autonomous',
+  bookLayoutMode: 'cover_viewer_interior_12pt',
   literaryPrompts: {
     first_person_simple: { ...DEFAULT_LITERARY_PROMPTS_CONFIG.first_person_simple },
     first_person_literary: { ...DEFAULT_LITERARY_PROMPTS_CONFIG.first_person_literary },

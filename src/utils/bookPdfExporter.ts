@@ -389,11 +389,17 @@ async function drawTextNode(ctx: PageContext, node: Text, inheritedAlpha: number
   range.detach?.();
 }
 
-function paintBox(ctx: PageContext, el: HTMLElement, cs: CSSStyleDeclaration, alpha: number) {
+function paintBox(
+  ctx: PageContext,
+  el: HTMLElement,
+  cs: CSSStyleDeclaration,
+  alpha: number,
+  options: { borderOnly?: boolean } = {}
+) {
   const { doc } = ctx;
   const r = el.getBoundingClientRect();
   if (r.width <= 0 || r.height <= 0) return;
-  const bg = parseColor(cs.backgroundColor);
+  const bg = options.borderOnly ? null : parseColor(cs.backgroundColor);
 
   // Rotated shapes (e.g. the diamond of the ornaments): drawn as a polygon. Tailwind v4 rotates
   // with the individual `rotate` property; `transform` may hold a matrix as well.
@@ -505,16 +511,19 @@ async function drawImage(ctx: PageContext, img: HTMLImageElement, alpha: number)
   }
   if (img.naturalWidth === 0) return;
   const box = img.getBoundingClientRect();
-  const clip = clipRectFor(ctx, img) || box;
+  // The clipping ancestor (photo frame) gives the rounded corners and the colour behind them.
+  // V5.7.0: the area is the FRAME (not the <img>: Chrome gives replaced elements `overflow: clip`, so
+  // the image's own box used to be taken as the frame and a photo narrower than its frame came out
+  // with rounded corners and without the side bands the viewer shows).
+  let frame: HTMLElement | null = img.parentElement;
+  while (frame && frame !== ctx.root && getComputedStyle(frame).overflowX === 'visible') frame = frame.parentElement;
+  const clip = (frame ? clipRectFor(ctx, frame) : null) || box;
   const left = Math.max(clip.left, box.left);
   const top = Math.max(clip.top, box.top);
   const right = Math.min(clip.right, box.right);
   const bottom = Math.min(clip.bottom, box.bottom);
   if (right - left < 0.5 || bottom - top < 0.5) return;
 
-  // The clipping ancestor (photo frame) gives the rounded corners and the colour behind them.
-  let frame: HTMLElement | null = img.parentElement;
-  while (frame && frame !== ctx.root && getComputedStyle(frame).overflowX === 'visible') frame = frame.parentElement;
   const frameCs = frame ? getComputedStyle(frame) : null;
   const innerRadius = frameCs
     ? Math.max(0, (parseFloat(frameCs.borderTopLeftRadius) || 0) - (parseFloat(frameCs.borderTopWidth) || 0))
@@ -531,6 +540,10 @@ async function drawImage(ctx: PageContext, img: HTMLImageElement, alpha: number)
   g.fillStyle = toCss(frame ? effectiveBackground(frame, ctx.root) : { r: 255, g: 255, b: 255, a: 1 });
   g.fillRect(0, 0, clipW, clipH);
   roundedClipPath(g, clipW, clipH, Math.min(innerRadius, clipW / 2, clipH / 2));
+  g.clip();
+  // …and the picture itself never paints outside its own box (the <img> clips its content).
+  g.beginPath();
+  g.rect(left - clip.left, top - clip.top, right - left, bottom - top);
   g.clip();
 
   // object-fit / object-position of the <img> inside its (possibly zoomed) box.
@@ -609,6 +622,16 @@ async function drawElement(ctx: PageContext, el: Element, parentAlpha: number): 
   for (const child of Array.from(el.childNodes)) {
     if (child.nodeType === Node.TEXT_NODE) await drawTextNode(ctx, child as Text, alpha);
     else if (child.nodeType === Node.ELEMENT_NODE) await drawElement(ctx, child as Element, alpha);
+  }
+  // V5.7.0: in the browser the content of a clipping box (photo frame) never covers its border; the
+  // PDF paints in document order, so the border of such a box is drawn again on top of its content.
+  if (
+    el instanceof HTMLElement &&
+    cs.visibility === 'visible' &&
+    (cs.overflowX !== 'visible' || cs.overflowY !== 'visible') &&
+    el.querySelector('img')
+  ) {
+    paintBox(ctx, el, cs, alpha, { borderOnly: true });
   }
 }
 

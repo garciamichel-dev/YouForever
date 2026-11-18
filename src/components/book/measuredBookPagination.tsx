@@ -18,7 +18,8 @@ import {
   type ComposedChapterSectionBlock,
   type DemoInMemoryPhoto,
 } from '../../logic/demoStoryRules.ts';
-import { getBookReferencePageWidthPx } from '../../logic/bookReferenceLayout.ts';
+import { getActiveBookLayoutMode, getBookReferencePageWidthPx, type BookLayoutMode } from '../../logic/bookReferenceLayout.ts';
+import { loadBookLayoutMode } from './bookLayoutModeClient.ts';
 import { BOOK_FONT_FACES } from '../../logic/bookFonts.ts';
 import { DemoComposedPageView } from '../DemoBookPageRenderer.tsx';
 
@@ -40,7 +41,9 @@ export interface BookPageStage {
 }
 
 export function createBookPageStage(composed: ComposedBookDocument): BookPageStage {
-  const width = getBookReferencePageWidthPx(composed.format);
+  // V5.7.0: a measured book carries the proportions it was paginated with; use exactly those.
+  const mode = composed.referenceLayoutMode ?? getActiveBookLayoutMode();
+  const width = getBookReferencePageWidthPx(composed.format, undefined, mode);
   const host = document.createElement('div');
   host.setAttribute('aria-hidden', 'true');
   host.setAttribute('data-book-measure-stage', 'true');
@@ -51,7 +54,7 @@ export function createBookPageStage(composed: ComposedBookDocument): BookPageSta
   const render = (page: ComposedBookPage): HTMLElement => {
     // The cover has its own reference width (see BOOK_COVER_REFERENCE_WIDTH_PX); the PDF scale is
     // taken from the rendered width of each page, so it follows automatically.
-    host.style.width = `${getBookReferencePageWidthPx(composed.format, page.kind)}px`;
+    host.style.width = `${getBookReferencePageWidthPx(composed.format, page.kind, mode)}px`;
     flushSync(() => root.render(<DemoComposedPageView composed={composed} page={page} referenceLayout />));
     return host.firstElementChild as HTMLElement;
   };
@@ -448,15 +451,27 @@ export function renumberComposedPages(composed: ComposedBookDocument, pages: Com
   };
 }
 
-const paginationCache = new WeakMap<ComposedBookDocument, Promise<ComposedBookDocument>>();
+const paginationCache = new WeakMap<ComposedBookDocument, Map<BookLayoutMode, Promise<ComposedBookDocument>>>();
 
 /**
  * The book exactly as the viewer shows it: every page fits its reference page. Same input object →
  * same (cached) result, so the viewer and the PDF of a version never differ.
  */
-export function paginateComposedBookByMeasurement(composed: ComposedBookDocument): Promise<ComposedBookDocument> {
-  const cached = paginationCache.get(composed);
+export async function paginateComposedBookByMeasurement(composed: ComposedBookDocument): Promise<ComposedBookDocument> {
+  // V5.7.0: proportions chosen in Configuración Global (Opción 1 / Opción 2).
+  const mode = await loadBookLayoutMode();
+  return paginateComposedBookWithMode(composed, mode);
+}
+
+export function paginateComposedBookWithMode(
+  original: ComposedBookDocument,
+  mode: BookLayoutMode
+): Promise<ComposedBookDocument> {
+  let byMode = paginationCache.get(original);
+  if (!byMode) paginationCache.set(original, (byMode = new Map()));
+  const cached = byMode.get(mode);
   if (cached) return cached;
+  const composed: ComposedBookDocument = { ...original, referenceLayoutMode: mode };
   const job = (async () => {
     await ensureBookFontsReady(composed);
     const stage = createBookPageStage(composed);
@@ -476,7 +491,7 @@ export function paginateComposedBookByMeasurement(composed: ComposedBookDocument
       stage.dispose();
     }
   })();
-  paginationCache.set(composed, job);
-  job.catch(() => paginationCache.delete(composed));
+  byMode.set(mode, job);
+  job.catch(() => byMode!.delete(mode));
   return job;
 }

@@ -36,6 +36,11 @@ import {
   LiteraryStylePromptConfig,
 } from '../logic/interviewRules.ts';
 import { DEMO_NARRATIVE_STYLES } from '../logic/demoStoryRules.ts';
+import {
+  normalizeBookLayoutMode,
+  setActiveBookLayoutMode,
+  type BookLayoutMode,
+} from '../logic/bookReferenceLayout.ts';
 import { apiFetch } from '../utils/apiClient.ts';
 import {
   AdminProgressModal,
@@ -217,6 +222,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ adminEmail }) => {
   const [bookAiGeminiModel, setBookAiGeminiModel] = useState<string>('gemini-3-flash-preview');
   const [bookAiOpenAiModel, setBookAiOpenAiModel] = useState<string>('gpt-6-luna');
   const [bookStructureMode, setBookStructureMode] = useState<BookStructureMode>('prompt_autonomous');
+  const [bookLayoutMode, setBookLayoutMode] = useState<BookLayoutMode>('cover_viewer_interior_12pt');
   const [isCustomGeminiModel, setIsCustomGeminiModel] = useState<boolean>(false);
   const [isCustomOpenAiModel, setIsCustomOpenAiModel] = useState<boolean>(false);
 
@@ -349,6 +355,9 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ adminEmail }) => {
           setBookAiGeminiModel(gemModel);
           setBookAiOpenAiModel(oaiModel);
           setBookStructureMode(structMode);
+          const layoutMode = normalizeBookLayoutMode(data.bookLayoutMode);
+          setBookLayoutMode(layoutMode);
+          setActiveBookLayoutMode(layoutMode);
           setIsCustomGeminiModel(!GEMINI_BOOK_MODEL_PRESETS.some((m) => m.id === gemModel));
           setIsCustomOpenAiModel(!OPENAI_BOOK_MODEL_PRESETS.some((m) => m.id === oaiModel));
 
@@ -682,13 +691,15 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ adminEmail }) => {
   const persistGlobalConfiguration = async (
     overridePrompts?: Record<LiteraryPromptStyleId, LiteraryStylePromptConfig>,
     overrideVersions?: LiteraryPromptVersion[],
-    overrideStructureMode?: BookStructureMode
+    overrideStructureMode?: BookStructureMode,
+    overrideLayoutMode?: BookLayoutMode
   ) => {
     if (!validate()) return;
 
     const promptsToSave = overridePrompts || literaryPrompts;
     const versionsToSave = overrideVersions || literaryPromptVersions;
     const structureModeToSave = overrideStructureMode || bookStructureMode;
+    const layoutModeToSave = overrideLayoutMode || bookLayoutMode;
 
     try {
       setSaving(true);
@@ -720,6 +731,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ adminEmail }) => {
               bookAiGeminiModel: bookAiGeminiModel.trim() || 'gemini-3-flash-preview',
               bookAiOpenAiModel: bookAiOpenAiModel.trim() || 'gpt-6-luna',
               bookStructureMode: structureModeToSave,
+              bookLayoutMode: layoutModeToSave,
               literaryPrompts: promptsToSave,
               literaryPromptVersions: versionsToSave,
             }),
@@ -731,6 +743,12 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ adminEmail }) => {
             setConfig(res.data);
             if (res.data.bookStructureMode) {
               setBookStructureMode(res.data.bookStructureMode);
+            }
+            {
+              const savedLayout = normalizeBookLayoutMode(res.data.bookLayoutMode);
+              setBookLayoutMode(savedLayout);
+              // Admin downloads in this session use the new proportions right away.
+              setActiveBookLayoutMode(savedLayout);
             }
             if (res.data.literaryPrompts) {
               setLiteraryPrompts(res.data.literaryPrompts);
@@ -1675,6 +1693,70 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ adminEmail }) => {
                 </p>
               </button>
             </div>
+          </div>
+
+          {/* V5.7.0 — Proporciones del libro (visualizador y PDF descargado) */}
+          <div
+            data-testid="book-layout-mode-selector"
+            className="p-4 bg-white border border-stone-200 rounded-xl space-y-3"
+          >
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+              <div>
+                <h4 className="text-xs font-bold text-stone-900 uppercase tracking-wider">
+                  Proporciones del Libro (Visualizador y PDF Descargado)
+                </h4>
+                <p className="text-xs text-stone-600 mt-0.5">
+                  Define el tamaño de la letra y de los elementos respecto a la página. Se aplica a todos los libros: al visualizador, a la muestra y al libro completo en PDF (participante y descargas de administración). El visualizador y el PDF siempre quedan idénticos.
+                </p>
+              </div>
+              <span className="inline-flex items-center px-2.5 py-1 rounded-md text-[11px] font-bold bg-amber-100 text-amber-900 border border-amber-300 shrink-0">
+                Activa: {bookLayoutMode === 'viewer_proportions' ? 'Opción 1 (Todo como el visualizador anterior)' : 'Opción 2 (Portada anterior + interior 12 pt)'}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {([
+                {
+                  id: 'viewer_proportions' as const,
+                  title: 'Opción 1 — Proporciones del visualizador anterior en todo el libro',
+                  text: 'Todo el libro (portada e interior) conserva las proporciones del visualizador anterior. El interior queda con letra grande (unos 15 pt en 6×9, 17 pt en A5 y 19 pt en Carta), con menos texto por página y más páginas.',
+                },
+                {
+                  id: 'cover_viewer_interior_12pt' as const,
+                  title: 'Opción 2 (Predeterminada) — Portada como antes, interior a 12 pt',
+                  text: 'La portada conserva la distribución del visualizador anterior (título, autor, ilustración y logo) y el interior se lee como un libro estándar con letra de unos 12 pt.',
+                },
+              ]).map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  data-testid={`book-layout-option-${opt.id}`}
+                  disabled={saving}
+                  onClick={() => {
+                    setBookLayoutMode(opt.id);
+                    persistGlobalConfiguration(undefined, undefined, undefined, opt.id);
+                  }}
+                  className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer disabled:opacity-60 ${
+                    bookLayoutMode === opt.id
+                      ? 'border-amber-700 bg-amber-50/70 ring-2 ring-amber-700/20'
+                      : 'border-stone-200 bg-stone-50/60 hover:border-stone-300'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-1 gap-2">
+                    <span className="text-xs font-bold text-stone-900">{opt.title}</span>
+                    {bookLayoutMode === opt.id && (
+                      <span className="px-2 py-0.5 bg-amber-700 text-white text-[10px] font-bold rounded uppercase shrink-0">
+                        Seleccionada
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-stone-600 leading-relaxed">{opt.text}</p>
+                </button>
+              ))}
+            </div>
+            <p className="text-[11px] text-stone-500 leading-relaxed">
+              El cambio no modifica el texto, las fotos ni las versiones guardadas: solo cómo se reparten en las páginas. Por eso un libro ya guardado puede mostrar otro número de páginas al abrirlo o descargarlo de nuevo.
+            </p>
           </div>
 
           <div className="p-3 bg-indigo-50/70 border border-indigo-200 rounded-lg text-xs text-indigo-950 flex items-start space-x-2.5">

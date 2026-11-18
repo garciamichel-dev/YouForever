@@ -9,8 +9,44 @@
  * the design; the viewer scales that page to fit the screen and the PDF is drawn from that very
  * page. The reference width is calibrated so the body text measures BOOK_TARGET_BODY_TEXT_PT in
  * print (decision of the product owner: standard book, ~12 pt).
+ *
+ * V5.7.0 — The proportions are a global setting (Configuración Global → «Proporciones del libro»):
+ *   Opción 1 'viewer_proportions': EVERY page uses the width of the former viewer (large print).
+ *   Opción 2 'cover_viewer_interior_12pt' (default): cover as the former viewer, interior at 12 pt.
  */
 import type { DemoBookFormatSpec } from './demoStoryRules.ts';
+/**
+ * V5.7.0 — Proportions of the book (viewer and downloaded PDF), chosen in Configuración Global.
+ * - 'viewer_proportions' (Opción 1): the whole book keeps the proportions of the former viewer
+ *   (large print: body text ~15–19 pt depending on the format; fewer words per page, more pages).
+ * - 'cover_viewer_interior_12pt' (Opción 2, default): the cover keeps the proportions of the former
+ *   viewer and the interior is a standard book with ~12 pt body text.
+ */
+export type BookLayoutMode = 'viewer_proportions' | 'cover_viewer_interior_12pt';
+export const DEFAULT_BOOK_LAYOUT_MODE: BookLayoutMode = 'cover_viewer_interior_12pt';
+export function normalizeBookLayoutMode(value: unknown): BookLayoutMode {
+  return value === 'viewer_proportions' || value === 'cover_viewer_interior_12pt' ? value : DEFAULT_BOOK_LAYOUT_MODE;
+}
+
+let activeBookLayoutMode: BookLayoutMode = DEFAULT_BOOK_LAYOUT_MODE;
+const layoutModeListeners = new Set<() => void>();
+
+/** Mode used for books measured from now on (loaded from the global configuration). */
+export function getActiveBookLayoutMode(): BookLayoutMode {
+  return activeBookLayoutMode;
+}
+
+export function setActiveBookLayoutMode(mode: unknown): void {
+  const next = normalizeBookLayoutMode(mode);
+  if (next === activeBookLayoutMode) return;
+  activeBookLayoutMode = next;
+  for (const fn of Array.from(layoutModeListeners)) fn();
+}
+
+export function subscribeBookLayoutMode(fn: () => void): () => void {
+  layoutModeListeners.add(fn);
+  return () => layoutModeListeners.delete(fn);
+}
 
 /** Body text size of the printed book (pt). The only knob to make the whole book larger/smaller. */
 export const BOOK_TARGET_BODY_TEXT_PT = 12;
@@ -21,9 +57,9 @@ export const BOOK_REFERENCE_BODY_TEXT_PX: Record<string, number> = { a5: 12, '6x
 const MM_PER_PT = 25.4 / 72;
 
 /**
- * Width (CSS px) at which the COVER of each format is laid out: the width the viewer used to show it
- * (V5.5.x), so the cover keeps the distribution the product owner approved (title, author, logo and
- * ornament as large as in that viewer) while the interior uses the 12 pt book calibration.
+ * Width (CSS px) at which the former viewer (V5.5.x) showed a page of each format. The COVER always
+ * uses it (the distribution the product owner approved: title, author, logo and ornament as large as
+ * in that viewer); with 'viewer_proportions' every other page uses it too.
  */
 export const BOOK_COVER_REFERENCE_WIDTH_PX: Record<string, number> = { a5: 300, '6x9': 360, carta: 440 };
 
@@ -32,9 +68,11 @@ type PageKindLike = string | undefined;
 /** Width (CSS px) at which a page of a format is laid out (viewer, pagination and PDF). */
 export function getBookReferencePageWidthPx(
   format: Pick<DemoBookFormatSpec, 'id' | 'widthMm'>,
-  pageKind?: PageKindLike
+  pageKind?: PageKindLike,
+  mode: BookLayoutMode = activeBookLayoutMode
 ): number {
-  if (pageKind === 'cover' && BOOK_COVER_REFERENCE_WIDTH_PX[format.id]) return BOOK_COVER_REFERENCE_WIDTH_PX[format.id];
+  const viewerWidth = BOOK_COVER_REFERENCE_WIDTH_PX[format.id];
+  if (viewerWidth && (pageKind === 'cover' || mode === 'viewer_proportions')) return viewerWidth;
   const bodyPx = BOOK_REFERENCE_BODY_TEXT_PX[format.id] ?? 12.5;
   const mmPerPx = (BOOK_TARGET_BODY_TEXT_PT * MM_PER_PT) / bodyPx;
   return Math.round(format.widthMm / mmPerPx);
@@ -42,21 +80,23 @@ export function getBookReferencePageWidthPx(
 
 export function getBookReferencePageSizePx(
   format: Pick<DemoBookFormatSpec, 'id' | 'widthMm' | 'heightMm'>,
-  pageKind?: PageKindLike
+  pageKind?: PageKindLike,
+  mode: BookLayoutMode = activeBookLayoutMode
 ): {
   width: number;
   height: number;
 } {
-  const width = getBookReferencePageWidthPx(format, pageKind);
+  const width = getBookReferencePageWidthPx(format, pageKind, mode);
   return { width, height: (width * format.heightMm) / format.widthMm };
 }
 
 /** Millimetres of paper per CSS px of the reference page. */
 export function getBookMmPerReferencePx(
   format: Pick<DemoBookFormatSpec, 'id' | 'widthMm'>,
-  pageKind?: PageKindLike
+  pageKind?: PageKindLike,
+  mode: BookLayoutMode = activeBookLayoutMode
 ): number {
-  return format.widthMm / getBookReferencePageWidthPx(format, pageKind);
+  return format.widthMm / getBookReferencePageWidthPx(format, pageKind, mode);
 }
 
 const TEXT_SIZE_VALUE = /^(xs|sm|base|lg|xl|\d?xl|\[[\d.]+(px|rem|em)\])$/;

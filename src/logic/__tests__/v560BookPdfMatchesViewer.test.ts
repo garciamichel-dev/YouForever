@@ -74,8 +74,9 @@ test('V5.6.0-L4: la portada conserva la distribución del visualizador anterior;
     assert.ok(Math.abs(getBookMmPerReferencePx(f, 'cover') * previousViewerWidth[f.id] - f.widthMm) < 1e-9);
   }
   const stage = read('src/components/book/measuredBookPagination.tsx');
-  assert.match(stage, /host\.style\.width = `\$\{getBookReferencePageWidthPx\(composed\.format, page\.kind\)\}px`/);
-  assert.match(read('src/components/book/ScaledBookPageView.tsx'), /getBookReferencePageSizePx\(composed\.format, page\.kind\)/);
+  // V5.7.0: + the proportions mode chosen in Configuración Global.
+  assert.match(stage, /host\.style\.width = `\$\{getBookReferencePageWidthPx\(composed\.format, page\.kind, mode\)\}px`/);
+  assert.match(read('src/components/book/ScaledBookPageView.tsx'), /getBookReferencePageSizePx\(\s*composed\.format,\s*page\.kind,/);
   assert.match(read('src/utils/bookPdfExporter.ts'), /k: format\.widthMm \/ rr\.width/, 'la escala del PDF sale del ancho real de cada página');
 });
 

@@ -353,6 +353,21 @@ apiRouter.get('/config', (_req: Request, res: Response) => {
   }
 });
 
+// V5.7.0 — Public: ONLY the book proportions chosen in Configuración Global, so the interviewee's
+// viewer and PDF use them (the rest of the configuration is not exposed here).
+apiRouter.get('/book-layout', (_req: Request, res: Response) => {
+  try {
+    const mode = storage.getConfig().bookLayoutMode;
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      success: true,
+      data: { bookLayoutMode: mode === 'viewer_proportions' ? 'viewer_proportions' : 'cover_viewer_interior_12pt' },
+    });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
 apiRouter.post('/config', requireAdmin, async (req: Request, res: Response) => {
   try {
     const admin = (req as any).adminUser as string;
