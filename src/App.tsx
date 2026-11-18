@@ -311,6 +311,7 @@ export default function App() {
               <ConocemeView
                 onNavigateToPortal={() => handleSelectView('participant')}
                 onNavigateToDemo={() => handleSelectView('demo')}
+                onNavigateToFree={() => handleSelectView('free')}
                 onBackToAdmin={isAuthorizedAdmin ? () => handleSelectView('admin') : undefined}
                 onOpenFaq={() => setIsFaqOpen(true)}
                 onOpenPrivacyNotice={() => setIsPrivacyNoticeOpen(true)}

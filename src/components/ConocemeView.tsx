@@ -40,194 +40,29 @@ import {
   OFFICIAL_CONTACT_EMAIL,
   OFFICIAL_WHATSAPP_DISPLAY,
 } from '../utils/conocemeLogic.ts';
+import { composeBookPages } from '../logic/demoStoryRules.ts';
 import {
-  composeBookPages,
-  DemoEditorialConfig,
-  DemoInMemoryPhoto,
-  DemoManuscript,
-} from '../logic/demoStoryRules.ts';
-import { DemoComposedPageView } from './DemoBookPageRenderer.tsx';
+  CONOCEME_SAMPLE_EDITORIAL_CONFIG,
+  CONOCEME_SAMPLE_MANUSCRIPT,
+  CONOCEME_SAMPLE_PHOTOS,
+} from '../logic/conocemeSampleBook.ts';
+import { ScaledBookPageView, useMeasuredBook } from './book/ScaledBookPageView.tsx';
 import { ForeverYouLogo } from './ForeverYouLogo';
 
 interface ConocemeViewProps {
   onNavigateToPortal?: () => void;
   onNavigateToDemo?: () => void;
+  /** V5.8.0 — registro gratuito (/free). */
+  onNavigateToFree?: () => void;
   onBackToAdmin?: () => void;
   onOpenPrivacyNotice?: () => void;
   onOpenFaq?: () => void;
 }
 
-/**
- * Generates an archival sepia-toned SVG data URI photograph for the registered-user book preview
- * so the real `DemoComposedPageView` renders authentic illustrated chapter pages.
- */
-function buildArchivalSamplePhotoDataUrl(params: {
-  title: string;
-  subtitle: string;
-  year: string;
-  bgFrom: string;
-  bgTo: string;
-  accent: string;
-}): string {
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="800" height="520" viewBox="0 0 800 520">
-    <defs>
-      <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
-        <stop offset="0%" stop-color="${params.bgFrom}" />
-        <stop offset="100%" stop-color="${params.bgTo}" />
-      </linearGradient>
-    </defs>
-    <rect width="800" height="520" fill="url(#bg)" rx="12" />
-    <rect x="24" y="24" width="752" height="472" fill="none" stroke="${params.accent}" stroke-opacity="0.45" stroke-width="2" rx="8" />
-    <circle cx="400" cy="210" r="68" fill="none" stroke="${params.accent}" stroke-opacity="0.55" stroke-width="2" />
-    <path d="M350 280 C365 245, 435 245, 450 280" fill="none" stroke="${params.accent}" stroke-opacity="0.65" stroke-width="3" stroke-linecap="round" />
-    <text x="400" y="105" text-anchor="middle" fill="${params.accent}" font-family="Georgia, serif" font-size="18" letter-spacing="3">${params.year.toUpperCase()}</text>
-    <text x="400" y="365" text-anchor="middle" fill="#FAF8F5" font-family="Georgia, serif" font-size="25" font-weight="bold">${params.title}</text>
-    <text x="400" y="405" text-anchor="middle" fill="#E7E0D6" font-family="Georgia, serif" font-size="17" font-style="italic">${params.subtitle}</text>
-  </svg>`;
-  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
-}
-
-const FIXED_REGISTERED_SAMPLE_EDITORIAL_CONFIG: DemoEditorialConfig = {
-  narrativeStyle: 'first_person_literary',
-  coverDesignId: 'clasica_eterna',
-  coverColorVariantIdx: 0,
-  coverVisualType: 'illustration',
-  coverIllustrationId: 'arbol_raices',
-  interiorStyleId: 'clasico_editorial',
-  bookFormatId: '6x9',
-  customTitle: 'El Patio de los Geranios y Nuestra Historia',
-  customSubtitle: 'Libro Autobiográfico y Patrimonio Familiar',
-  customAuthors: 'Elena Martínez de Gómez',
-  dedication:
-    'Para mis hijos y nietos: que cada vez que abran estas páginas recuerden que nuestra mayor fortuna siempre ha sido querernos y caminar juntos con honestidad.',
-};
-
-const FIXED_REGISTERED_SAMPLE_MANUSCRIPT: DemoManuscript = {
-  title: 'El Patio de los Geranios y Nuestra Historia',
-  subtitle: 'Libro Autobiográfico y Patrimonio Familiar',
-  authors: 'Elena Martínez de Gómez',
-  mode: 'individual',
-  narrativeStyle: 'first_person_literary',
-  dedication:
-    'Para mis hijos y nietos: que cada vez que abran estas páginas recuerden que nuestra mayor fortuna siempre ha sido querernos y caminar juntos con honestidad.',
-  introduction:
-    'Este libro reúne los recuerdos, fotografías y grabaciones de voz originales compartidos en YouForever, redactados con fidelidad absoluta a cada palabra narrada.',
-  closingMessage: 'Esta historia continuará...',
-  insufficientInfoNotices: [],
-  generatedAt: '2026-03-20T12:00:00.000Z',
-  useOfficialForeverYouLogo: true,
-  chapters: [
-    {
-      id: 'cap-1',
-      partNumber: 1,
-      dimensionKey: 'raices',
-      title: 'El Patio de los Geranios y la Voz de la Abuela',
-      paragraphs: [
-        'Crecimos en una casa de techos altos con un patio central lleno de macetas con geranios rojos en el Barrio de Analco, en Guadalajara. Por las tardes jugábamos bajo la sombra del limonero mientras mi abuela Elena horneaba pan y escuchábamos la radio.',
-        'Ella no necesitaba alzar la voz para enseñarnos; bastaba con ver el cariño con el que repartía cada pieza de pan tibio entre nosotros y los vecinos del barrio.',
-      ],
-      pullQuote:
-        '«Mi abuela Elena sacaba las charolas de pan tibio a las seis de la tarde; ese olor a canela y leña sigue siendo para mí el verdadero significado de hogar.»',
-    },
-    {
-      id: 'cap-2',
-      partNumber: 2,
-      dimensionKey: 'transformacion',
-      title: 'Una Maleta de Cuero y una Carta Doblada',
-      paragraphs: [
-        'Cuando cumplí diecinueve años conseguí mi primera beca para estudiar en la capital. Viajé en el autobús nocturno con una sola maleta de cuero café que me prestó mi padre.',
-        'Dentro llevaba una carta escrita a mano por mi madre recordándome que ningún título valía más que la palabra empeñada y que en casa siempre habría un lugar esperándome.',
-      ],
-      pullQuote:
-        '«Cuando abrí la maleta en aquella habitación estudiantil, encontré la carta de mi madre entre mis camisas. La leí tres veces antes de dormir.»',
-    },
-    {
-      id: 'cap-3',
-      partNumber: 3,
-      dimensionKey: 'personas_amadas',
-      title: 'El Amor que Construyó Nuestro Hogar',
-      paragraphs: [
-        'Nuestra historia compartida nació en una tarde lluviosa de octubre de 1972, afuera del café de la universidad. Aquel paraguas prestado fue el inicio de una caminata sin prisa por diez cuadras.',
-        'En nuestro primer departamento mantuvimos intacta la misma costumbre: escucharnos al final del día y nunca irnos a dormir sin darnos la mano con gratitud.',
-      ],
-      pullQuote:
-        '«Caminamos diez cuadras bajo un mismo paraguas en octubre de 1972 y sentimos que la conversación había empezado muchos años atrás.»',
-    },
-    {
-      id: 'cap-4',
-      partNumber: 4,
-      dimensionKey: 'legado',
-      title: 'Lecciones de Vida para Nuestros Nietos',
-      paragraphs: [
-        'En 1985 aprendimos que los bienes materiales pueden levantarse de nuevo con esfuerzo, pero la unión entre hermanos y el buen nombre permanecen para siempre.',
-        'A quienes lean estas páginas dentro de cincuenta años les dejamos esta certeza: nunca cambien la honestidad ni el tiempo con quienes aman por la prisa del mundo.',
-      ],
-      pullQuote:
-        '«La verdadera riqueza está en tener paz en la conciencia y una mesa familiar donde todos sepan que siempre pueden regresar.»',
-    },
-  ],
-};
-
-const FIXED_REGISTERED_SAMPLE_PHOTOS: Record<string, DemoInMemoryPhoto | null> = {
-  'cap-1': {
-    id: 'sample-photo-cap-1',
-    fileName: 'patio_geranios_1954.jpg',
-    mimeType: 'image/svg+xml',
-    width: 800,
-    height: 520,
-    focusY: 'center',
-    zoom: 1,
-    caption:
-      'Fotografía tomada con la cámara de rollo de mi tío Roberto (Octubre 1954, Barrio de Analco, Guadalajara).',
-    objectUrl: buildArchivalSamplePhotoDataUrl({
-      title: 'Tarde de domingo en el patio de la abuela Elena',
-      subtitle: 'Barrio de Analco, Guadalajara',
-      year: 'Octubre 1954',
-      bgFrom: '#451a03',
-      bgTo: '#78350f',
-      accent: '#f59e0b',
-    }),
-    dataUrl: buildArchivalSamplePhotoDataUrl({
-      title: 'Tarde de domingo en el patio de la abuela Elena',
-      subtitle: 'Barrio de Analco, Guadalajara',
-      year: 'Octubre 1954',
-      bgFrom: '#451a03',
-      bgTo: '#78350f',
-      accent: '#f59e0b',
-    }),
-  },
-  'cap-3': {
-    id: 'sample-photo-cap-3',
-    fileName: 'cafe_universidad_1972.jpg',
-    mimeType: 'image/svg+xml',
-    width: 800,
-    height: 520,
-    focusY: 'center',
-    zoom: 1,
-    caption:
-      'Un mes después de aquella caminata bajo la lluvia afuera del Café de la Universidad (Noviembre 1972).',
-    objectUrl: buildArchivalSamplePhotoDataUrl({
-      title: 'Nuestro primer otoño juntos',
-      subtitle: 'Café de la Universidad',
-      year: 'Noviembre 1972',
-      bgFrom: '#31102F',
-      bgTo: '#581C4F',
-      accent: '#FBBF24',
-    }),
-    dataUrl: buildArchivalSamplePhotoDataUrl({
-      title: 'Nuestro primer otoño juntos',
-      subtitle: 'Café de la Universidad',
-      year: 'Noviembre 1972',
-      bgFrom: '#31102F',
-      bgTo: '#581C4F',
-      accent: '#FBBF24',
-    }),
-  },
-};
-
 export const ConocemeView: React.FC<ConocemeViewProps> = ({
   onNavigateToPortal,
   onNavigateToDemo,
+  onNavigateToFree,
   onBackToAdmin,
 }) => {
   // 1. SIMULADOR DE ENTREVISTA (AI Chat Interface State — 100% In-Memory, Zero Firestore Writes)
@@ -269,18 +104,22 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
   const [selectedPhotoId, setSelectedPhotoId] = useState<string>(DEMO_PHOTO_MEMORIES[0].id);
 
   // 2. VISTA PREVIA INTERACTIVA DEL LEGADO (Real Composed Book Pages + Disposition Slider State)
-  const composedSampleBook = useMemo(() => {
+  // V5.8.0: complete third-person biography, composed and laid out exactly like the books of the
+  // participant portal (measured pages, same proportions as the PDF).
+  const composedSampleSource = useMemo(() => {
     const doc = composeBookPages({
-      manuscript: FIXED_REGISTERED_SAMPLE_MANUSCRIPT,
-      editorialConfig: FIXED_REGISTERED_SAMPLE_EDITORIAL_CONFIG,
-      chapterPhotos: FIXED_REGISTERED_SAMPLE_PHOTOS,
+      manuscript: CONOCEME_SAMPLE_MANUSCRIPT,
+      editorialConfig: CONOCEME_SAMPLE_EDITORIAL_CONFIG,
+      chapterPhotos: CONOCEME_SAMPLE_PHOTOS,
       customClosingPageText: 'Esta historia continuará...',
+      maxContentPages: 500,
     });
     return {
       ...doc,
       useOfficialForeverYouLogo: true,
     };
   }, []);
+  const composedSampleBook = useMeasuredBook(composedSampleSource);
 
   const [pageIndex, setPageIndex] = useState<number>(0);
   const [layoutSliderValue, setLayoutSliderValue] = useState<number>(50);
@@ -384,8 +223,9 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
   const totalComposedPages = composedSampleBook.pages.length;
   const safePageIndex = Math.max(0, Math.min(pageIndex, totalComposedPages - 1));
   const activeComposedPage = composedSampleBook.pages[safePageIndex] || composedSampleBook.pages[0];
+  const activeChapterNumber = activeComposedPage.sections?.[0]?.partNumber ?? 1;
   const activeBookPage =
-    SAMPLE_BOOK_CHAPTERS[safePageIndex % SAMPLE_BOOK_CHAPTERS.length] || SAMPLE_BOOK_CHAPTERS[0];
+    SAMPLE_BOOK_CHAPTERS[(activeChapterNumber - 1) % SAMPLE_BOOK_CHAPTERS.length] || SAMPLE_BOOK_CHAPTERS[0];
   const layoutDisposition = computeLegacyLayoutDisposition(layoutSliderValue);
   const selectedPhoto =
     DEMO_PHOTO_MEMORIES.find((p) => p.id === selectedPhotoId) || DEMO_PHOTO_MEMORIES[0];
@@ -567,11 +407,13 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
                     </p>
                   </div>
                   <a
-                    href="/demo"
+                    href="/free"
+                    data-testid="conoceme-create-free-story"
                     onClick={(e) => {
-                      if (onNavigateToDemo) {
+                      // V5.8.0: «Crear mi historia gratis» lleva al registro gratuito (/free).
+                      if (onNavigateToFree) {
                         e.preventDefault();
-                        onNavigateToDemo();
+                        onNavigateToFree();
                       }
                     }}
                     className="px-4 py-2.5 bg-stone-900 hover:bg-stone-800 text-amber-50 text-xs font-semibold rounded-lg transition-colors inline-flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
@@ -1071,11 +913,8 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
 
               {/* Authentic Registered-User Page Viewer */}
               <div className="bg-stone-100/90 border border-stone-200/90 rounded-2xl p-4 sm:p-6 flex flex-col items-center justify-center">
-                <div className="w-full max-w-[460px] shadow-xl rounded-sm overflow-hidden">
-                  <DemoComposedPageView
-                    composed={composedSampleBook}
-                    page={activeComposedPage}
-                  />
+                <div className="w-full max-w-[430px] shadow-xl rounded-sm overflow-hidden">
+                  <ScaledBookPageView composed={composedSampleBook} page={activeComposedPage} />
                 </div>
               </div>
 
