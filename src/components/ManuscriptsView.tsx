@@ -31,7 +31,8 @@ import {
   DEMO_BOOK_FORMATS,
   DEMO_NARRATIVE_STYLES,
 } from '../logic/demoStoryRules.ts';
-import { generateRealDemoBookPdf, preloadBookResourcesForPdf } from '../utils/demoPdfGenerator.ts';
+import { preloadBookResourcesForPdf } from '../utils/demoPdfGenerator.ts';
+import { generateBookPdfMatchingViewer } from '../utils/bookPdfExporter.ts';
 import { apiFetch } from '../utils/apiClient.ts';
 import BookAuditReportPanel, { CoverageBandChip } from './BookAuditReportPanel.tsx';
 import {
@@ -224,13 +225,15 @@ export const ManuscriptsView: React.FC<ManuscriptsViewProps> = ({
             allPhotosById: (ver as any).allPhotosById || {},
             customClosingPageText: ver.closingPageText || undefined,
             maxContentPages: 500,
+            lockedLeadingContentGroups: ver.manuscript?.lockedPreviewGroups,
           });
 
           update(60, 'Precargando recursos gráficos y fotografías de alta resolución...');
           await preloadBookResourcesForPdf(composed);
 
           update(85, 'Renderizando documento PDF final para descarga...');
-          const { blobUrl } = generateRealDemoBookPdf({
+          // V5.6.0: same PDF as the participant's viewer (falls back to the previous generator).
+          const { blobUrl } = await generateBookPdfMatchingViewer({
             composed,
             profile: {
               mode: ver.manuscript.mode,

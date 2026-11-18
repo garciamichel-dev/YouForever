@@ -50,7 +50,8 @@ import {
   DEMO_BOOK_FORMATS,
   DEMO_NARRATIVE_STYLES,
 } from '../logic/demoStoryRules.ts';
-import { generateRealDemoBookPdf, preloadBookResourcesForPdf } from '../utils/demoPdfGenerator.ts';
+import { preloadBookResourcesForPdf } from '../utils/demoPdfGenerator.ts';
+import { generateBookPdfMatchingViewer } from '../utils/bookPdfExporter.ts';
 import { apiFetch } from '../utils/apiClient.ts';
 import {
   AdminProgressModal,
@@ -620,15 +621,18 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
             editorialConfig: ver.editorialConfig,
             coverPhoto: ver.coverPhoto || null,
             chapterPhotos: ver.chapterPhotos || {},
+            allPhotosById: (ver as any).allPhotosById || {},
             customClosingPageText: ver.closingPageText || inv.participantClosingText || undefined,
             maxContentPages: 500,
+            lockedLeadingContentGroups: ver.manuscript?.lockedPreviewGroups,
           });
 
           updateStage(50, 'Precargando fotografías e ilustraciones del libro...');
           await preloadBookResourcesForPdf(composed);
 
           updateStage(82, 'Generando archivo PDF final...');
-          const { blobUrl } = generateRealDemoBookPdf({
+          // V5.6.0: same PDF as the participant's viewer (falls back to the previous generator).
+          const { blobUrl } = await generateBookPdfMatchingViewer({
             composed,
             profile: {
               mode: ver.manuscript.mode,

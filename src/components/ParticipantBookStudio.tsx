@@ -50,11 +50,13 @@ import {
   hasUpdatedAnswersSinceBookVersion,
 } from '../logic/demoStoryRules.ts';
 import {
-  DemoComposedPageView,
   DemoCoverThumbnailCard,
   DemoInteriorThumbnailCard,
 } from './DemoBookPageRenderer.tsx';
-import { generateRealDemoBookPdf, preloadBookResourcesForPdf } from '../utils/demoPdfGenerator.ts';
+import { preloadBookResourcesForPdf } from '../utils/demoPdfGenerator.ts';
+import { generateBookPdfMatchingViewer } from '../utils/bookPdfExporter.ts';
+import { ScaledBookPageView, useMeasuredBook } from './book/ScaledBookPageView.tsx';
+import { paginateComposedBookByMeasurement } from './book/measuredBookPagination.tsx';
 import { ForeverYouLogo } from './ForeverYouLogo';
 import { BookProgressOverlay, type BookProgressState } from './BookProgressOverlay.tsx';
 import { MiEsenciaQuickAccessCard } from './MiEsenciaQuickAccessCard.tsx';
@@ -443,24 +445,28 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
   ]);
 
   // Distinct container width & max-width per physical book format so changing format visibly resizes the viewer
+  // V5.6.0: the viewer shows the book exactly as the PDF is printed: pages laid out at the format's
+  // reference width, paginated by measurement and scaled to the screen (same pages as the PDF).
+  const viewerBook = useMeasuredBook(composedBook);
+
   const viewerFormatMaxWidthClass = useMemo(() => {
     const fmtId = composedBook.format.id;
     if (fmtId === 'a5') {
-      return 'w-[76%] max-w-[300px] mx-auto transition-all duration-300';
+      return 'w-full max-w-[400px] mx-auto transition-all duration-300';
     }
     if (fmtId === 'carta') {
-      return 'w-full max-w-[440px] mx-auto transition-all duration-300';
+      return 'w-full max-w-[560px] mx-auto transition-all duration-300';
     }
     // 6x9 default
-    return 'w-[88%] max-w-[360px] mx-auto transition-all duration-300';
+    return 'w-full max-w-[430px] mx-auto transition-all duration-300';
   }, [composedBook.format.id]);
 
   // Clamp currentPageIdx if page count changes
   useEffect(() => {
-    if (currentPageIdx >= composedBook.pages.length) {
-      setCurrentPageIdx(Math.max(0, composedBook.pages.length - 1));
+    if (currentPageIdx >= viewerBook.pages.length) {
+      setCurrentPageIdx(Math.max(0, viewerBook.pages.length - 1));
     }
-  }, [composedBook.pages.length, currentPageIdx]);
+  }, [viewerBook.pages.length, currentPageIdx]);
 
   const pushManuscriptEdit = (updated: DemoManuscript) => {
     const nextHist = manuscriptHistory.slice(0, historyIdx + 1);
@@ -1002,7 +1008,7 @@ BOOK_IN_PROGRESS_MESSAGE
           ? 'Estilo_C_Tercera_Persona'
           : 'Estilo_B_Literario';
 
-      const pdfResult = generateRealDemoBookPdf({
+      const pdfResult = await generateBookPdfMatchingViewer({
         composed: previewComposed,
         profile: {
           mode: isCouple ? 'pareja' : 'individual',
@@ -1090,7 +1096,7 @@ BOOK_IN_PROGRESS_MESSAGE
       if (pdfCancelRequestedRef.current) return false;
       if (standalone) updateProgress({ stage: 'pdf' });
 
-      const pdfResult = generateRealDemoBookPdf({
+      const pdfResult = await generateBookPdfMatchingViewer({
         composed: composedForVersion,
         profile: {
           mode: isCouple ? 'pareja' : 'individual',
@@ -1333,6 +1339,11 @@ BOOK_IN_PROGRESS_MESSAGE
       setManuscript(fullManuscriptToSave);
       setEditorialConfig(currentEditorialConfig);
 
+      // V5.6.0: the page count of the version is the one of the printed book (measured pagination).
+      const fullMeasuredBookPageCount = await paginateComposedBookByMeasurement(fullComposedBook)
+        .then((b) => b.pages.length)
+        .catch(() => fullComposedBook.pages.length);
+
       const lightweightChapterPhotos: Record<string, DemoInMemoryPhoto | null> = {};
       for (const [k, v] of Object.entries(resolvedChapters)) {
         lightweightChapterPhotos[k] = makeLightweightPhotoRef(v);
@@ -1349,7 +1360,7 @@ BOOK_IN_PROGRESS_MESSAGE
           manuscript: fullManuscriptToSave,
           coverPhoto: lightweightCoverPhoto,
           chapterPhotos: lightweightChapterPhotos,
-          pageCount: fullComposedBook.pages.length,
+          pageCount: fullMeasuredBookPageCount,
         }),
       });
 
@@ -2073,7 +2084,7 @@ BOOK_IN_PROGRESS_MESSAGE
                             interiorStyleId: styleSpec.id as DemoInteriorStyleId,
                           }));
                           // Switch viewer to an interior chapter page (Page 3) if currently on cover so user immediately sees the interior style change
-                          if (currentPageIdx === 0 && composedBook.pages.length >= 3) {
+                          if (currentPageIdx === 0 && viewerBook.pages.length >= 3) {
                             setCurrentPageIdx(2);
                           }
                         }}
@@ -2354,7 +2365,7 @@ BOOK_IN_PROGRESS_MESSAGE
                   ? 'En espera de estilo literario'
                   : isEditingLayout && (isGeneratingAI || !hasAiDraftLoadedForSession)
                   ? 'Procesando borrador de 6 páginas...'
-                  : `${composedBook.pages.length} páginas${
+                  : `${viewerBook.pages.length} páginas${
                       isEditingLayout ? ' de muestra' : ' totales'
                     }`}
               </h4>
@@ -2381,7 +2392,7 @@ BOOK_IN_PROGRESS_MESSAGE
                     className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold shadow-xs transition-colors cursor-pointer"
                   >
                     <Download className="w-3.5 h-3.5" />
-                    <span>Descargar PDF de Muestra (6 págs.)</span>
+                    <span>Descargar PDF de Muestra ({viewerBook.pages.length} págs.)</span>
                   </button>
                 )}
                 <div className="flex items-center gap-1.5 bg-white/10 p-1 rounded-xl">
@@ -2457,9 +2468,9 @@ BOOK_IN_PROGRESS_MESSAGE
                 className={viewerFormatMaxWidthClass}
                 data-testid={`viewer-page-container-${composedBook.format.id}`}
               >
-                <DemoComposedPageView
-                  composed={composedBook}
-                  page={composedBook.pages[currentPageIdx] || composedBook.pages[0]}
+                <ScaledBookPageView
+                  composed={viewerBook}
+                  page={viewerBook.pages[currentPageIdx] || viewerBook.pages[0]}
                   className="rounded-xl"
                 />
               </div>
@@ -2475,13 +2486,13 @@ BOOK_IN_PROGRESS_MESSAGE
                   Anterior
                 </button>
                 <span className="text-xs text-stone-300">
-                  Página {currentPageIdx + 1} de {composedBook.pages.length}
+                  Página {currentPageIdx + 1} de {viewerBook.pages.length}
                 </span>
                 <button
                   type="button"
-                  disabled={currentPageIdx >= composedBook.pages.length - 1}
+                  disabled={currentPageIdx >= viewerBook.pages.length - 1}
                   onClick={() =>
-                    setCurrentPageIdx((p) => Math.min(composedBook.pages.length - 1, p + 1))
+                    setCurrentPageIdx((p) => Math.min(viewerBook.pages.length - 1, p + 1))
                   }
                   className="inline-flex items-center gap-1 px-3.5 py-2 rounded-xl bg-white/10 hover:bg-white/20 disabled:opacity-30 text-xs font-medium cursor-pointer"
                 >
@@ -2492,7 +2503,7 @@ BOOK_IN_PROGRESS_MESSAGE
             </div>
           ) : (
             <div className="max-h-[640px] overflow-y-auto space-y-6 pr-1">
-              {composedBook.pages.map((pg) => (
+              {viewerBook.pages.map((pg) => (
                 <div
                   key={pg.pageNumber}
                   className={`${viewerFormatMaxWidthClass} space-y-1.5`}
@@ -2500,8 +2511,8 @@ BOOK_IN_PROGRESS_MESSAGE
                   <div className="text-[11px] text-stone-400 text-center">
                     Página {pg.pageNumber} de {pg.totalPages}
                   </div>
-                  <DemoComposedPageView
-                    composed={composedBook}
+                  <ScaledBookPageView
+                    composed={viewerBook}
                     page={pg}
                     className="rounded-xl"
                   />

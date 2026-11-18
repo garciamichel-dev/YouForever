@@ -1250,8 +1250,8 @@ export const DEMO_COVER_DESIGNS: DemoCoverDesignSpec[] = [
     name: 'Clásica Eterna',
     subtitle: 'Libro autobiográfico de colección en tapa dura',
     sensation: 'Elegancia, memoria y permanencia',
-    titleFontFamily: "'Playfair Display', Georgia, serif",
-    bodyFontFamily: "'EB Garamond', Georgia, serif",
+    titleFontFamily: "'YFBook PD', 'Playfair Display', Georgia, serif",
+    bodyFontFamily: "'YFBook EBG', 'EB Garamond', Georgia, serif",
     variants: [
       {
         name: 'Verde Bosque & Oro',
@@ -1288,8 +1288,8 @@ export const DEMO_COVER_DESIGNS: DemoCoverDesignSpec[] = [
     name: 'Recuerdos en Marfil',
     subtitle: 'Composición literaria minimalista con amplio espacio',
     sensation: 'Intimidad, sencillez y nostalgia',
-    titleFontFamily: "'Cormorant Garamond', Georgia, serif",
-    bodyFontFamily: "'Lora', Georgia, serif",
+    titleFontFamily: "'YFBook CG', 'Cormorant Garamond', Georgia, serif",
+    bodyFontFamily: "'YFBook LO', 'Lora', Georgia, serif",
     variants: [
       {
         name: 'Marfil Cálido & Carbón',
@@ -1326,9 +1326,9 @@ export const DEMO_COVER_DESIGNS: DemoCoverDesignSpec[] = [
     name: 'Álbum de Nuestra Vida',
     subtitle: 'Marcos inspirados en álbumes familiares y detalles manuscritos',
     sensation: 'Cercanía, familia y recuerdos compartidos',
-    titleFontFamily: "'Lora', Georgia, serif",
-    bodyFontFamily: "'Plus Jakarta Sans', sans-serif",
-    accentFontFamily: "'Caveat', cursive",
+    titleFontFamily: "'YFBook LO', 'Lora', Georgia, serif",
+    bodyFontFamily: "'YFBook PJS', 'Plus Jakarta Sans', sans-serif",
+    accentFontFamily: "'YFBook CV', 'Caveat', cursive",
     variants: [
       {
         name: 'Crema Familiar & Terracota',
@@ -1365,8 +1365,8 @@ export const DEMO_COVER_DESIGNS: DemoCoverDesignSpec[] = [
     name: 'Raíces y Recuerdos',
     subtitle: 'Ilustraciones botánicas originales en tonos tierra y salvia',
     sensation: 'Tradición, familia y legado generacional',
-    titleFontFamily: "'EB Garamond', Georgia, serif",
-    bodyFontFamily: "'Lora', Georgia, serif",
+    titleFontFamily: "'YFBook EBG', 'EB Garamond', Georgia, serif",
+    bodyFontFamily: "'YFBook LO', 'Lora', Georgia, serif",
     variants: [
       {
         name: 'Verde Salvia & Beige Tierra',
@@ -1403,8 +1403,8 @@ export const DEMO_COVER_DESIGNS: DemoCoverDesignSpec[] = [
     name: 'Historia Contemporánea',
     subtitle: 'Composición geométrica equilibrada con acentos en cobre',
     sensation: 'Modernidad, calidad premium y sofisticación',
-    titleFontFamily: "'Manrope', sans-serif",
-    bodyFontFamily: "'Source Serif 4', Georgia, serif",
+    titleFontFamily: "'YFBook MR', 'Manrope', sans-serif",
+    bodyFontFamily: "'YFBook SS4', 'Source Serif 4', Georgia, serif",
     variants: [
       {
         name: 'Azul Noche & Cobre',
@@ -1461,8 +1461,8 @@ export const DEMO_INTERIOR_STYLES: DemoInteriorStyleSpec[] = [
     number: 1,
     name: 'Clásico editorial',
     subtitle: 'EB Garamond, texto justificado, márgenes generosos y capitulares discretas',
-    bodyFontFamily: "'EB Garamond', Georgia, serif",
-    titleFontFamily: "'EB Garamond', Georgia, serif",
+    bodyFontFamily: "'YFBook EBG', 'EB Garamond', Georgia, serif",
+    titleFontFamily: "'YFBook EBG', 'EB Garamond', Georgia, serif",
     pdfFontFamily: 'times',
     textAlign: 'justify',
     useDropCap: true,
@@ -1477,8 +1477,8 @@ export const DEMO_INTERIOR_STYLES: DemoInteriorStyleSpec[] = [
     number: 2,
     name: 'Memorias elegantes',
     subtitle: 'Títulos en Cormorant Garamond, cuerpo en Lora, citas destacadas y separadores delicados',
-    bodyFontFamily: "'Lora', Georgia, serif",
-    titleFontFamily: "'Cormorant Garamond', Georgia, serif",
+    bodyFontFamily: "'YFBook LO', 'Lora', Georgia, serif",
+    titleFontFamily: "'YFBook CG', 'Cormorant Garamond', Georgia, serif",
     pdfFontFamily: 'times',
     textAlign: 'justify',
     useDropCap: true,
@@ -1493,9 +1493,9 @@ export const DEMO_INTERIOR_STYLES: DemoInteriorStyleSpec[] = [
     number: 3,
     name: 'Diario íntimo',
     subtitle: 'Libre Baskerville con acentos manuscritos discretos y bloques cálidos',
-    bodyFontFamily: "'Libre Baskerville', Georgia, serif",
-    titleFontFamily: "'Libre Baskerville', Georgia, serif",
-    accentFontFamily: "'Caveat', cursive",
+    bodyFontFamily: "'YFBook LB', 'Libre Baskerville', Georgia, serif",
+    titleFontFamily: "'YFBook LB', 'Libre Baskerville', Georgia, serif",
+    accentFontFamily: "'YFBook CV', 'Caveat', cursive",
     pdfFontFamily: 'times',
     textAlign: 'left',
     useDropCap: false,
@@ -1510,8 +1510,8 @@ export const DEMO_INTERIOR_STYLES: DemoInteriorStyleSpec[] = [
     number: 4,
     name: 'Minimalista contemporáneo',
     subtitle: 'Cuerpo en Source Serif 4 y títulos en Manrope con espacios blancos equilibrados',
-    bodyFontFamily: "'Source Serif 4', Georgia, serif",
-    titleFontFamily: "'Manrope', sans-serif",
+    bodyFontFamily: "'YFBook SS4', 'Source Serif 4', Georgia, serif",
+    titleFontFamily: "'YFBook MR', 'Manrope', sans-serif",
     pdfFontFamily: 'helvetica',
     textAlign: 'left',
     useDropCap: false,
@@ -1526,8 +1526,8 @@ export const DEMO_INTERIOR_STYLES: DemoInteriorStyleSpec[] = [
     number: 5,
     name: 'Legado familiar',
     subtitle: 'Lora con títulos ornamentales moderados, citas familiares y motivos botánicos',
-    bodyFontFamily: "'Lora', Georgia, serif",
-    titleFontFamily: "'Playfair Display', Georgia, serif",
+    bodyFontFamily: "'YFBook LO', 'Lora', Georgia, serif",
+    titleFontFamily: "'YFBook PD', 'Playfair Display', Georgia, serif",
     pdfFontFamily: 'times',
     textAlign: 'justify',
     useDropCap: true,
@@ -1653,6 +1653,8 @@ export interface ComposedChapterSectionBlock {
   isContinuation?: boolean;
   photo?: DemoInMemoryPhoto | null;
   paragraphPhotos?: Record<number, DemoInMemoryPhoto[]>;
+  /** V5.6.0: the last paragraph is cut by the page break and continues on the next page. */
+  lastParagraphContinues?: boolean;
 }
 
 export interface ComposedBookPage {
@@ -1682,6 +1684,10 @@ export interface ComposedBookPage {
   centralClosingText?: string;
   bottomRightBrand?: string;
   showPageNumber: boolean;
+  /** V5.6.0 (measured pagination): page that only continues a long introduction. */
+  isIntroductionContinuation?: boolean;
+  /** V5.6.0: the introduction text of this page continues on the next page. */
+  introductionContinues?: boolean;
 }
 
 export interface ComposedBookDocument {

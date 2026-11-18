@@ -1,4 +1,8 @@
 @import "tailwindcss";
+/* V5.6.0: desktop values of the book pages that the reference layout applies without the `sm:`
+   prefix (resolveDesktopClasses). Tailwind only generates classes it finds in the code, so they are
+   listed here; v560BookPdfMatchesViewer.test.ts fails if one is missing. */
+@source inline("bottom-4 bottom-5 h-20 h-24 h-28 h-32 h-36 inset-4 inset-4.5 inset-5 left-7 left-8 p-10 p-6 p-7 pl-11 pr-8 px-9 py-9 right-4 right-5 text-3xl text-[10px] text-[12.5px] text-[13.5px] text-[19px] text-[9.5px] text-base text-lg text-sm text-xl text-xs top-4 top-5 w-20 w-24 w-28 w-4");
 @custom-variant dark (&:where(.dark, .dark *));
 
 @theme {

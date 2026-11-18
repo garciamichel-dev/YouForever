@@ -1,0 +1,400 @@
+/* V5.6.0 — Self-hosted book fonts: the same files are embedded in the downloaded PDF. */
+@font-face {
+  font-family: 'YFBook PD';
+  src: url('/book-fonts/YFBook-PD-400.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook PD';
+  src: url('/book-fonts/YFBook-PD-500.ttf') format('truetype');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook PD';
+  src: url('/book-fonts/YFBook-PD-600.ttf') format('truetype');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook PD';
+  src: url('/book-fonts/YFBook-PD-700.ttf') format('truetype');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook PD';
+  src: url('/book-fonts/YFBook-PD-400i.ttf') format('truetype');
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook PD';
+  src: url('/book-fonts/YFBook-PD-600i.ttf') format('truetype');
+  font-weight: 600;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook PD';
+  src: url('/book-fonts/YFBook-PD-700i.ttf') format('truetype');
+  font-weight: 700;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook EBG';
+  src: url('/book-fonts/YFBook-EBG-400.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook EBG';
+  src: url('/book-fonts/YFBook-EBG-500.ttf') format('truetype');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook EBG';
+  src: url('/book-fonts/YFBook-EBG-600.ttf') format('truetype');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook EBG';
+  src: url('/book-fonts/YFBook-EBG-700.ttf') format('truetype');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook EBG';
+  src: url('/book-fonts/YFBook-EBG-400i.ttf') format('truetype');
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook EBG';
+  src: url('/book-fonts/YFBook-EBG-600i.ttf') format('truetype');
+  font-weight: 600;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook EBG';
+  src: url('/book-fonts/YFBook-EBG-700i.ttf') format('truetype');
+  font-weight: 700;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook CG';
+  src: url('/book-fonts/YFBook-CG-400.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook CG';
+  src: url('/book-fonts/YFBook-CG-500.ttf') format('truetype');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook CG';
+  src: url('/book-fonts/YFBook-CG-600.ttf') format('truetype');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook CG';
+  src: url('/book-fonts/YFBook-CG-700.ttf') format('truetype');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook CG';
+  src: url('/book-fonts/YFBook-CG-400i.ttf') format('truetype');
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook CG';
+  src: url('/book-fonts/YFBook-CG-600i.ttf') format('truetype');
+  font-weight: 600;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook CG';
+  src: url('/book-fonts/YFBook-CG-700i.ttf') format('truetype');
+  font-weight: 700;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook LO';
+  src: url('/book-fonts/YFBook-LO-400.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook LO';
+  src: url('/book-fonts/YFBook-LO-500.ttf') format('truetype');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook LO';
+  src: url('/book-fonts/YFBook-LO-600.ttf') format('truetype');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook LO';
+  src: url('/book-fonts/YFBook-LO-700.ttf') format('truetype');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook LO';
+  src: url('/book-fonts/YFBook-LO-400i.ttf') format('truetype');
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook LO';
+  src: url('/book-fonts/YFBook-LO-600i.ttf') format('truetype');
+  font-weight: 600;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook LO';
+  src: url('/book-fonts/YFBook-LO-700i.ttf') format('truetype');
+  font-weight: 700;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook PJS';
+  src: url('/book-fonts/YFBook-PJS-400.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook PJS';
+  src: url('/book-fonts/YFBook-PJS-500.ttf') format('truetype');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook PJS';
+  src: url('/book-fonts/YFBook-PJS-600.ttf') format('truetype');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook PJS';
+  src: url('/book-fonts/YFBook-PJS-700.ttf') format('truetype');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook PJS';
+  src: url('/book-fonts/YFBook-PJS-400i.ttf') format('truetype');
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook PJS';
+  src: url('/book-fonts/YFBook-PJS-600i.ttf') format('truetype');
+  font-weight: 600;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook PJS';
+  src: url('/book-fonts/YFBook-PJS-700i.ttf') format('truetype');
+  font-weight: 700;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook MR';
+  src: url('/book-fonts/YFBook-MR-400.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook MR';
+  src: url('/book-fonts/YFBook-MR-500.ttf') format('truetype');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook MR';
+  src: url('/book-fonts/YFBook-MR-600.ttf') format('truetype');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook MR';
+  src: url('/book-fonts/YFBook-MR-700.ttf') format('truetype');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook SS4';
+  src: url('/book-fonts/YFBook-SS4-400.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook SS4';
+  src: url('/book-fonts/YFBook-SS4-500.ttf') format('truetype');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook SS4';
+  src: url('/book-fonts/YFBook-SS4-600.ttf') format('truetype');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook SS4';
+  src: url('/book-fonts/YFBook-SS4-700.ttf') format('truetype');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook SS4';
+  src: url('/book-fonts/YFBook-SS4-400i.ttf') format('truetype');
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook SS4';
+  src: url('/book-fonts/YFBook-SS4-600i.ttf') format('truetype');
+  font-weight: 600;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook SS4';
+  src: url('/book-fonts/YFBook-SS4-700i.ttf') format('truetype');
+  font-weight: 700;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook LB';
+  src: url('/book-fonts/YFBook-LB-400.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook LB';
+  src: url('/book-fonts/YFBook-LB-500.ttf') format('truetype');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook LB';
+  src: url('/book-fonts/YFBook-LB-600.ttf') format('truetype');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook LB';
+  src: url('/book-fonts/YFBook-LB-700.ttf') format('truetype');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook LB';
+  src: url('/book-fonts/YFBook-LB-400i.ttf') format('truetype');
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook LB';
+  src: url('/book-fonts/YFBook-LB-600i.ttf') format('truetype');
+  font-weight: 600;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook LB';
+  src: url('/book-fonts/YFBook-LB-700i.ttf') format('truetype');
+  font-weight: 700;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook CV';
+  src: url('/book-fonts/YFBook-CV-400.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook CV';
+  src: url('/book-fonts/YFBook-CV-500.ttf') format('truetype');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook CV';
+  src: url('/book-fonts/YFBook-CV-600.ttf') format('truetype');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'YFBook CV';
+  src: url('/book-fonts/YFBook-CV-700.ttf') format('truetype');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
