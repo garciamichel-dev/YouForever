@@ -83,3 +83,11 @@ test('V5.8.0-L1: «Crear mi historia gratis» lleva al registro gratuito /free',
   assert.doesNotMatch(button.slice(0, 700), /href="\/demo"/);
   assert.match(read('src/App.tsx'), /onNavigateToFree=\{\(\) => handleSelectView\('free'\)\}/);
 });
+
+test('V5.8.1-L2: «Prueba gratuita» del encabezado lleva al registro gratuito /free', () => {
+  const view = read('src/components/ConocemeView.tsx');
+  const end = view.indexOf('<span>Prueba gratuita</span>');
+  const link = view.slice(view.lastIndexOf('<a', end), end);
+  assert.match(link, /href="\/free"/);
+  assert.match(link, /onNavigateToFree\(\)/);
+});

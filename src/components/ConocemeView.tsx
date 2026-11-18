@@ -323,11 +323,13 @@ export const ConocemeView: React.FC<ConocemeViewProps> = ({
               </button>
             )}
             <a
-              href="/demo"
+              href="/free"
+              data-testid="conoceme-free-trial-nav"
               onClick={(e) => {
-                if (onNavigateToDemo) {
+                // V5.8.1: «Prueba gratuita» lleva al registro gratuito (/free).
+                if (onNavigateToFree) {
                   e.preventDefault();
-                  onNavigateToDemo();
+                  onNavigateToFree();
                 }
               }}
               className="px-4 py-2 text-xs font-semibold text-amber-900 bg-amber-100/80 hover:bg-amber-200/80 border border-amber-300/70 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer inline-flex items-center gap-1.5"
