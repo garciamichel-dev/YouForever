@@ -56,6 +56,7 @@ import {
 } from './adminAuth.ts';
 import { toParticipantAuditLogView } from './participantViews.ts';
 import { ensureFirestoreMode } from './firestoreAdmin.ts';
+import { AccessAttemptLimiter, ForcedRegenerationLimiter, clientKeyFromRequest } from './accessGuard.ts';
 import { APP_RELEASE_DATE, APP_RELEASE_SUMMARY, APP_VERSION, APP_VERSION_LABEL } from '../version.ts';
 
 // V5.3.4: moment this server process started (a new deployment always restarts it).
@@ -81,49 +82,57 @@ function checkDemoRateLimit(req: Request, maxPerWindow = 40, windowMs = 10 * 60 
   return true;
 }
 
-// Anti-brute-force protection for access codes (YF-XXXXX) in Participant Portal & Mi Esencia
-const accessCodeBruteForceMap = new Map<
-  string,
-  { failedCount: number; windowStart: number; blockedUntil: number }
->();
+// Anti-brute-force protection for access codes (YF-XXXXX) in Participant Portal & Mi Esencia.
+// V5.6.2: one shared limiter for EVERY route that accepts a code (see accessGuard.ts for the rules).
+const accessCodeLimiter = new AccessAttemptLimiter();
 
-export function checkAccessCodeBruteForce(req: Request): {
+/** credentialId: the token / credential the request resolved to, if it is a real one. */
+export function checkAccessCodeBruteForce(
+  req: Request,
+  credentialId?: string
+): {
   blocked: boolean;
   retryAfterMinutes: number;
 } {
-  const key = String(req.ip || req.headers['x-forwarded-for'] || 'anon');
-  const now = Date.now();
-  const entry = accessCodeBruteForceMap.get(key);
-  if (!entry) return { blocked: false, retryAfterMinutes: 0 };
-  if (entry.blockedUntil > now) {
-    const mins = Math.max(1, Math.ceil((entry.blockedUntil - now) / 60000));
-    return { blocked: true, retryAfterMinutes: mins };
-  }
-  if (now - entry.windowStart > 60 * 1000) {
-    accessCodeBruteForceMap.delete(key);
-  }
-  return { blocked: false, retryAfterMinutes: 0 };
+  return accessCodeLimiter.check(clientKeyFromRequest(req), credentialId);
 }
 
+/** Call ONLY for a code that matches nothing (never for expired or revoked ones). */
 export function recordAccessCodeFailure(req: Request): void {
-  const key = String(req.ip || req.headers['x-forwarded-for'] || 'anon');
-  const now = Date.now();
-  const entry = accessCodeBruteForceMap.get(key);
-  if (!entry || now - entry.windowStart > 60 * 1000) {
-    accessCodeBruteForceMap.set(key, { failedCount: 1, windowStart: now, blockedUntil: 0 });
-    return;
-  }
-  entry.failedCount += 1;
-  if (entry.failedCount >= 8) {
-    entry.blockedUntil = now + 15 * 60 * 1000;
-  }
-  accessCodeBruteForceMap.set(key, entry);
+  accessCodeLimiter.recordFailure(clientKeyFromRequest(req));
 }
 
-export function resetAccessCodeFailures(req: Request): void {
-  const key = String(req.ip || req.headers['x-forwarded-for'] || 'anon');
-  accessCodeBruteForceMap.delete(key);
+/** A successful sign-in: that credential keeps working from this client even during a block. */
+export function recordAccessCodeSuccess(req: Request, credentialId: string): void {
+  accessCodeLimiter.recordSuccess(clientKeyFromRequest(req), credentialId);
 }
+
+const ACCESS_CODE_BLOCKED_MESSAGE = (minutes: number) =>
+  `Demasiados intentos fallidos de código de acceso. Por seguridad anti-fuerza bruta, espera ${minutes} minuto(s) antes de volver a intentar.`;
+
+// V5.6.2: cap on forced book regenerations per interview (administrators are exempt).
+const forcedRegenerationLimiter = new ForcedRegenerationLimiter();
+async function resolveEffectiveForceRefresh(req: Request, token: string, requested: boolean): Promise<boolean> {
+  if (!requested) return false;
+  try {
+    if (await getAdminUser(req)) return true;
+  } catch {
+    // not an administrator
+  }
+  const interviewId = storage.classifyAccessInput(token).interviewId;
+  if (!interviewId) return true; // the route rejects the code itself, exactly as before
+  const allowed = forcedRegenerationLimiter.tryConsume(interviewId);
+  if (!allowed) {
+    console.info(`[BookJobs] Regeneración forzada por encima del límite diario para ${interviewId}: se reutiliza el resultado vigente.`);
+  }
+  return allowed;
+}
+
+/**
+ * Routes that verify the code themselves (with a Firestore re-sync) and record the outcome.
+ * (Double quotes on purpose: source-level tests locate each route's block by its single-quoted path.)
+ */
+const SELF_COUNTING_ACCESS_ROUTES = new Set(["/participant/session", "/mi-esencia/family/verify-code"]);
 
 // Ensure Firestore state is hydrated before processing non-demo API requests without blocking
 apiRouter.use(async (req: Request, _res: Response, next: NextFunction) => {
@@ -144,6 +153,63 @@ apiRouter.use(async (req: Request, _res: Response, next: NextFunction) => {
     next();
   } catch (err: any) {
     console.warn('Storage initialization note (proceeding with memory cache):', err?.message || err);
+    next();
+  }
+});
+
+// V5.6.2 — Anti-brute-force guard for every participant / family route that receives a code.
+// Before, only /participant/session and /mi-esencia/family/verify-code counted failed attempts, so the
+// other ~40 routes could be used to guess codes without limit. Valid, expired and revoked codes
+// behave exactly as before; only codes that match nothing are counted.
+apiRouter.use(async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const isParticipantRoute = req.path.startsWith('/participant/');
+    const isFamilyRoute = req.path.startsWith('/mi-esencia/family/');
+    if (!isParticipantRoute && !isFamilyRoute) {
+      next();
+      return;
+    }
+
+    let credentialId: string | undefined;
+    let unknown = false;
+    let usable = false;
+    if (isParticipantRoute) {
+      const rawToken = req.body?.token ?? req.query?.token;
+      if (typeof rawToken !== 'string' || !rawToken.trim()) {
+        next();
+        return;
+      }
+      const classification = storage.classifyAccessInput(rawToken);
+      credentialId = classification.tokenId;
+      unknown = classification.status === 'unknown';
+      usable = classification.status === 'valid';
+    } else {
+      const rawCode = req.body?.personalCode;
+      if (typeof rawCode !== 'string' || !rawCode.trim()) {
+        next();
+        return;
+      }
+      await miEsenciaStore.ensureInitialized();
+      const classification = miEsenciaStore.classifyPersonalAccessCode(rawCode);
+      credentialId = classification.credentialId;
+      unknown = !classification.known;
+      usable = classification.known;
+    }
+
+    const blockState = checkAccessCodeBruteForce(req, credentialId);
+    if (blockState.blocked) {
+      res.status(429).json({ success: false, error: ACCESS_CODE_BLOCKED_MESSAGE(blockState.retryAfterMinutes) });
+      return;
+    }
+
+    if (!SELF_COUNTING_ACCESS_ROUTES.has(req.path)) {
+      if (unknown) recordAccessCodeFailure(req);
+      else if (usable && credentialId) recordAccessCodeSuccess(req, credentialId);
+    }
+    next();
+  } catch (err: any) {
+    // The guard must never break a request: on any internal problem the route decides as before.
+    console.warn('[AccessGuard] note:', err?.message || err);
     next();
   }
 });
@@ -1395,6 +1461,27 @@ apiRouter.post('/tokens/revoke', requireAdmin, async (req: Request, res: Respons
   }
 });
 
+// V5.6.2: read-only access hardening report (counts and IDs only, never codes)
+apiRouter.get('/admin/access-codes/report', requireAdmin, (_req: Request, res: Response) => {
+  try {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ success: true, data: storage.getAccessCodeSecurityReport() });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
+// V5.6.2: explicit reactivation of a revoked token (self-repair no longer revives revoked access)
+apiRouter.post('/tokens/reactivate', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const admin = (req as any).adminUser as string;
+    const reactivated = await storage.reactivateToken(String(req.body?.tokenId || ''), admin);
+    res.json({ success: true, data: reactivated });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: (err as Error).message });
+  }
+});
+
 // Restore browser-cached interviews if server restarted while Firestore quota was exhausted
 apiRouter.post('/interviews/restore-cache', requireAdmin, (req: Request, res: Response) => {
   try {
@@ -1434,14 +1521,7 @@ let lastParticipantSessionForcedSyncMs = 0;
 // 7. Participant Portal Endpoints
 apiRouter.post('/participant/session', async (req: Request, res: Response) => {
   try {
-    const bruteCheck = checkAccessCodeBruteForce(req);
-    if (bruteCheck.blocked) {
-      res.status(429).json({
-        success: false,
-        error: `Demasiados intentos fallidos de código de acceso. Por seguridad anti-fuerza bruta, espera ${bruteCheck.retryAfterMinutes} minuto(s) antes de volver a intentar.`,
-      });
-      return;
-    }
+    // V5.6.2: the block check happens in the shared access guard (before the routes).
 
     // V5.3.6: the browser no longer uploads its local copy of interviews and books on every
     // sign-in (it could weigh several MB). The server's source of truth is Firestore, which is
@@ -1466,13 +1546,17 @@ apiRouter.post('/participant/session', async (req: Request, res: Response) => {
       try {
         resolvedResult = storage.resolveToken(token);
       } catch (_retryErr) {
-        recordAccessCodeFailure(req);
+        // V5.6.2: an expired or revoked code is a real person, not a guess — only count codes
+        // that match nothing at all.
+        if (storage.classifyAccessInput(String(token)).status === 'unknown') {
+          recordAccessCodeFailure(req);
+        }
         throw firstErr;
       }
     }
-    resetAccessCodeFailures(req);
 
     const { token: resolvedTokenDoc, interview, participant } = resolvedResult;
+    recordAccessCodeSuccess(req, resolvedTokenDoc.id);
     // V5.3.2: a valid access code grants this browser READ access to THIS interview's photos and
     // voice recordings (HttpOnly signed cookie; see adminAuth.ts → media access).
     res.append(
@@ -1873,7 +1957,7 @@ apiRouter.post('/participant/book/jobs/start', async (req: Request, res: Respons
       plainToken: String(token),
       narrativeStyle: narrativeStyle || 'first_person_literary',
       scope: scope === 'preview' ? 'preview' : 'full',
-      forceRefresh: Boolean(forceRefresh),
+      forceRefresh: await resolveEffectiveForceRefresh(req, String(token), Boolean(forceRefresh)),
       lockedPreviewManuscript: lockedPreviewManuscript || null,
       lockedPreviewGroups: lockedPreviewGroups || null,
     });
@@ -1952,7 +2036,7 @@ apiRouter.post('/participant/book/generate-manuscript', async (req: Request, res
       plainToken: String(token),
       narrativeStyle: narrativeStyle || 'first_person_literary',
       scope: scope === 'preview' ? 'preview' : 'full',
-      forceRefresh: Boolean(forceRefresh),
+      forceRefresh: await resolveEffectiveForceRefresh(req, String(token), Boolean(forceRefresh)),
       lockedPreviewManuscript: lockedPreviewManuscript || null,
       lockedPreviewGroups: lockedPreviewGroups || null,
     });

@@ -686,16 +686,33 @@ export function extractCleanTokenOrCode(rawInput: string): string {
 }
 
 /**
- * Resolve a token record from a collection of tokens using flexible matching across:
- * - Access code (`YF-XXXXX` or legacy `LEG-XXXX`, case-insensitive, with or without hyphen/spaces, or suffix)
- * - Plain token (case-insensitive to support uppercase inputs)
- * - SHA-256 tokenHash (both exact case and lowercase hex input)
- * - Direct token ID, participantId, or interviewId
+ * V5.6.2 — Emergency compatibility switch (default OFF). When `YF_LEGACY_DERIVED_ACCESS_CODES=1`,
+ * codes computed on the fly from a token's participantId / hash (YF and 4-char LEG) are accepted
+ * again even when they are not the code stored on the token. It never re-enables IDs or hashes as
+ * credentials. Meant only as a rollback lever if a real participant turns out to depend on one.
+ */
+export function legacyDerivedAccessCodesEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  return String(env.YF_LEGACY_DERIVED_ACCESS_CODES || '').trim() === '1';
+}
+
+/**
+ * Resolve a token record from a collection of tokens. Accepted credentials (V5.6.2):
+ * - The access code STORED on the token (`accessCode`, `legacyAccessCode`), case-insensitive, with or
+ *   without hyphen/spaces, only the suffix, or pasted inside a URL / WhatsApp message.
+ * - For a legacy token with NO stored code: the code the administrator panel has always shown for
+ *   it (derived from its participantId), so nobody holding that code loses access.
+ * - The plain invitation token (case-insensitive), verified directly or through its SHA-256 hash.
+ *
+ * Never accepted (V5.6.2): the interviewId, participantId, token id or the stored hash itself, and
+ * codes derived on the fly for tokens that already have their own code (see
+ * `legacyDerivedAccessCodesEnabled` for the emergency switch).
  */
 export function matchTokenRecord<T extends InterviewTokenRecord & { plainToken?: string; legacyAccessCode?: string }>(
   rawInput: string,
-  tokens: Iterable<T>
+  tokens: Iterable<T>,
+  options: { allowLegacyDerivedCodes?: boolean } = {}
 ): T | undefined {
+  const allowLegacyDerivedCodes = options.allowLegacyDerivedCodes ?? legacyDerivedAccessCodesEnabled();
   const cleaned = extractCleanTokenOrCode(rawInput);
   if (!cleaned) return undefined;
 
@@ -718,22 +735,12 @@ export function matchTokenRecord<T extends InterviewTokenRecord & { plainToken?:
     ...tokenList.filter((t) => t.revoked),
   ];
 
-  // Pass 1: Exact / normalized accessCode, legacyAccessCode, plainToken, or tokenHash match
+  // Single pass: stored access codes and the plain token (directly or through its hash)
   for (const tok of orderedTokens) {
     const tokAccessUpper = (tok.accessCode || '').trim().toUpperCase();
     const tokAccessAlphaNum = tokAccessUpper.replace(/[^A-Z0-9]/g, '');
     const tokLegacyUpper = ((tok as any).legacyAccessCode || '').trim().toUpperCase();
     const tokLegacyAlphaNum = tokLegacyUpper.replace(/[^A-Z0-9]/g, '');
-
-    const derivedByPartUpper = deriveDeterministicAccessCode(tok.participantId || tok.tokenHash).toUpperCase();
-    const derivedByPartAlphaNum = derivedByPartUpper.replace(/[^A-Z0-9]/g, '');
-    const derivedByHashUpper = deriveDeterministicAccessCode(tok.tokenHash || tok.participantId).toUpperCase();
-    const derivedByHashAlphaNum = derivedByHashUpper.replace(/[^A-Z0-9]/g, '');
-
-    const legacyPartUpper = deriveLegacyLegAccessCode(tok.participantId || tok.tokenHash).toUpperCase();
-    const legacyPartAlphaNum = legacyPartUpper.replace(/[^A-Z0-9]/g, '');
-    const legacyHashUpper = deriveLegacyLegAccessCode(tok.tokenHash || tok.participantId).toUpperCase();
-    const legacyHashAlphaNum = legacyHashUpper.replace(/[^A-Z0-9]/g, '');
 
     if (
       tokAccessUpper &&
@@ -755,21 +762,29 @@ export function matchTokenRecord<T extends InterviewTokenRecord & { plainToken?:
       return tok;
     }
 
-    if (
-      derivedByPartUpper === upperInput ||
-      derivedByPartAlphaNum === alphaNumInput ||
-      derivedByPartAlphaNum === yfPrefixedInput ||
-      derivedByHashUpper === upperInput ||
-      derivedByHashAlphaNum === alphaNumInput ||
-      derivedByHashAlphaNum === yfPrefixedInput ||
-      legacyPartUpper === upperInput ||
-      legacyPartAlphaNum === alphaNumInput ||
-      legacyPartAlphaNum === legPrefixedInput ||
-      legacyHashUpper === upperInput ||
-      legacyHashAlphaNum === alphaNumInput ||
-      legacyHashAlphaNum === legPrefixedInput
-    ) {
-      return tok;
+    // Legacy token without a stored code: the panel has always shown the participantId-derived
+    // code for it (see StorageManager.registerTokenInMemory), so that one keeps working.
+    if (!tokAccessUpper && tok.participantId) {
+      const shownCodeAlphaNum = deriveDeterministicAccessCode(tok.participantId).toUpperCase().replace(/[^A-Z0-9]/g, '');
+      if (shownCodeAlphaNum === alphaNumInput || shownCodeAlphaNum === yfPrefixedInput) {
+        return tok;
+      }
+    }
+
+    if (allowLegacyDerivedCodes) {
+      const derivedAlphaNums = [
+        deriveDeterministicAccessCode(tok.participantId || tok.tokenHash),
+        deriveDeterministicAccessCode(tok.tokenHash || tok.participantId),
+        deriveLegacyLegAccessCode(tok.participantId || tok.tokenHash),
+        deriveLegacyLegAccessCode(tok.tokenHash || tok.participantId),
+      ].map((c) => c.toUpperCase().replace(/[^A-Z0-9]/g, ''));
+      if (
+        derivedAlphaNums.some(
+          (c) => c === alphaNumInput || c === yfPrefixedInput || c === legPrefixedInput
+        )
+      ) {
+        return tok;
+      }
     }
 
     if (tok.plainToken) {
@@ -779,24 +794,12 @@ export function matchTokenRecord<T extends InterviewTokenRecord & { plainToken?:
       }
     }
 
+    // The plain token is verified through its hash (works even if plainToken is not stored).
+    // The stored hash itself is NOT a credential.
     const tokHashLower = (tok.tokenHash || '').trim().toLowerCase();
     if (
       tokHashLower &&
-      (tokHashLower === lowerInput ||
-        tokHashLower === hashedExact ||
-        tokHashLower === hashedLower ||
-        tokHashLower === hashedUpper)
-    ) {
-      return tok;
-    }
-  }
-
-  // Pass 2: Direct token.id, participantId, or interviewId match
-  for (const tok of orderedTokens) {
-    if (
-      tok.id.toLowerCase() === lowerInput ||
-      tok.participantId.toLowerCase() === lowerInput ||
-      tok.interviewId.toLowerCase() === lowerInput
+      (tokHashLower === hashedExact || tokHashLower === hashedLower || tokHashLower === hashedUpper)
     ) {
       return tok;
     }

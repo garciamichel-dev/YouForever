@@ -2,9 +2,8 @@ import express, { Request, Response, Router } from 'express';
 import { miEsenciaStore } from './miEsenciaStore.ts';
 import {
   getAdminUser,
-  checkAccessCodeBruteForce,
   recordAccessCodeFailure,
-  resetAccessCodeFailures,
+  recordAccessCodeSuccess,
 } from '../api.ts';
 
 export const miEsenciaRouter: Router = express.Router();
@@ -725,15 +724,7 @@ miEsenciaRouter.post(
 
 miEsenciaRouter.post('/family/verify-code', async (req: Request, res: Response) => {
   try {
-    const bruteCheck = checkAccessCodeBruteForce(req);
-    if (bruteCheck.blocked) {
-      res.status(429).json({
-        success: false,
-        error: `Demasiados intentos fallidos de código personal. Por seguridad anti-fuerza bruta, espera ${bruteCheck.retryAfterMinutes} minuto(s) antes de volver a intentar.`,
-      });
-      return;
-    }
-
+    // V5.6.2: the block check happens in the shared access guard (api.ts, before the routes).
     await miEsenciaStore.ensureInitialized();
     const { personalCode } = req.body || {};
     let check = miEsenciaStore.verifyPersonalAccessCode(personalCode);
@@ -742,14 +733,19 @@ miEsenciaRouter.post('/family/verify-code', async (req: Request, res: Response) 
       check = miEsenciaStore.verifyPersonalAccessCode(personalCode);
     }
     if (!check.valid || !check.interlocutor || !check.subscription || !check.persons) {
-      recordAccessCodeFailure(req);
+      // V5.6.2: a paused / revoked / expired code is a real family member — only count codes
+      // that match nothing at all.
+      if (!miEsenciaStore.classifyPersonalAccessCode(personalCode).known) {
+        recordAccessCodeFailure(req);
+      }
       res.status(401).json({
         success: false,
         error: check.error || 'Código personal inválido.',
       });
       return;
     }
-    resetAccessCodeFailures(req);
+    const known = miEsenciaStore.classifyPersonalAccessCode(personalCode);
+    if (known.credentialId) recordAccessCodeSuccess(req, known.credentialId);
 
     // Asegurar que cada perfil de persona tenga al menos una sesión activa con su saludo reflexivo inicial
     for (const person of check.persons) {

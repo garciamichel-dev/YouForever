@@ -3,6 +3,7 @@ import {
   ParticipantRecord,
   AnswerRecord,
   hashToken,
+  generateInvitationToken,
 } from '../logic/interviewRules.ts';
 import type { PersistedTokenRecord } from './storage.ts';
 
@@ -11,6 +12,47 @@ export interface CompleteTestStorySeed {
   participants: Array<ParticipantRecord & { plainToken: string; accessCode: string }>;
   answers: AnswerRecord[];
   tokens: PersistedTokenRecord[];
+}
+
+/**
+ * V5.6.2 — The test stories ship with fixed, public credentials (SAN-7841, tok_santiago_ramos_demo_2026…)
+ * in this open-source file. Before they are loaded, every participant receives a fresh random link
+ * and YF-XXXXX code; the administrator sees them in the panel as for any interview. Content, IDs and
+ * answers are unchanged.
+ */
+export function assignFreshTestStoryCredentials(
+  stories: CompleteTestStorySeed[],
+  generate: () => { plainToken: string; tokenHash: string; accessCode: string } = generateInvitationToken
+): CompleteTestStorySeed[] {
+  for (const story of stories) {
+    for (const tok of story.tokens) {
+      const fresh = generate();
+      tok.plainToken = fresh.plainToken;
+      tok.tokenHash = fresh.tokenHash;
+      tok.accessCode = fresh.accessCode;
+      delete (tok as any).legacyAccessCode;
+      const part = story.participants.find((p) => p.id === tok.participantId);
+      if (part) {
+        part.plainToken = fresh.plainToken;
+        part.accessCode = fresh.accessCode;
+      }
+    }
+  }
+  return stories;
+}
+
+/**
+ * V5.6.2 — Whether the demo / test stories are seeded automatically when the server starts.
+ * YF_SEED_TEST_STORIES=1 → always; =0 → never; unset → only outside production (NODE_ENV or Cloud
+ * Run). In production the administrator still creates them on demand with the panel button
+ * (POST /api/interviews/seed-test-stories), and once deleted they no longer come back by themselves.
+ */
+export function shouldAutoSeedTestStories(env: Record<string, string | undefined> = process.env): boolean {
+  const flag = String(env.YF_SEED_TEST_STORIES ?? '').trim();
+  if (flag === '1') return true;
+  if (flag === '0') return false;
+  const isProduction = env.NODE_ENV === 'production' || Boolean(env.K_SERVICE);
+  return !isProduction;
 }
 
 /**

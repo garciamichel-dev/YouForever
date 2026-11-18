@@ -49,6 +49,7 @@ import {
   deriveDeterministicPlainToken,
   extractCleanTokenOrCode,
   matchTokenRecord,
+  legacyDerivedAccessCodesEnabled,
   canSubmitAnswer,
   isTokenActive,
   evaluateAnswerIncrement,
@@ -142,7 +143,12 @@ import {
   validateAdminRegistrationUpdates,
 } from '../logic/freeRegistration.ts';
 import { DEFAULT_QUESTIONS } from './seedData.ts';
-import { buildCompleteTestStories } from './seedStories.ts';
+import {
+  buildCompleteTestStories,
+  assignFreshTestStoryCredentials,
+  shouldAutoSeedTestStories,
+  type CompleteTestStorySeed,
+} from './seedStories.ts';
 import {
   evaluateNarrativeSufficiency,
   generateAdaptiveFollowUp,
@@ -485,6 +491,7 @@ export class StorageManager {
   private tokens: Map<string, PersistedTokenRecord> = new Map(); // key = tokenHash
   private plainTokenMap: Map<string, string> = new Map(); // plainToken -> tokenHash
   private accessCodeMap: Map<string, string> = new Map(); // accessCode (UPPERCASE) -> tokenHash
+  private tokensRegisteredWithoutStoredCode: Set<string> = new Set(); // V5.6.2 report only
   private answers: Map<string, AnswerRecord> = new Map();
   private photos: Map<string, InterviewPhotoRecord> = new Map();
   private audios: Map<string, InterviewAudioRecord> = new Map();
@@ -1386,6 +1393,8 @@ export class StorageManager {
     const aliasPlainTokens = new Set<string>();
 
     if (!tokenDoc.accessCode || tokenDoc.accessCode.trim().length === 0) {
+      // Legacy token without its own code: the panel shows this derived one (kept working).
+      this.tokensRegisteredWithoutStoredCode.add(tokenDoc.id);
       tokenDoc.accessCode = partDeterministicCode || hashDeterministicCode;
     } else {
       const cleanedExisting = extractCleanTokenOrCode(tokenDoc.accessCode).toUpperCase();
@@ -1459,8 +1468,13 @@ export class StorageManager {
       }
     }
 
+    // V5.6.2: only credentials actually held by this token (or by a duplicate record of the same
+    // participant merged above) are registered. Codes / links computed on the fly from the
+    // participantId or the hash are no longer aliases of EVERY token — anyone who knew an ID could
+    // compute them — unless the emergency switch YF_LEGACY_DERIVED_ACCESS_CODES=1 is on.
+    const legacyDerived = legacyDerivedAccessCodesEnabled();
     aliasPlainTokens.add(tokenDoc.plainToken);
-    if (tokenDoc.participantId) {
+    if (legacyDerived && tokenDoc.participantId) {
       aliasPlainTokens.add(deriveDeterministicPlainToken(tokenDoc.participantId));
     }
     for (const pt of aliasPlainTokens) {
@@ -1470,8 +1484,10 @@ export class StorageManager {
     }
 
     aliasCodes.add(tokenDoc.accessCode.toUpperCase());
-    if (partDeterministicCode) aliasCodes.add(partDeterministicCode);
-    if (hashDeterministicCode) aliasCodes.add(hashDeterministicCode);
+    if (legacyDerived) {
+      if (partDeterministicCode) aliasCodes.add(partDeterministicCode);
+      if (hashDeterministicCode) aliasCodes.add(hashDeterministicCode);
+    }
 
     for (const code of aliasCodes) {
       if (!code) continue;
@@ -1485,11 +1501,25 @@ export class StorageManager {
   }
 
   private ensureParticipantTokensConsistent(): void {
+    // One pass over the tokens instead of one scan per participant (same result, O(P + T)).
+    const tokensByParticipant = new Map<string, PersistedTokenRecord[]>();
+    for (const t of this.tokens.values()) {
+      if (!t.participantId) continue;
+      const list = tokensByParticipant.get(t.participantId);
+      if (list) list.push(t);
+      else tokensByParticipant.set(t.participantId, [t]);
+    }
+
     for (const part of this.participants.values()) {
       const interview = this.interviews.get(part.interviewId);
-      const existingToken = Array.from(this.tokens.values()).find(
-        (t) => t.participantId === part.id && !t.revoked
-      );
+      const participantTokens = tokensByParticipant.get(part.id) || [];
+      const existingToken = participantTokens.find((t) => !t.revoked);
+      if (!existingToken && participantTokens.length > 0) {
+        // V5.6.2: every token of this participant was revoked by an administrator. Self-repair must
+        // NOT hand out a fresh, valid token: revocation is final until an administrator reactivates
+        // it explicitly (POST /api/tokens/reactivate).
+        continue;
+      }
       if (existingToken) {
         if (
           interview &&
@@ -1766,9 +1796,18 @@ export class StorageManager {
     this.saveStateToDisk();
   }
 
-  public seedCompleteTestStoriesInMemory(): void {
-    const testStories = buildCompleteTestStories();
+  public seedCompleteTestStoriesInMemory(): CompleteTestStorySeed[] {
+    // V5.6.2: fresh random link + code for every test participant (the fixed ones are public).
+    const testStories = assignFreshTestStoryCredentials(buildCompleteTestStories());
     const testStoryIds = new Set(testStories.map((s) => s.interview.id));
+    const testParticipantIds = new Set(testStories.flatMap((s) => s.participants.map((p) => p.id)));
+
+    // Previous tokens of these test participants (old fixed codes) stop working.
+    for (const [hash, tok] of Array.from(this.tokens.entries())) {
+      if (testParticipantIds.has(tok.participantId)) {
+        this.tokens.delete(hash);
+      }
+    }
 
     // Clean up any stale test participants and answers belonging to these test interviews
     for (const [ansId, ans] of this.answers.entries()) {
@@ -1785,14 +1824,12 @@ export class StorageManager {
     for (const story of testStories) {
       this.interviews.set(story.interview.id, story.interview);
       for (const part of story.participants) {
-        this.participants.set(part.id, part);
-        if (part.plainToken) {
-          this.plainTokenMap.set(part.plainToken, part.id);
-        }
-        if (part.accessCode) {
-          this.accessCodeMap.set(part.accessCode.toUpperCase(), hashToken(part.plainToken));
-        }
+        // The participant record never keeps credentials (they live on the token).
+        const { plainToken: _pt, accessCode: _ac, ...partRecord } = part as any;
+        this.participants.set(part.id, partRecord as ParticipantRecord);
       }
+      // registerTokenInMemory maps the link and the code to the token hash (before V5.6.2 the link
+      // was also mapped to the participant id, which never resolved).
       for (const tok of story.tokens) {
         this.registerTokenInMemory(tok);
       }
@@ -1800,6 +1837,7 @@ export class StorageManager {
         this.answers.set(ans.id, ans);
       }
     }
+    return testStories;
   }
 
   public restoreFromClientCache(
@@ -1928,8 +1966,15 @@ export class StorageManager {
             const existingTok = Array.from(this.tokens.values()).find(
               (t) => t.participantId === partRecord.id && !t.revoked
             );
+            // V5.6.2: a browser cache must never revive the access of a participant whose tokens
+            // were all revoked by an administrator.
+            const allRevoked =
+              !existingTok &&
+              Array.from(this.tokens.values()).some((t) => t.participantId === partRecord.id && t.revoked);
 
-            if (!existingTok) {
+            if (allRevoked) {
+              // keep revoked; nothing to register
+            } else if (!existingTok) {
               const newTok: PersistedTokenRecord = {
                 id: `tok_${partRecord.id}`,
                 tokenHash: resolvedHash,
@@ -3078,11 +3123,14 @@ export class StorageManager {
     // Ensure all participants have registered tokens and access codes
     this.ensureParticipantTokensConsistent();
 
-    // Seed defaults ONLY if empty (never overwrite existing Firestore or disk records)
+    // Seed defaults ONLY if empty (never overwrite existing Firestore or disk records).
+    // V5.6.2: never automatically in production (see shouldAutoSeedTestStories); there the
+    // administrator creates the test stories with the panel button when needed.
+    const autoSeed = shouldAutoSeedTestStories();
     if (this.interviews.size === 0) {
-      this.seedDefaultInterviewsInMemory();
+      if (autoSeed) this.seedDefaultInterviewsInMemory();
     } else {
-      if (!this.interviews.has('int_test_santiago_ramos')) {
+      if (autoSeed && !this.interviews.has('int_test_santiago_ramos')) {
         this.seedCompleteTestStoriesInMemory();
       }
       this.saveStateToDisk();
@@ -4085,7 +4133,52 @@ export class StorageManager {
     // Ensure every known participant has a consistent token registered
     this.ensureParticipantTokensConsistent();
 
+    const tokenDoc = this.lookupTokenRecord(rawInput);
+
+    if (!tokenDoc) {
+      throw new Error('El enlace o código de acceso no es válido o no existe.');
+    }
+
+    return this.completeTokenResolution(tokenDoc);
+  }
+
+  /**
+   * V5.6.2 — Side-effect-free classification of an access input, for the anti-brute-force guard:
+   * - 'unknown'  → matches no token at all (the only outcome that counts as a failed attempt)
+   * - 'inactive' → a real token that is revoked or expired (a legitimate person, never counted)
+   * - 'valid'    → a usable token
+   * It never persists anything nor updates lastUsedAt.
+   */
+  public classifyAccessInput(rawInput: string): {
+    status: 'unknown' | 'inactive' | 'valid';
+    tokenId?: string;
+    interviewId?: string;
+  } {
+    if (!rawInput || !String(rawInput).trim()) return { status: 'unknown' };
+    const tokenDoc = this.lookupTokenRecord(String(rawInput));
+    if (!tokenDoc) return { status: 'unknown' };
+    const interview = this.interviews.get(tokenDoc.interviewId);
+    let active = isTokenActive(tokenDoc);
+    // Same expiry extension resolveToken applies for an open, unexpired interview.
+    if (
+      !active &&
+      !tokenDoc.revoked &&
+      interview &&
+      interview.status === 'open' &&
+      new Date(interview.expiresAt).getTime() > Date.now()
+    ) {
+      active = true;
+    }
+    return {
+      status: active && interview ? 'valid' : 'inactive',
+      tokenId: tokenDoc.id,
+      interviewId: tokenDoc.interviewId,
+    };
+  }
+
+  private lookupTokenRecord(rawInput: string): PersistedTokenRecord | undefined {
     const cleaned = extractCleanTokenOrCode(rawInput);
+    if (!cleaned) return undefined;
     const upperInput = cleaned.toUpperCase();
     const lowerInput = cleaned.toLowerCase();
 
@@ -4097,16 +4190,14 @@ export class StorageManager {
       this.plainTokenMap.get(lowerInput);
 
     if (!targetHash) {
+      // The plain token is verified through its hash. V5.6.2: the stored hash itself is no longer
+      // accepted as a credential (it is not a secret: it is what the database keeps).
       const hashed = hashToken(cleaned);
       const hashedLower = hashToken(lowerInput);
       if (this.tokens.has(hashed)) {
         targetHash = hashed;
       } else if (this.tokens.has(hashedLower)) {
         targetHash = hashedLower;
-      } else if (this.tokens.has(cleaned)) {
-        targetHash = cleaned;
-      } else if (this.tokens.has(lowerInput)) {
-        targetHash = lowerInput;
       }
     }
 
@@ -4114,13 +4205,16 @@ export class StorageManager {
 
     // 2. Comprehensive fallback scan across all token records
     if (!tokenDoc) {
-      tokenDoc = matchTokenRecord(rawInput, this.tokens.values());
+      tokenDoc = matchTokenRecord(rawInput, this.tokens.values()) as PersistedTokenRecord | undefined;
     }
+    return tokenDoc;
+  }
 
-    if (!tokenDoc) {
-      throw new Error('El enlace o código de acceso no es válido o no existe.');
-    }
-
+  private completeTokenResolution(tokenDoc: PersistedTokenRecord): {
+    token: InterviewTokenRecord;
+    interview: InterviewRecord;
+    participant: ParticipantRecord;
+  } {
     const interview = this.interviews.get(tokenDoc.interviewId);
     if (!interview) {
       throw new Error('La entrevista asociada no existe.');
@@ -4169,6 +4263,80 @@ export class StorageManager {
         token.revokedAt = new Date().toISOString();
         await this.persistDoc('interviewTokens', token.id, token);
         await this.addAuditLog('REVOKE_TOKEN', 'token', tokenId, performedBy, {
+          interviewId: token.interviewId,
+          participantId: token.participantId,
+        });
+        return token;
+      }
+    }
+    throw new Error('Token no encontrado.');
+  }
+
+  /**
+   * V5.6.2 — Read-only report (no codes, only IDs and counts) to check the deployment before and
+   * after the access hardening, and to plan the later rotation of predictable codes.
+   */
+  public getAccessCodeSecurityReport(): {
+    totalTokens: number;
+    activeTokens: number;
+    revokedTokens: number;
+    tokensWithoutStoredCode: number;
+    predictableCodes: Array<{ tokenId: string; interviewId: string; participantId: string }>;
+    participantsWithAllTokensRevoked: string[];
+    legacyDerivedCodesSwitch: boolean;
+    autoSeedTestStories: boolean;
+  } {
+    this.ensureParticipantTokensConsistent();
+    const tokens = Array.from(this.tokens.values());
+    const predictableCodes = tokens
+      .filter(
+        (t) =>
+          !t.revoked &&
+          t.participantId &&
+          (t.accessCode || '').toUpperCase() === deriveDeterministicAccessCode(t.participantId).toUpperCase()
+      )
+      .map((t) => ({ tokenId: t.id, interviewId: t.interviewId, participantId: t.participantId }));
+    const byParticipant = new Map<string, PersistedTokenRecord[]>();
+    for (const t of tokens) {
+      const list = byParticipant.get(t.participantId) || [];
+      list.push(t);
+      byParticipant.set(t.participantId, list);
+    }
+    const participantsWithAllTokensRevoked = Array.from(byParticipant.entries())
+      .filter(([, list]) => list.length > 0 && list.every((t) => t.revoked))
+      .map(([participantId]) => participantId);
+    return {
+      totalTokens: tokens.length,
+      activeTokens: tokens.filter((t) => !t.revoked).length,
+      revokedTokens: tokens.filter((t) => t.revoked).length,
+      tokensWithoutStoredCode: this.tokensRegisteredWithoutStoredCode.size,
+      predictableCodes,
+      participantsWithAllTokensRevoked,
+      legacyDerivedCodesSwitch: legacyDerivedAccessCodesEnabled(),
+      autoSeedTestStories: shouldAutoSeedTestStories(),
+    };
+  }
+
+  /**
+   * V5.6.2: explicit administrator action that undoes a revocation (self-repair no longer does it).
+   * The participant keeps the same code and link they already had.
+   */
+  public async reactivateToken(tokenId: string, performedBy: string): Promise<InterviewTokenRecord> {
+    for (const token of this.tokens.values()) {
+      if (token.id === tokenId) {
+        token.revoked = false;
+        delete (token as any).revokedAt;
+        const interview = this.interviews.get(token.interviewId);
+        if (
+          interview &&
+          new Date(interview.expiresAt).getTime() > Date.now() &&
+          new Date(token.expiresAt).getTime() < new Date(interview.expiresAt).getTime()
+        ) {
+          token.expiresAt = interview.expiresAt;
+        }
+        this.registerTokenInMemory(token);
+        await this.persistDoc('interviewTokens', token.id, token);
+        await this.addAuditLog('REACTIVATE_TOKEN', 'token', tokenId, performedBy, {
           interviewId: token.interviewId,
           participantId: token.participantId,
         });
@@ -7396,14 +7564,16 @@ export class StorageManager {
     seededCount: number;
     interviews: InterviewRecord[];
   }> {
-    this.seedCompleteTestStoriesInMemory();
-    const testStories = buildCompleteTestStories();
+    // V5.6.2: persist exactly what was loaded in memory (same fresh credentials), not a second
+    // build with the public fixed codes.
+    const testStories = this.seedCompleteTestStoriesInMemory();
     const seededInterviews: InterviewRecord[] = [];
 
     for (const story of testStories) {
       await this.persistDoc('interviews', story.interview.id, story.interview);
       for (const part of story.participants) {
-        await this.persistDoc('participants', part.id, part);
+        const { plainToken: _pt, accessCode: _ac, ...partRecord } = part as any;
+        await this.persistDoc('participants', part.id, partRecord);
       }
       for (const tok of story.tokens) {
         await this.persistDoc('interviewTokens', tok.id, tok);
@@ -7913,13 +8083,19 @@ export class StorageManager {
           }
         }
       }
-      const code = token?.accessCode || deriveDeterministicAccessCode(p.id);
+      // V5.6.2: a participant whose access was revoked has no active token; the panel shows their
+      // (revoked) code instead of inventing one that would not work.
+      const revokedTok = token
+        ? undefined
+        : Array.from(this.tokens.values()).find((t) => t.participantId === p.id && t.revoked);
+      const code = token?.accessCode || revokedTok?.accessCode || deriveDeterministicAccessCode(p.id);
       result.push({
         ...p,
         plainToken: plain,
         accessCode: code,
         inviteUrl: plain ? `/interview?token=${plain}` : undefined,
-      });
+        ...(revokedTok ? { accessRevoked: true, revokedTokenId: revokedTok.id } : {}),
+      } as any);
     }
 
     return result;

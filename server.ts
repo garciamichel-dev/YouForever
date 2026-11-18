@@ -31,6 +31,13 @@ async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
 
+  // V5.6.2: behind Cloud Run's proxy, trust exactly the hop it adds so req.ip is each visitor's real
+  // address (used only by the anti-brute-force limiter). Without it every visitor could share one
+  // key. TRUST_PROXY_HOPS overrides the default of 1 (0 disables).
+  const { resolveTrustProxyHops } = await import('./src/server/accessGuard.ts');
+  const trustProxyHops = resolveTrustProxyHops();
+  if (trustProxyHops > 0) app.set('trust proxy', trustProxyHops);
+
   // Generous limit for long audio recordings (10+ min) and photo attachments
   app.use(express.json({ limit: '100mb' }));
   app.use(express.urlencoded({ extended: true, limit: '100mb' }));

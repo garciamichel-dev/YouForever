@@ -6,8 +6,8 @@
  * GET /api/admin/version, so a stale deployment (old frontend or old server) is visible at once.
  * Participants never see this label.
  */
-export const APP_VERSION = '5.6.1';
+export const APP_VERSION = '5.6.2';
 export const APP_VERSION_LABEL = `V${APP_VERSION}`;
 export const APP_RELEASE_DATE = '2026-11-17';
 export const APP_RELEASE_SUMMARY =
-  'Libro PDF idéntico al visualizador: mismo diseño, tipografías incrustadas (texto real), letra de libro de ~12 pt, portada con la distribución del visualizador anterior (con logo), páginas repartidas midiendo el diseño real y fotos a 300 ppp.';
+  'Seguridad de accesos: solo el código o enlace real da acceso (ya no el ID de la entrevista, del participante ni el hash), la revocación es definitiva hasta reactivarla, límite anti-fuerza bruta en todas las rutas con código e historias de prueba con códigos aleatorios y sin sembrado automático en producción.';

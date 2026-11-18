@@ -171,6 +171,17 @@ function photoAttachmentsFromAnswer(ans: {
     }));
 }
 
+type PersonalAccessVerification = {
+  valid: boolean;
+  error?: string;
+  subscriptionStatus?: string;
+  credential?: MiEsenciaAccessCredential;
+  interlocutor?: MiEsenciaInterlocutor;
+  subscription?: MiEsenciaSubscriptionRecord;
+  persons?: MiEsenciaPersonProfile[];
+  config?: MiEsenciaGlobalConfig;
+};
+
 class MiEsenciaStore {
   private config: MiEsenciaGlobalConfig = { ...DEFAULT_MI_ESENCIA_CONFIG };
   private plans: Map<string, MiEsenciaPlanRecord> = new Map();
@@ -3013,16 +3024,7 @@ class MiEsenciaStore {
   // FAMILY PORTAL AUTHENTICATION BY CRYPTOGRAPHIC PERSONAL CODE
   // ============================================================================
 
-  public verifyPersonalAccessCode(rawCode: string): {
-    valid: boolean;
-    error?: string;
-    subscriptionStatus?: string;
-    credential?: MiEsenciaAccessCredential;
-    interlocutor?: MiEsenciaInterlocutor;
-    subscription?: MiEsenciaSubscriptionRecord;
-    persons?: MiEsenciaPersonProfile[];
-    config?: MiEsenciaGlobalConfig;
-  } {
+  public verifyPersonalAccessCode(rawCode: string): PersonalAccessVerification {
     if (!this.config.miEsenciaEnabled) {
       return {
         valid: false,
@@ -3035,9 +3037,33 @@ class MiEsenciaStore {
       return { valid: false, error: 'Por favor ingresa tu código personal de acceso.' };
     }
 
+    const cred = this.findCredentialByCleanCode(cleanCode);
+
+    if (!cred) {
+      return {
+        valid: false,
+        error: 'El código personal ingresado no es válido. Verifica el enlace privado enviado por el administrador.',
+      };
+    }
+
+    return this.verifyFoundCredential(cred);
+  }
+
+  /**
+   * V5.6.2 — Side-effect-free: does this personal code belong to ANY credential (active or not)?
+   * Used by the anti-brute-force guard: only codes that match nothing count as failed attempts.
+   */
+  public classifyPersonalAccessCode(rawCode: string): { known: boolean; credentialId?: string } {
+    const cleanCode = extractCleanMiEsenciaCode(String(rawCode || ''));
+    if (!cleanCode) return { known: false };
+    const cred = this.findCredentialByCleanCode(cleanCode);
+    return cred ? { known: true, credentialId: `me:${cred.accessCredentialId}` } : { known: false };
+  }
+
+  private findCredentialByCleanCode(cleanCode: string): MiEsenciaAccessCredential | undefined {
     const alphaNumInput = cleanCode.replace(/[^A-Z0-9]/g, '');
     const inputHash = computeMiEsenciaCodeHash(cleanCode);
-    const cred = Array.from(this.credentials.values()).find((c) => {
+    return Array.from(this.credentials.values()).find((c) => {
       const cUpper = c.personalCodePlain.toUpperCase();
       const cAlphaNum = cUpper.replace(/[^A-Z0-9]/g, '');
       const legacyUpper = String((c as any).legacyCodePlain || '').toUpperCase();
@@ -3052,14 +3078,9 @@ class MiEsenciaStore {
         legacyList.some((lc) => lc === cleanCode || lc.replace(/[^A-Z0-9]/g, '') === alphaNumInput)
       );
     });
+  }
 
-    if (!cred) {
-      return {
-        valid: false,
-        error: 'El código personal ingresado no es válido. Verifica el enlace privado enviado por el administrador.',
-      };
-    }
-
+  private verifyFoundCredential(cred: MiEsenciaAccessCredential): PersonalAccessVerification {
     if (cred.status === 'revocado' || cred.status === 'pausado') {
       return {
         valid: false,
