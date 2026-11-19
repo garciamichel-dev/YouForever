@@ -107,22 +107,47 @@ test('Full Database Backup creation, listing, restoration, and deletion', async 
   assert.equal(backupMeta.label, 'Respaldo Unit Test Temporal');
   assert.equal(backupMeta.counts.interviews, initialCount);
 
-  const list = storage.listDatabaseBackups();
+  const list = await storage.listDatabaseBackups();
   assert.ok(list.some((b) => b.id === backupMeta.id));
 
-  // Restore the backup (returns to the exact same state)
+  // Simulate a Cloud Run cold restart by wiping local data/backups/<id>.json and index.json
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const backupFilePath = path.join(process.cwd(), 'data', 'backups', `${backupMeta.id}.json`);
+  const indexFilePath = path.join(process.cwd(), 'data', 'backups', 'index.json');
+  if (fs.existsSync(backupFilePath)) fs.unlinkSync(backupFilePath);
+  if (fs.existsSync(indexFilePath)) fs.writeFileSync(indexFilePath, '[]', 'utf-8');
+
+  // Even with empty local disk, listing and payload download must recover from Cloud Firestore
+  const listAfterRestart = await storage.listDatabaseBackups();
+  assert.ok(
+    listAfterRestart.some((b) => b.id === backupMeta.id),
+    'Backup must still appear in listDatabaseBackups() after local disk wipe'
+  );
+  const recoveredPayload = await storage.getDatabaseBackupPayload(backupMeta.id);
+  assert.equal(recoveredPayload.id, backupMeta.id);
+  assert.equal(recoveredPayload.counts.interviews, initialCount);
+
+  // Restore the backup (returns to the exact same state and syncs to Firestore)
   const restoredRes = await storage.restoreDatabaseBackup(
     backupMeta.id,
     'test-suite@foreveryou.mx'
   );
   assert.equal(restoredRes.counts.interviews, initialCount);
+  assert.ok(restoredRes.remoteSync.written > 0, 'Restore must write collections back to Firestore');
 
   const afterRestoreInterviews = storage.getInterviews();
   assert.equal(afterRestoreInterviews.length, initialCount);
 
-  // Delete the temporary test backup so we leave the server clean
+  // Delete the temporary test backup so we leave both Firestore and disk clean
   const deleted = await storage.deleteDatabaseBackup(backupMeta.id, 'test-suite@foreveryou.mx');
   assert.equal(deleted.deletedId, backupMeta.id);
+
+  const listAfterDelete = await storage.listDatabaseBackups();
+  assert.ok(
+    !listAfterDelete.some((b) => b.id === backupMeta.id),
+    'Deleted backup must be removed from both Firestore and local disk'
+  );
 });
 
 test('Orphaned participant book versions can be deleted individually and in batch without failing', async () => {

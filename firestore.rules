@@ -224,6 +224,16 @@ service cloud.firestore {
       allow read: if true;
       allow write: if isValidId(docId);
     }
+
+    match /databaseBackups/{backupId} {
+      allow read: if true;
+      allow write: if isValidId(backupId);
+    }
+
+    match /databaseBackupChunks/{chunkId} {
+      allow read: if true;
+      allow write: if isValidId(chunkId);
+    }
   }
 }
 

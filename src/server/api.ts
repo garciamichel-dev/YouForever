@@ -1275,9 +1275,9 @@ apiRouter.post('/admin/manuscripts/batch-delete', requireAdmin, async (req: Requ
 });
 
 // Full Database Backups Management (Configuración Global)
-apiRouter.get('/admin/backups', requireAdmin, (_req: Request, res: Response) => {
+apiRouter.get('/admin/backups', requireAdmin, async (_req: Request, res: Response) => {
   try {
-    const backups = storage.listDatabaseBackups();
+    const backups = await storage.listDatabaseBackups();
     res.json({ success: true, data: backups });
   } catch (err: unknown) {
     res.status(500).json({ success: false, error: (err as Error).message });
@@ -1291,7 +1291,7 @@ apiRouter.post('/admin/backups', requireAdmin, async (req: Request, res: Respons
     const backup = await storage.createDatabaseBackup(label, admin);
     res.json({
       success: true,
-      message: 'Respaldo completo de la base de datos creado exitosamente.',
+      message: 'Respaldo completo de la base de datos creado y guardado en Cloud Firestore exitosamente.',
       data: backup,
     });
   } catch (err: unknown) {
@@ -1299,9 +1299,9 @@ apiRouter.post('/admin/backups', requireAdmin, async (req: Request, res: Respons
   }
 });
 
-apiRouter.get('/admin/backups/:id/download', requireAdmin, (req: Request, res: Response) => {
+apiRouter.get('/admin/backups/:id/download', requireAdmin, async (req: Request, res: Response) => {
   try {
-    const payload = storage.getDatabaseBackupPayload(req.params.id);
+    const payload = await storage.getDatabaseBackupPayload(req.params.id);
     const serialized = JSON.stringify(payload, null, 2);
     const safeName = `YouForever_Respaldo_BDD_${req.params.id}.json`;
     res.setHeader('Content-Type', 'application/json; charset=utf-8');

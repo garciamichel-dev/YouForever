@@ -598,9 +598,14 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ adminEmail }) => {
             // ignore
           }
           await fetchConfig(true);
+          const remoteInfo = data.data?.remoteSync
+            ? ` (${data.data.remoteSync.written} documentos sincronizados en Cloud Firestore${
+                data.data.remoteSync.deleted > 0 ? `, ${data.data.remoteSync.deleted} removidos` : ''
+              })`
+            : '';
           showBackupFeedback(
             'ok',
-            `¡Base de datos restaurada exitosamente al punto «${target.label}»! Todos los módulos (Entrevistas, Respuestas, Libros, Manuscritos y Mi Esencia) han sido actualizados.`
+            `¡Base de datos restaurada y sincronizada permanentemente en Cloud Firestore al punto «${target.label}»!${remoteInfo}`
           );
         }
       );

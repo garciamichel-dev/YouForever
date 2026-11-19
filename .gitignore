@@ -9,3 +9,10 @@ coverage/
 
 # V5.2: dedicated book-approval signing key (never commit)
 data/.book_approval_secret
+
+# Runtime local disk caches & ephemeral backups (Cloud Firestore is the source of truth)
+data/storage_state.json
+data/mi_esencia_state.json
+data/ai_manuscript_cache.json
+data/firestore_quota_telemetry.json
+data/backups/

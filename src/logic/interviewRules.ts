@@ -1719,22 +1719,49 @@ export function mergeInterviewRecordNonDestructive(
   const closedMs = getLatestTimestampMs([bestClosedAt]);
   const isReopenedNewer = reopenedMs > 0 && reopenedMs > closedMs;
 
-  return {
+  const localQuotaRev = Number((localInv as any).quotaRevision ?? 0) || 0;
+  const remoteQuotaRev = Number((remoteInv as any).quotaRevision ?? 0) || 0;
+  const localClearedUpTo = Number((localInv as any).bookVersionsClearedUpTo ?? 0) || 0;
+  const remoteClearedUpTo = Number((remoteInv as any).bookVersionsClearedUpTo ?? 0) || 0;
+  const bestClearedUpTo = Math.max(localClearedUpTo, remoteClearedUpTo);
+
+  const resolvedBookGeneratedCount =
+    remoteQuotaRev > localQuotaRev
+      ? remoteInv.bookGeneratedCount ?? 0
+      : localQuotaRev > remoteQuotaRev
+      ? localInv.bookGeneratedCount ?? 0
+      : remoteClearedUpTo > localClearedUpTo
+      ? remoteInv.bookGeneratedCount ?? 0
+      : localClearedUpTo > remoteClearedUpTo
+      ? localInv.bookGeneratedCount ?? 0
+      : Math.max(localInv.bookGeneratedCount ?? 0, remoteInv.bookGeneratedCount ?? 0);
+
+  const resolvedLayoutEditsUsed =
+    remoteQuotaRev > localQuotaRev
+      ? remoteInv.layoutEditsUsed ?? 0
+      : localQuotaRev > remoteQuotaRev
+      ? localInv.layoutEditsUsed ?? 0
+      : Math.max(localInv.layoutEditsUsed ?? 0, remoteInv.layoutEditsUsed ?? 0);
+
+  const resolvedLayoutEditsAllowed =
+    remoteQuotaRev > localQuotaRev
+      ? remoteInv.layoutEditsAllowed ?? localInv.layoutEditsAllowed
+      : localQuotaRev > remoteQuotaRev
+      ? localInv.layoutEditsAllowed ?? remoteInv.layoutEditsAllowed
+      : preferRemote
+      ? remoteInv.layoutEditsAllowed ?? localInv.layoutEditsAllowed
+      : localInv.layoutEditsAllowed ?? remoteInv.layoutEditsAllowed;
+
+  const mergedResult: InterviewRecord & Record<string, any> = {
     ...secondary,
     ...primary,
     status: isReopenedNewer ? 'open' : primary.status,
     userDeclaredComplete: isReopenedNewer ? false : primary.userDeclaredComplete,
     reopenedAt: bestReopenedAt,
     closedAt: bestClosedAt,
-    bookGeneratedCount: Math.max(
-      localInv.bookGeneratedCount ?? 0,
-      remoteInv.bookGeneratedCount ?? 0
-    ),
-    layoutEditsUsed: Math.max(localInv.layoutEditsUsed ?? 0, remoteInv.layoutEditsUsed ?? 0),
-    layoutEditsAllowed:
-      preferRemote
-        ? remoteInv.layoutEditsAllowed ?? localInv.layoutEditsAllowed
-        : localInv.layoutEditsAllowed ?? remoteInv.layoutEditsAllowed,
+    bookGeneratedCount: resolvedBookGeneratedCount,
+    layoutEditsUsed: resolvedLayoutEditsUsed,
+    layoutEditsAllowed: resolvedLayoutEditsAllowed,
     completedQuestionCount: Math.max(
       localInv.completedQuestionCount ?? 0,
       remoteInv.completedQuestionCount ?? 0
@@ -1746,6 +1773,15 @@ export function mergeInterviewRecordNonDestructive(
       ? remoteInv.adminCopyNote ?? localInv.adminCopyNote
       : localInv.adminCopyNote ?? remoteInv.adminCopyNote,
   };
+
+  if (Math.max(localQuotaRev, remoteQuotaRev) > 0) {
+    mergedResult.quotaRevision = Math.max(localQuotaRev, remoteQuotaRev);
+  }
+  if (bestClearedUpTo > 0) {
+    mergedResult.bookVersionsClearedUpTo = bestClearedUpTo;
+  }
+
+  return mergedResult;
 }
 
 /**

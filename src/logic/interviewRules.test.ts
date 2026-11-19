@@ -1058,6 +1058,28 @@ test('28. Fusión no destructiva de entrevistas y respuestas desde Firestore (pr
   assert.equal(mergedReopen.userDeclaredComplete, false);
   assert.equal(mergedReopen.bookGeneratedCount, 2);
 
+  // Administrative deletion increments quotaRevision and/or bookVersionsClearedUpTo:
+  // stale higher local counters must never revert remote deletions.
+  const localStaleCounts: any = {
+    ...localOlder,
+    bookGeneratedCount: 16,
+    bookVersionsClearedUpTo: 1,
+    quotaRevision: 2,
+  };
+  const remoteAfterAdminDelete: any = {
+    ...remoteNewer,
+    bookGeneratedCount: 0,
+    bookVersionsClearedUpTo: 16,
+    quotaRevision: 3,
+  };
+  const mergedAfterDelete = mergeInterviewRecordNonDestructive(
+    localStaleCounts,
+    remoteAfterAdminDelete
+  ) as any;
+  assert.equal(mergedAfterDelete.bookGeneratedCount, 0);
+  assert.equal(mergedAfterDelete.bookVersionsClearedUpTo, 16);
+  assert.equal(mergedAfterDelete.quotaRevision, 3);
+
   // Answer non-destructive media union
   const localAns: AnswerRecord = {
     id: 'ans_1',

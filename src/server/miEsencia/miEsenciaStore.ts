@@ -5953,6 +5953,98 @@ Respuesta directa en primera persona singular:`;
       conversationsRestored: this.conversations.size,
     };
   }
+
+  /**
+   * Synchronizes the full in-memory Mi Esencia state back to Cloud Firestore (used after
+   * restoring a database backup) and deletes remote documents that do not exist in the restored snapshot.
+   */
+  public async syncFullStateToFirestore(): Promise<{
+    written: number;
+    deleted: number;
+    warnings: string[];
+  }> {
+    let written = 0;
+    let deleted = 0;
+    const warnings: string[] = [];
+
+    const syncCollection = async (
+      collectionName: string,
+      entries: Array<[string, unknown]>
+    ): Promise<void> => {
+      const targetIds = new Set(entries.map(([id]) => id));
+      try {
+        const existingSnap = await firestoreTelemetry.trackedGetDocs(
+          serverDb,
+          collection(serverDb, collectionName),
+          'miEsencia'
+        );
+        for (const docSnap of existingSnap.docs) {
+          if (!targetIds.has(docSnap.id)) {
+            try {
+              await firestoreTelemetry.trackedDeleteDoc(
+                serverDb,
+                doc(serverDb, collectionName, docSnap.id),
+                'miEsencia'
+              );
+              deleted++;
+            } catch (err: any) {
+              warnings.push(`No se pudo eliminar ${collectionName}/${docSnap.id}: ${err?.message || err}`);
+            }
+          }
+        }
+      } catch (err: any) {
+        warnings.push(`No se pudo leer ${collectionName} para reconciliar: ${err?.message || err}`);
+      }
+
+      for (const [docId, value] of entries) {
+        try {
+          const sanitized = sanitizeFirestoreObj(value);
+          const byteSize = Buffer.byteLength(JSON.stringify(sanitized), 'utf8');
+          if (byteSize > 800_000) {
+            warnings.push(`${collectionName}/${docId} excede 800 KB (${byteSize} bytes); omitido en Firestore.`);
+            continue;
+          }
+          await firestoreTelemetry.trackedSetDoc(
+            serverDb,
+            doc(serverDb, collectionName, docId),
+            sanitized,
+            'miEsencia'
+          );
+          written++;
+        } catch (err: any) {
+          warnings.push(`No se pudo escribir ${collectionName}/${docId}: ${err?.message || err}`);
+        }
+      }
+    };
+
+    await syncCollection('mi_esencia_config', [
+      ['global', this.config],
+      ['deletedRegistry', { ...this.serializeDeletedRegistry(), updatedAt: new Date().toISOString() }],
+    ]);
+    await syncCollection('mi_esencia_plans', Array.from(this.plans.entries()));
+    await syncCollection('mi_esencia_subscriptions', Array.from(this.subscriptions.entries()));
+    await syncCollection('mi_esencia_persons', Array.from(this.persons.entries()));
+    await syncCollection('mi_esencia_pdfs', Array.from(this.compilationPdfs.entries()));
+    await syncCollection('mi_esencia_testimonies', Array.from(this.testimonies.entries()));
+    await syncCollection('mi_esencia_relations', Array.from(this.relations.entries()));
+    await syncCollection('mi_esencia_interlocutors', Array.from(this.interlocutors.entries()));
+    await syncCollection('mi_esencia_credentials', Array.from(this.credentials.entries()));
+    await syncCollection('mi_esencia_memories', Array.from(this.memories.entries()));
+    await syncCollection('mi_esencia_contradictions', Array.from(this.contradictions.entries()));
+    await syncCollection('mi_esencia_payments', Array.from(this.payments.entries()));
+    await syncCollection('mi_esencia_coupons', Array.from(this.coupons.entries()));
+    await syncCollection('mi_esencia_snapshots', Array.from(this.snapshots.entries()));
+    await syncCollection('mi_esencia_conversations', Array.from(this.conversations.entries()));
+    await syncCollection('mi_esencia_notifications', Array.from(this.notifications.entries()));
+    await syncCollection('mi_esencia_prompt_library', Array.from(this.promptLibrary.entries()));
+    await syncCollection('mi_esencia_prompt_versions', Array.from(this.avatarPromptVersions.entries()));
+    await syncCollection('mi_esencia_fallback_logs', Array.from(this.fallbackLogs.entries()));
+
+    this.lastFirestoreSyncAt = new Date().toISOString();
+    this.saveToDisk();
+
+    return { written, deleted, warnings };
+  }
 }
 
 export const miEsenciaStore = new MiEsenciaStore();

@@ -232,9 +232,13 @@ interface QuestionnaireVersionDoc {
  */
 export interface StorageRemoteDocStore {
   setDoc(collectionName: string, docId: string, data: Record<string, unknown>): Promise<void>;
+  /** Direct write bypassing quota-revision guard (used during explicit admin DB restore). */
+  setDocDirect?(collectionName: string, docId: string, data: Record<string, unknown>): Promise<void>;
   deleteDoc(collectionName: string, docId: string): Promise<void>;
   /** V5.3: single-document read (used to recover an audit report not held in memory). */
   getDoc?(collectionName: string, docId: string): Promise<Record<string, unknown> | null>;
+  /** Lists all documents in a collection (used for durable backups and restore reconciliation). */
+  listCollection?(collectionName: string): Promise<Array<{ id: string; data: Record<string, unknown> }>>;
   /**
    * V5.3.2 — Atomic commit of a book version with the interview quota counters (one Firestore
    * transaction). Optimistic concurrency on `quotaRevision` / counters prevents duplicate versions
@@ -371,9 +375,16 @@ const firestoreRemoteDocStore: StorageRemoteDocStore = {
     }
     return result;
   },
+  async setDocDirect(collectionName, docId, data) {
+    await firestoreTelemetry.trackedSetDoc(serverDb, doc(serverDb, collectionName, docId), data, 'storage');
+  },
   async getDoc(collectionName, docId) {
     const snap = await firestoreTelemetry.trackedGetDoc(serverDb, doc(serverDb, collectionName, docId), 'storage');
     return snap.exists() ? (snap.data() as Record<string, unknown>) : null;
+  },
+  async listCollection(collectionName) {
+    const snap = await firestoreTelemetry.trackedGetDocs(serverDb, collection(serverDb, collectionName), 'storage');
+    return snap.docs.map((d: any) => ({ id: d.id, data: d.data() as Record<string, unknown> }));
   },
   async deleteDoc(collectionName, docId) {
     await firestoreTelemetry.trackedDeleteDoc(serverDb, doc(serverDb, collectionName, docId), 'storage');
@@ -1007,8 +1018,13 @@ export class StorageManager {
    * documents, moves the embedded administrative report into the server-side map (it never stays on
    * the version record) and skips incomplete documents instead of loading half a book.
    */
-  private ingestRemoteBookVersionDocs(rawDocs: any[]): void {
+  private ingestRemoteBookVersionDocs(rawDocs: any[]): {
+    loadedIds: Set<string>;
+    incompleteIds: Set<string>;
+  } {
     const { docs, incomplete } = reassembleChunkedDocs<any>(rawDocs);
+    const loadedIds = new Set<string>();
+    const incompleteIds = new Set<string>(incomplete);
     if (incomplete.length > 0) {
       console.warn(`[StorageManager] Incomplete chunked book versions skipped (kept local copies): ${incomplete.join(', ')}`);
     }
@@ -1023,6 +1039,7 @@ export class StorageManager {
       }
       const { adminAuditReport, _syncedAt: _s, ...bv } = raw;
       this.participantBookVersions.set(bv.id, bv as ParticipantBookVersionRecord);
+      loadedIds.add(bv.id);
       if (adminAuditReport?.identification?.versionId === bv.id) {
         const local = this.bookAuditReports.get(bv.id);
         // Admin changes only ever append history: the longer history is the newer report.
@@ -1038,6 +1055,7 @@ export class StorageManager {
         }
       }
     }
+    return { loadedIds, incompleteIds };
   }
 
   /**
@@ -1358,21 +1376,34 @@ export class StorageManager {
     return saved;
   }
 
-  private async removeDoc(collectionName: string, docId: string): Promise<void> {
+  private async removeDoc(collectionName: string, docId: string): Promise<boolean> {
     this.saveStateToDisk();
-    try {
-      const delPromise = this.remoteDocStore.deleteDoc(collectionName, docId);
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Firestore delete timed out (removed from disk)')), 2500)
-      );
-      await Promise.race([delPromise, timeoutPromise]);
-    } catch (err: any) {
-      if (err?.message?.includes('Quota limit exceeded') || err?.code === 'resource-exhausted') {
-        console.warn(`[Firestore Quota] Delete skipped for ${collectionName}/${docId} due to daily limit. Removed from memory and disk.`);
-      } else {
-        console.warn(`[Firestore Delete Note] Document ${collectionName}/${docId} removed locally:`, err?.message || err);
+    const deleteOnce = () => {
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Firestore delete timed out (removed from disk)')), 10_000);
+        if (timer && typeof timer.unref === 'function') timer.unref();
+      });
+      return Promise.race([this.remoteDocStore.deleteDoc(collectionName, docId), timeoutPromise]).finally(() => {
+        if (timer) clearTimeout(timer);
+      });
+    };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        await deleteOnce();
+        return true;
+      } catch (err: any) {
+        if (err?.message?.includes('Quota limit exceeded') || err?.code === 'resource-exhausted') {
+          console.warn(`[Firestore Quota] Delete skipped for ${collectionName}/${docId} due to daily limit. Removed from memory and disk.`);
+          return false;
+        }
+        if (attempt === 1) {
+          console.warn(`[Firestore Delete Note] Document ${collectionName}/${docId} removed locally:`, err?.message || err);
+          return false;
+        }
       }
     }
+    return false;
   }
 
   private registerTokenInMemory(tokenDoc: PersistedTokenRecord) {
@@ -2134,12 +2165,21 @@ export class StorageManager {
     }
 
     if (manuscriptsSnap) {
+      const remoteManuscriptIds = new Set<string>();
       manuscriptsSnap.forEach((docSnap: any) => {
         const manu = docSnap.data() as ManuscriptRecord;
         if (manu && manu.id && !this.deletedManuscriptIds.has(manu.id)) {
           this.manuscripts.set(manu.id, manu);
+          remoteManuscriptIds.add(manu.id);
         }
       });
+      // Reconcile against Firestore as source of truth: purge local/disk ghost manuscripts
+      // that no longer exist in Cloud Firestore.
+      for (const localId of Array.from(this.manuscripts.keys())) {
+        if (!remoteManuscriptIds.has(localId)) {
+          this.manuscripts.delete(localId);
+        }
+      }
     }
 
     if (logsSnap) {
@@ -2211,7 +2251,14 @@ export class StorageManager {
     if (bookVersionsSnap) {
       const rawVersions: any[] = [];
       bookVersionsSnap.forEach((docSnap: any) => rawVersions.push(docSnap.data()));
-      this.ingestRemoteBookVersionDocs(rawVersions);
+      const { loadedIds, incompleteIds } = this.ingestRemoteBookVersionDocs(rawVersions);
+      // Reconcile against Firestore as source of truth: purge local/disk ghost book versions
+      // that no longer exist in Cloud Firestore (preserving only any incomplete chunked versions).
+      for (const localId of Array.from(this.participantBookVersions.keys())) {
+        if (!loadedIds.has(localId) && !incompleteIds.has(localId)) {
+          this.participantBookVersions.delete(localId);
+        }
+      }
     }
   }
 
@@ -2584,6 +2631,8 @@ export class StorageManager {
       firestoreTelemetry.trackedGetCount(serverDb, collection(serverDb, 'participants'), 'storage'),
       firestoreTelemetry.trackedGetCount(serverDb, collection(serverDb, 'participantBookVersions'), 'storage'),
       firestoreTelemetry.trackedGetDocs(serverDb, logsQuery, 'storage'),
+      firestoreTelemetry.trackedGetDoc(serverDb, doc(serverDb, 'settings', 'deletedRegistry'), 'storage'),
+      firestoreTelemetry.trackedGetCount(serverDb, collection(serverDb, 'manuscripts'), 'storage'),
     ];
 
     if (shouldRefreshQuestions) {
@@ -2621,13 +2670,18 @@ export class StorageManager {
     const answersSnap = unwrap(2);
     const remoteAnswersCount = typeof unwrap(3) === 'number' ? (unwrap(3) as number) : 0;
     const remoteParticipantsCount = typeof unwrap(4) === 'number' ? (unwrap(4) as number) : 0;
-    const remoteBookVersionsCount = typeof unwrap(5) === 'number' ? (unwrap(5) as number) : 0;
+    const remoteBookVersionsCount = typeof unwrap(5) === 'number' ? (unwrap(5) as number) : -1;
     const logsSnap = unwrap(6);
-    const questionsSnap = shouldRefreshQuestions ? unwrap(7) : null;
-    const versionsSnap = shouldRefreshQuestions ? unwrap(8) : null;
+    const deletedRegistrySnap = unwrap(7);
+    const remoteManuscriptsCount = typeof unwrap(8) === 'number' ? (unwrap(8) as number) : -1;
+    const questionsSnap = shouldRefreshQuestions ? unwrap(9) : null;
+    const versionsSnap = shouldRefreshQuestions ? unwrap(10) : null;
 
     if (configDocSnap) {
       this.applyConfigSnap(configDocSnap);
+    }
+    if (deletedRegistrySnap) {
+      this.applyDeletedRegistrySnap(deletedRegistrySnap);
     }
 
     if (questionsSnap && !questionsSnap.empty) {
@@ -2715,16 +2769,47 @@ export class StorageManager {
       });
     }
 
+    // Reconcile book versions whenever remote count differs from local (both additions AND deletions/ghosts)
     if (
-      remoteBookVersionsCount > prevBookVersionsCount &&
-      dirtyInterviewIds.size === 0
+      remoteBookVersionsCount >= 0 &&
+      (remoteBookVersionsCount !== prevBookVersionsCount ||
+        remoteBookVersionsCount !== this.participantBookVersions.size)
     ) {
       const allBvSnap = await firestoreTelemetry
         .trackedGetDocs(serverDb, collection(serverDb, 'participantBookVersions'), 'storage')
         .catch(() => null);
-      const rawVersions: any[] = [];
-      allBvSnap?.forEach((docSnap: any) => rawVersions.push(docSnap.data()));
-      this.ingestRemoteBookVersionDocs(rawVersions);
+      if (allBvSnap) {
+        const rawVersions: any[] = [];
+        allBvSnap.forEach((docSnap: any) => rawVersions.push(docSnap.data()));
+        const { loadedIds, incompleteIds } = this.ingestRemoteBookVersionDocs(rawVersions);
+        for (const localId of Array.from(this.participantBookVersions.keys())) {
+          if (!loadedIds.has(localId) && !incompleteIds.has(localId)) {
+            this.participantBookVersions.delete(localId);
+          }
+        }
+      }
+    }
+
+    // Reconcile manuscripts whenever remote count differs from local (both additions AND deletions/ghosts)
+    if (remoteManuscriptsCount >= 0 && remoteManuscriptsCount !== this.manuscripts.size) {
+      const allManuSnap = await firestoreTelemetry
+        .trackedGetDocs(serverDb, collection(serverDb, 'manuscripts'), 'storage')
+        .catch(() => null);
+      if (allManuSnap) {
+        const remoteManuIds = new Set<string>();
+        allManuSnap.forEach((docSnap: any) => {
+          const m = docSnap.data() as ManuscriptRecord;
+          if (m?.id && !this.deletedManuscriptIds.has(m.id)) {
+            this.manuscripts.set(m.id, m);
+            remoteManuIds.add(m.id);
+          }
+        });
+        for (const localId of Array.from(this.manuscripts.keys())) {
+          if (!remoteManuIds.has(localId)) {
+            this.manuscripts.delete(localId);
+          }
+        }
+      }
     }
 
     if (logsSnap) {
@@ -5911,10 +5996,16 @@ export class StorageManager {
       .filter((m) => m.interviewId === interviewId && !this.deletedManuscriptIds.has(m.id))
       .sort((a, b) => a.version - b.version);
 
-    const targetCount = Math.max(
-      existingManuscripts.length,
-      interview.bookGeneratedCount ?? 0
+    // Once synced with Firestore, never synthesize ghost PDF book versions purely from a legacy
+    // `bookGeneratedCount` counter when neither real PDF versions nor non-deleted manuscripts exist.
+    const maxManuscriptVersion = existingManuscripts.reduce(
+      (max, m) => Math.max(max, Number(m.version) || 0),
+      0
     );
+    const targetCount =
+      this.firestoreSyncStatus.source === 'firestore'
+        ? maxManuscriptVersion
+        : Math.max(existingManuscripts.length, interview.bookGeneratedCount ?? 0);
     if (targetCount <= 0) {
       return;
     }
@@ -6000,6 +6091,9 @@ export class StorageManager {
       }
 
       const matchingManu = existingManuscripts.find((m) => m.version === vNum);
+      if (this.firestoreSyncStatus.source === 'firestore' && !matchingManu) {
+        continue;
+      }
       const preset = stylePresets[(vNum - 1) % stylePresets.length];
       const bookTitle = matchingManu?.title || interview.title;
 
@@ -7347,12 +7441,11 @@ export class StorageManager {
     if (synthVersionId) {
       this.participantBookVersions.delete(synthVersionId);
     }
-    await this.removeDoc('participantBookVersions', versionId);
+    // Delete the main document AND all chunk documents discovered directly from Firestore (or local audit report).
+    await this.removeChunkedRemoteDocs('participantBookVersions', versionId);
     if (synthVersionId && synthVersionId !== versionId) {
-      await this.removeDoc('participantBookVersions', synthVersionId);
+      await this.removeChunkedRemoteDocs('participantBookVersions', synthVersionId);
     }
-    // V5.3.1: chunk documents of a large version (orphan chunks are ignored on load anyway). The
-    // administrative report stays in the server snapshot: history is never deleted with the book.
     const remoteChunks = this.bookAuditReports.get(versionId)?.durability?.versionDocument?.chunks || 0;
     for (let i = 0; i < remoteChunks; i++) {
       await this.removeDoc('participantBookVersions', chunkDocId(versionId, i));
@@ -7405,7 +7498,7 @@ export class StorageManager {
       await this.persistDoc('interviews', interviewId, interview);
     }
 
-    void this.persistDeletedRegistry();
+    await this.persistDeletedRegistry();
 
     const remainingVersions = interview ? this.getBookVersionsForInterview(interviewId) : [];
 
@@ -7477,7 +7570,7 @@ export class StorageManager {
     for (const v of versions) {
       this.deletedBookVersionIds.add(v.id);
       this.participantBookVersions.delete(v.id);
-      await this.removeDoc('participantBookVersions', v.id);
+      await this.removeChunkedRemoteDocs('participantBookVersions', v.id);
       const remoteChunks = this.bookAuditReports.get(v.id)?.durability?.versionDocument?.chunks || 0;
       for (let i = 0; i < remoteChunks; i++) {
         await this.removeDoc('participantBookVersions', chunkDocId(v.id, i));
@@ -7499,7 +7592,7 @@ export class StorageManager {
     interview.lastActivityAt = new Date().toISOString();
     this.interviews.set(interviewId, interview);
     await this.persistDoc('interviews', interviewId, interview);
-    void this.persistDeletedRegistry();
+    await this.persistDeletedRegistry();
 
     await this.addAuditLog(
       'DELETE_ALL_PARTICIPANT_BOOK_VERSIONS',
@@ -7537,11 +7630,12 @@ export class StorageManager {
         }
       } else {
         this.deletedBookVersionIds.add(vid);
+        await this.removeChunkedRemoteDocs('participantBookVersions', vid);
         deletedVersionIds.push(vid);
       }
     }
     this.saveStateToDisk();
-    void this.persistDeletedRegistry();
+    await this.persistDeletedRegistry();
     return { deletedVersionIds, deletedCount: deletedVersionIds.length };
   }
 
@@ -7570,7 +7664,7 @@ export class StorageManager {
     interview.lastActivityAt = new Date().toISOString();
     this.interviews.set(interviewId, interview);
     await this.persistDoc('interviews', interviewId, interview);
-    void this.persistDeletedRegistry();
+    await this.persistDeletedRegistry();
     await this.addAuditLog('DELETE_ALL_MANUSCRIPTS', 'manuscript', interviewId, performedBy, {
       interviewId,
       deletedCount: deletedManuscriptIds.length,
@@ -7708,7 +7802,7 @@ export class StorageManager {
       this.deletedBookVersionIds.add(bv.id);
       this.deletedBookVersionIds.add(`pbv_${interviewId}_v${bv.versionNumber}`);
       this.participantBookVersions.delete(bv.id);
-      await this.removeDoc('participantBookVersions', bv.id);
+      await this.removeChunkedRemoteDocs('participantBookVersions', bv.id);
       const remoteChunks = this.bookAuditReports.get(bv.id)?.durability?.versionDocument?.chunks || 0;
       for (let i = 0; i < remoteChunks; i++) {
         await this.removeDoc('participantBookVersions', chunkDocId(bv.id, i));
@@ -7734,7 +7828,7 @@ export class StorageManager {
     // 7. Delete the interview itself
     this.interviews.delete(interviewId);
     await this.removeDoc('interviews', interviewId);
-    void this.persistDeletedRegistry();
+    await this.persistDeletedRegistry();
     this.saveStateToDisk();
 
     await this.addAuditLog('DELETE_INTERVIEW', 'interview', interviewId, performedBy, {
@@ -8069,7 +8163,7 @@ export class StorageManager {
     }
 
     this.saveStateToDisk();
-    void this.persistDeletedRegistry();
+    await this.persistDeletedRegistry();
 
     await this.addAuditLog('DELETE_MANUSCRIPT', 'manuscript', manuscriptId, performedBy, {
       interviewId,
@@ -8095,7 +8189,7 @@ export class StorageManager {
       }
     }
     this.saveStateToDisk();
-    void this.persistDeletedRegistry();
+    await this.persistDeletedRegistry();
     return { deletedManuscriptIds: deletedIds, deletedCount: deletedIds.length };
   }
 
@@ -8977,16 +9071,37 @@ export class StorageManager {
     }
   }
 
-  private async persistDeletedRegistry(): Promise<void> {
-    try {
-      await this.persistRemoteDoc('settings', 'deletedRegistry', {
-        deletedBookVersionIds: Array.from(this.deletedBookVersionIds),
-        deletedManuscriptIds: Array.from(this.deletedManuscriptIds),
-        updatedAt: new Date().toISOString(),
+  private async persistDeletedRegistry(): Promise<boolean> {
+    const payload = {
+      deletedBookVersionIds: Array.from(this.deletedBookVersionIds),
+      deletedManuscriptIds: Array.from(this.deletedManuscriptIds),
+      updatedAt: new Date().toISOString(),
+    };
+    const writeOnce = () => {
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Firestore deletedRegistry write timed out')), 10_000);
+        if (timer && typeof timer.unref === 'function') timer.unref();
       });
-    } catch {
-      // ignore remote error
+      return Promise.race([
+        this.remoteDocStore.setDoc('settings', 'deletedRegistry', payload),
+        timeoutPromise,
+      ]).finally(() => {
+        if (timer) clearTimeout(timer);
+      });
+    };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        await writeOnce();
+        return true;
+      } catch (err: any) {
+        if (attempt === 1) {
+          console.warn('[StorageManager] Could not persist settings/deletedRegistry to Firestore:', err?.message || err);
+          return false;
+        }
+      }
     }
+    return false;
   }
 
   private getBackupsDir(): string {
@@ -9001,12 +9116,15 @@ export class StorageManager {
     return path.join(this.getBackupsDir(), 'index.json');
   }
 
-  public listDatabaseBackups(): Array<{
+  private listLocalDatabaseBackups(): Array<{
     id: string;
     label: string;
     createdAt: string;
     createdBy: string;
     sizeBytes: number;
+    compressedBytes?: number;
+    chunkCount?: number;
+    storageLocation?: 'firestore_and_local' | 'firestore' | 'local';
     counts: {
       interviews: number;
       participants: number;
@@ -9015,8 +9133,11 @@ export class StorageManager {
       audios: number;
       manuscripts: number;
       bookVersions: number;
+      questions?: number;
+      miEsenciaPersons?: number;
       miEsenciaProfiles: number;
       miEsenciaSubscriptions: number;
+      miEsenciaConversations?: number;
     };
   }> {
     try {
@@ -9028,9 +9149,161 @@ export class StorageManager {
         .filter((item) => item && item.id && fs.existsSync(path.join(this.getBackupsDir(), `${item.id}.json`)))
         .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
     } catch (err) {
-      console.warn('[StorageManager] Error listing backups:', err);
+      console.warn('[StorageManager] Error listing local backups:', err);
       return [];
     }
+  }
+
+  private async persistDatabaseBackupToFirestore(
+    meta: Record<string, any>,
+    serializedJson: string
+  ): Promise<{ compressedBytes: number; chunkCount: number; sha256: string }> {
+    const BACKUP_CHUNK_MAX_CHARS = 450_000;
+    const compressedBuffer = zlib.gzipSync(Buffer.from(serializedJson, 'utf-8'), { level: 6 });
+    const base64Payload = compressedBuffer.toString('base64');
+    const sha256 = sha256Hash('sha256').update(serializedJson, 'utf-8').digest('hex');
+
+    const chunks: string[] = [];
+    for (let offset = 0; offset < base64Payload.length; offset += BACKUP_CHUNK_MAX_CHARS) {
+      chunks.push(base64Payload.slice(offset, offset + BACKUP_CHUNK_MAX_CHARS));
+    }
+    if (chunks.length === 0) chunks.push('');
+
+    const writeDocWithRetry = async (col: string, id: string, data: Record<string, unknown>) => {
+      const writeOnce = () => {
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`Tiempo de espera agotado al guardar ${col}/${id} en Firestore.`)), 15_000);
+          if (timer && typeof timer.unref === 'function') timer.unref();
+        });
+        return Promise.race([this.remoteDocStore.setDoc(col, id, data), timeoutPromise]).finally(() => {
+          if (timer) clearTimeout(timer);
+        });
+      };
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          await writeOnce();
+          return;
+        } catch (err) {
+          if (attempt === 1) throw err;
+        }
+      }
+    };
+
+    const writtenChunkIds: string[] = [];
+    try {
+      // Write all chunks first so the manifest never points to missing chunks
+      for (let idx = 0; idx < chunks.length; idx++) {
+        const chunkId = `${meta.id}__chunk_${idx}`;
+        await writeDocWithRetry('databaseBackupChunks', chunkId, {
+          backupId: meta.id,
+          index: idx,
+          totalChunks: chunks.length,
+          data: chunks[idx],
+          createdAt: meta.createdAt,
+        });
+        writtenChunkIds.push(chunkId);
+      }
+
+      await writeDocWithRetry('databaseBackups', meta.id, {
+        ...meta,
+        compression: 'gzip-base64',
+        compressedBytes: compressedBuffer.length,
+        chunkCount: chunks.length,
+        sha256,
+        storageLocation: 'firestore_and_local',
+        updatedAt: new Date().toISOString(),
+      });
+    } catch (err: any) {
+      // Clean up partially written chunks best-effort
+      for (const cid of writtenChunkIds) {
+        await this.remoteDocStore.deleteDoc('databaseBackupChunks', cid).catch(() => undefined);
+      }
+      throw new Error(
+        `No se pudo guardar el respaldo en Cloud Firestore (${err?.message || err}). Verifica la conexión y cuota de Firestore.`
+      );
+    }
+
+    return {
+      compressedBytes: compressedBuffer.length,
+      chunkCount: chunks.length,
+      sha256,
+    };
+  }
+
+  public async listDatabaseBackups(): Promise<
+    Array<{
+      id: string;
+      label: string;
+      createdAt: string;
+      createdBy: string;
+      sizeBytes: number;
+      compressedBytes?: number;
+      chunkCount?: number;
+      storageLocation?: 'firestore_and_local' | 'firestore' | 'local';
+      counts: {
+        interviews: number;
+        participants: number;
+        answers: number;
+        photos: number;
+        audios: number;
+        manuscripts: number;
+        bookVersions: number;
+        questions?: number;
+        miEsenciaPersons?: number;
+        miEsenciaProfiles: number;
+        miEsenciaSubscriptions: number;
+        miEsenciaConversations?: number;
+      };
+    }>
+  > {
+    const localItems = this.listLocalDatabaseBackups();
+    const mergedMap = new Map<string, any>();
+
+    try {
+      const remoteDocs = this.remoteDocStore.listCollection
+        ? await this.remoteDocStore.listCollection('databaseBackups')
+        : [];
+      for (const entry of remoteDocs) {
+        const d = entry.data as any;
+        if (!d || !d.id) continue;
+        const hasLocal = fs.existsSync(path.join(this.getBackupsDir(), `${d.id}.json`));
+        mergedMap.set(d.id, {
+          id: d.id,
+          label: d.label || d.id,
+          createdAt: d.createdAt || new Date().toISOString(),
+          createdBy: d.createdBy || 'admin',
+          sizeBytes: Number(d.sizeBytes) || 0,
+          compressedBytes: Number(d.compressedBytes) || undefined,
+          chunkCount: Number(d.chunkCount) || undefined,
+          storageLocation: hasLocal ? 'firestore_and_local' : 'firestore',
+          counts: d.counts || {
+            interviews: 0,
+            participants: 0,
+            answers: 0,
+            photos: 0,
+            audios: 0,
+            manuscripts: 0,
+            bookVersions: 0,
+            miEsenciaProfiles: 0,
+            miEsenciaSubscriptions: 0,
+          },
+        });
+      }
+    } catch (err: any) {
+      console.warn('[StorageManager] Could not list databaseBackups from Firestore (using local cache):', err?.message || err);
+    }
+
+    for (const item of localItems) {
+      if (!mergedMap.has(item.id)) {
+        mergedMap.set(item.id, { ...item, storageLocation: item.storageLocation || 'local' });
+      }
+    }
+
+    const sorted = Array.from(mergedMap.values()).sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    );
+    return sorted;
   }
 
   private saveBackupsIndex(items: any[]): void {
@@ -9050,6 +9323,9 @@ export class StorageManager {
     createdAt: string;
     createdBy: string;
     sizeBytes: number;
+    compressedBytes?: number;
+    chunkCount?: number;
+    storageLocation?: 'firestore_and_local' | 'firestore' | 'local';
     counts: {
       interviews: number;
       participants: number;
@@ -9058,10 +9334,16 @@ export class StorageManager {
       audios: number;
       manuscripts: number;
       bookVersions: number;
+      questions?: number;
+      miEsenciaPersons?: number;
       miEsenciaProfiles: number;
       miEsenciaSubscriptions: number;
+      miEsenciaConversations?: number;
     };
   }> {
+    if (this.initPromise) {
+      await this.initPromise;
+    }
     const { miEsenciaStore } = await import('./miEsencia/miEsenciaStore.ts');
     const miEsenciaBackup = miEsenciaStore.exportFullStateForBackup();
 
@@ -9137,10 +9419,8 @@ export class StorageManager {
 
     const serialized = JSON.stringify(fullPayload, null, 2);
     const sizeBytes = Buffer.byteLength(serialized, 'utf-8');
-    const filePath = path.join(this.getBackupsDir(), `${backupId}.json`);
-    fs.writeFileSync(filePath, serialized, 'utf-8');
 
-    const meta = {
+    const baseMeta = {
       id: backupId,
       label: cleanLabel,
       createdAt: nowIso,
@@ -9149,25 +9429,256 @@ export class StorageManager {
       counts,
     };
 
-    const existingList = this.listDatabaseBackups();
+    // 1. Persist compressed chunks + manifest durably to Cloud Firestore
+    const remoteMeta = await this.persistDatabaseBackupToFirestore(baseMeta, serialized);
+
+    // 2. Also keep a local cache copy on disk for fast download/restore
+    const filePath = path.join(this.getBackupsDir(), `${backupId}.json`);
+    fs.writeFileSync(filePath, serialized, 'utf-8');
+
+    const meta = {
+      ...baseMeta,
+      compressedBytes: remoteMeta.compressedBytes,
+      chunkCount: remoteMeta.chunkCount,
+      storageLocation: 'firestore_and_local' as const,
+    };
+
+    const existingList = this.listLocalDatabaseBackups();
     this.saveBackupsIndex([meta, ...existingList.filter((i) => i.id !== backupId)]);
 
     await this.addAuditLog('CREATE_DATABASE_BACKUP', 'system', backupId, performedBy, {
       label: cleanLabel,
       sizeBytes,
+      compressedBytes: remoteMeta.compressedBytes,
+      chunkCount: remoteMeta.chunkCount,
       counts,
     });
 
     return meta;
   }
 
-  public getDatabaseBackupPayload(backupId: string): any {
+  public async getDatabaseBackupPayload(backupId: string): Promise<any> {
     const safeId = path.basename(backupId).replace(/[^a-zA-Z0-9_-]/g, '');
     const filePath = path.join(this.getBackupsDir(), `${safeId}.json`);
-    if (!fs.existsSync(filePath)) {
-      throw new Error('Archivo de respaldo no encontrado en el servidor.');
+    if (fs.existsSync(filePath)) {
+      return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
     }
-    return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+
+    // Reassemble from durable Cloud Firestore chunks when local disk cache was wiped by a container restart
+    const manifest = this.remoteDocStore.getDoc
+      ? await this.remoteDocStore.getDoc('databaseBackups', safeId)
+      : null;
+    if (!manifest) {
+      throw new Error('Archivo de respaldo no encontrado ni en el servidor ni en Cloud Firestore.');
+    }
+
+    const chunkCount = Number(manifest.chunkCount) || 0;
+    if (chunkCount <= 0) {
+      throw new Error('El respaldo remoto no tiene fragmentos válidos registrados.');
+    }
+
+    const parts: string[] = [];
+    for (let idx = 0; idx < chunkCount; idx++) {
+      const chunkDoc = this.remoteDocStore.getDoc
+        ? await this.remoteDocStore.getDoc('databaseBackupChunks', `${safeId}__chunk_${idx}`)
+        : null;
+      if (!chunkDoc || typeof chunkDoc.data !== 'string') {
+        throw new Error(`El respaldo remoto está incompleto (falta el fragmento ${idx + 1} de ${chunkCount}).`);
+      }
+      parts.push(chunkDoc.data);
+    }
+
+    const base64Payload = parts.join('');
+    const compressedBuffer = Buffer.from(base64Payload, 'base64');
+    const serialized =
+      manifest.compression === 'gzip-base64'
+        ? zlib.gunzipSync(compressedBuffer).toString('utf-8')
+        : compressedBuffer.toString('utf-8');
+
+    if (typeof manifest.sha256 === 'string' && manifest.sha256.length > 0) {
+      const actualHash = sha256Hash('sha256').update(serialized, 'utf-8').digest('hex');
+      if (actualHash !== manifest.sha256) {
+        throw new Error('Error de integridad al descomprimir el respaldo desde Cloud Firestore (SHA-256 no coincide).');
+      }
+    }
+
+    const parsed = JSON.parse(serialized);
+    // Warm local disk cache for subsequent downloads/restores
+    try {
+      fs.writeFileSync(filePath, serialized, 'utf-8');
+      const existingList = this.listLocalDatabaseBackups();
+      this.saveBackupsIndex([
+        {
+          id: safeId,
+          label: manifest.label || safeId,
+          createdAt: manifest.createdAt || new Date().toISOString(),
+          createdBy: manifest.createdBy || 'admin',
+          sizeBytes: Number(manifest.sizeBytes) || Buffer.byteLength(serialized, 'utf-8'),
+          compressedBytes: Number(manifest.compressedBytes) || undefined,
+          chunkCount,
+          storageLocation: 'firestore_and_local',
+          counts: manifest.counts || parsed.counts,
+        },
+        ...existingList.filter((i) => i.id !== safeId),
+      ]);
+    } catch {
+      // Ignore cache write errors; payload is already recovered
+    }
+
+    return parsed;
+  }
+
+  private async syncFullRestoredStateToFirestore(): Promise<{
+    written: number;
+    deleted: number;
+    warnings: string[];
+  }> {
+    let written = 0;
+    let deleted = 0;
+    const warnings: string[] = [];
+
+    const writeDirect = async (collectionName: string, docId: string, payload: Record<string, unknown>) => {
+      const fn = this.remoteDocStore.setDocDirect || this.remoteDocStore.setDoc;
+      const sanitized = this.sanitizeDocForFirestore(payload) as Record<string, unknown>;
+      sanitized._syncedAt = new Date().toISOString();
+      const byteSize = Buffer.byteLength(JSON.stringify(sanitized), 'utf8');
+      if (byteSize > FIRESTORE_SAFE_DOC_BYTES) {
+        const res = await this.persistRemoteDocDurable(collectionName, docId, payload);
+        if (res.status !== 'written') {
+          throw new Error(res.error || 'persistRemoteDocDurable failed');
+        }
+        return;
+      }
+      await fn(collectionName, docId, sanitized);
+    };
+
+    const reconcileCollection = async (
+      collectionName: string,
+      entries: Array<[string, any]>,
+      options?: { durableKeepFields?: string[]; isBookVersions?: boolean }
+    ) => {
+      const targetBaseIds = new Set(entries.map(([id]) => id));
+      const keptRemoteDocIds = new Set<string>();
+
+      const BATCH_SIZE = 8;
+      for (let i = 0; i < entries.length; i += BATCH_SIZE) {
+        const slice = entries.slice(i, i + BATCH_SIZE);
+        await Promise.all(
+          slice.map(async ([docId, value]) => {
+            try {
+              if (options?.isBookVersions) {
+                const res = await this.persistBookVersionDurable(docId);
+                if (res.status === 'written') {
+                  written++;
+                  keptRemoteDocIds.add(docId);
+                  for (let c = 0; c < res.chunkCount; c++) {
+                    keptRemoteDocIds.add(chunkDocId(docId, c));
+                  }
+                } else {
+                  warnings.push(`participantBookVersions/${docId}: ${res.error || 'error al escribir'}`);
+                }
+              } else if (options?.durableKeepFields && options.durableKeepFields.length > 0) {
+                const res = await this.persistRemoteDocDurable(
+                  collectionName,
+                  docId,
+                  value,
+                  ['interviewId', 'title'],
+                  options.durableKeepFields
+                );
+                if (res.status === 'written') {
+                  written++;
+                  keptRemoteDocIds.add(docId);
+                  for (let c = 0; c < res.chunkCount; c++) {
+                    keptRemoteDocIds.add(chunkDocId(docId, c));
+                  }
+                } else {
+                  warnings.push(`${collectionName}/${docId}: ${res.error || 'error al escribir'}`);
+                }
+              } else {
+                await writeDirect(collectionName, docId, value);
+                written++;
+                keptRemoteDocIds.add(docId);
+              }
+            } catch (err: any) {
+              warnings.push(`No se pudo escribir ${collectionName}/${docId}: ${err?.message || err}`);
+            }
+          })
+        );
+      }
+
+      // Delete remote documents not in the restored backup
+      if (this.remoteDocStore.listCollection) {
+        try {
+          const remoteDocs = await this.remoteDocStore.listCollection(collectionName);
+          const toDelete = remoteDocs.filter((rDoc) => {
+            if (keptRemoteDocIds.has(rDoc.id)) return false;
+            const baseId = rDoc.id.includes('__chunk_') ? rDoc.id.split('__chunk_')[0] : rDoc.id;
+            if (targetBaseIds.has(rDoc.id) || (rDoc.id.includes('__chunk_') && keptRemoteDocIds.has(rDoc.id))) {
+              return false;
+            }
+            if (rDoc.id.includes('__chunk_') && targetBaseIds.has(baseId) && !keptRemoteDocIds.has(baseId)) {
+              return false;
+            }
+            return true;
+          });
+          for (let i = 0; i < toDelete.length; i += BATCH_SIZE) {
+            const slice = toDelete.slice(i, i + BATCH_SIZE);
+            await Promise.all(
+              slice.map(async (rDoc) => {
+                const ok = await this.removeDoc(collectionName, rDoc.id);
+                if (ok) deleted++;
+              })
+            );
+          }
+        } catch (err: any) {
+          warnings.push(`No se pudo reconciliar borrados en ${collectionName}: ${err?.message || err}`);
+        }
+      }
+    };
+
+    try {
+      await writeDirect('settings', 'appConfig', this.config as any);
+      written++;
+    } catch (err: any) {
+      warnings.push(`settings/appConfig: ${err?.message || err}`);
+    }
+
+    const regOk = await this.persistDeletedRegistry();
+    if (regOk) written++;
+    else warnings.push('settings/deletedRegistry: no se pudo guardar en Firestore.');
+
+    await reconcileCollection('questions', Array.from(this.questions.entries()));
+    await reconcileCollection('interviews', Array.from(this.interviews.entries()));
+    await reconcileCollection('participants', Array.from(this.participants.entries()));
+    await reconcileCollection(
+      'interviewTokens',
+      Array.from(this.tokens.values()).map((t) => [t.id, t])
+    );
+    await reconcileCollection('answers', Array.from(this.answers.entries()));
+    await reconcileCollection('interviewPhotos', Array.from(this.photos.entries()), {
+      durableKeepFields: ['dataUrl'],
+    });
+    await reconcileCollection('interviewAudio', Array.from(this.audios.entries()), {
+      durableKeepFields: ['dataUrl'],
+    });
+    await reconcileCollection('manuscripts', Array.from(this.manuscripts.entries()));
+    await reconcileCollection(
+      'participantBookVersions',
+      Array.from(this.participantBookVersions.entries()),
+      { isBookVersions: true }
+    );
+    await reconcileCollection('privacyConsents', Array.from(this.privacyConsents.entries()));
+    await reconcileCollection('bookShares', Array.from(this.bookShares.entries()));
+    await reconcileCollection('scheduledDeliveries', Array.from(this.scheduledDeliveries.entries()));
+    await reconcileCollection('secondaryAccess', Array.from(this.secondaryAccess.entries()));
+    await reconcileCollection('postMortemInstructions', Array.from(this.postMortemInstructions.entries()));
+    await reconcileCollection('arcoRequests', Array.from(this.arcoRequests.entries()));
+    await reconcileCollection(
+      'auditLogs',
+      this.auditLogs.slice(0, 300).map((l) => [l.id, l])
+    );
+
+    return { written, deleted, warnings };
   }
 
   public async applyDatabaseBackupObject(
@@ -9184,6 +9695,11 @@ export class StorageManager {
       questions: number;
       miEsenciaPersons: number;
       miEsenciaProfiles: number;
+    };
+    remoteSync: {
+      written: number;
+      deleted: number;
+      warnings: string[];
     };
   }> {
     if (!payload || typeof payload !== 'object') {
@@ -9303,14 +9819,27 @@ export class StorageManager {
 
     this.ensureParticipantTokensConsistent();
     this.saveStateToDisk();
-    void this.persistDeletedRegistry();
+
+    // Persist the entire restored state back to Cloud Firestore so restores survive restarts
+    const primarySync = await this.syncFullRestoredStateToFirestore();
 
     let miEsenciaProfiles = 0;
+    let miEsenciaSync = { written: 0, deleted: 0, warnings: [] as string[] };
     if (payload.miEsencia && typeof payload.miEsencia === 'object') {
       const { miEsenciaStore } = await import('./miEsencia/miEsenciaStore.ts');
       const meRes = miEsenciaStore.restoreFullStateFromBackup(payload.miEsencia);
       miEsenciaProfiles = meRes.personsRestored;
+      miEsenciaSync = await miEsenciaStore.syncFullStateToFirestore();
     }
+
+    this.advanceSyncWatermarks('full', true);
+    this.saveStateToDisk();
+
+    const remoteSync = {
+      written: primarySync.written + miEsenciaSync.written,
+      deleted: primarySync.deleted + miEsenciaSync.deleted,
+      warnings: [...primarySync.warnings, ...miEsenciaSync.warnings].slice(0, 50),
+    };
 
     const counts = {
       interviews: this.interviews.size,
@@ -9326,16 +9855,20 @@ export class StorageManager {
     await this.addAuditLog('RESTORE_DATABASE_BACKUP', 'system', payload.id || 'uploaded_backup', performedBy, {
       label: payload.label || 'Respaldo restaurado',
       counts,
+      remoteSyncWritten: remoteSync.written,
+      remoteSyncDeleted: remoteSync.deleted,
+      remoteSyncWarnings: remoteSync.warnings.length,
     });
 
     return {
       restoredAt: new Date().toISOString(),
       counts,
+      remoteSync,
     };
   }
 
   public async restoreDatabaseBackup(backupId: string, performedBy: string) {
-    const payload = this.getDatabaseBackupPayload(backupId);
+    const payload = await this.getDatabaseBackupPayload(backupId);
     return this.applyDatabaseBackupObject(payload, performedBy);
   }
 
@@ -9400,10 +9933,8 @@ export class StorageManager {
 
     const serialized = JSON.stringify(normalizedPayload, null, 2);
     const sizeBytes = Buffer.byteLength(serialized, 'utf-8');
-    const filePath = path.join(this.getBackupsDir(), `${backupId}.json`);
-    fs.writeFileSync(filePath, serialized, 'utf-8');
 
-    const meta = {
+    const baseMeta = {
       id: backupId,
       label: cleanLabel,
       createdAt: normalizedPayload.createdAt,
@@ -9412,7 +9943,19 @@ export class StorageManager {
       counts,
     };
 
-    const existingList = this.listDatabaseBackups();
+    const remoteMeta = await this.persistDatabaseBackupToFirestore(baseMeta, serialized);
+
+    const filePath = path.join(this.getBackupsDir(), `${backupId}.json`);
+    fs.writeFileSync(filePath, serialized, 'utf-8');
+
+    const meta = {
+      ...baseMeta,
+      compressedBytes: remoteMeta.compressedBytes,
+      chunkCount: remoteMeta.chunkCount,
+      storageLocation: 'firestore_and_local' as const,
+    };
+
+    const existingList = this.listLocalDatabaseBackups();
     this.saveBackupsIndex([meta, ...existingList.filter((i) => i.id !== backupId)]);
 
     let restoreResult = null;
@@ -9430,11 +9973,28 @@ export class StorageManager {
 
   public async deleteDatabaseBackup(backupId: string, performedBy: string): Promise<{ deletedId: string }> {
     const safeId = path.basename(backupId).replace(/[^a-zA-Z0-9_-]/g, '');
+
+    // 1. Delete remote chunks and manifest from Cloud Firestore
+    let remoteChunkCount = 0;
+    try {
+      const manifest = this.remoteDocStore.getDoc
+        ? await this.remoteDocStore.getDoc('databaseBackups', safeId)
+        : null;
+      remoteChunkCount = Number(manifest?.chunkCount) || 0;
+    } catch {
+      // Proceed to delete manifest best-effort
+    }
+    for (let idx = 0; idx < remoteChunkCount; idx++) {
+      await this.removeDoc('databaseBackupChunks', `${safeId}__chunk_${idx}`);
+    }
+    await this.removeDoc('databaseBackups', safeId);
+
+    // 2. Delete local cache file and index entry
     const filePath = path.join(this.getBackupsDir(), `${safeId}.json`);
     if (fs.existsSync(filePath)) {
       fs.unlinkSync(filePath);
     }
-    const existingList = this.listDatabaseBackups().filter((i) => i.id !== safeId);
+    const existingList = this.listLocalDatabaseBackups().filter((i) => i.id !== safeId);
     this.saveBackupsIndex(existingList);
 
     await this.addAuditLog('DELETE_DATABASE_BACKUP', 'system', safeId, performedBy, {});
