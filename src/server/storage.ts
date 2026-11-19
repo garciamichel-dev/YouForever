@@ -524,6 +524,17 @@ export class StorageManager {
   private participantBookVersions: Map<string, ParticipantBookVersionRecord> = new Map();
   private deletedBookVersionIds: Set<string> = new Set();
   private deletedManuscriptIds: Set<string> = new Set();
+  /**
+   * V5.8.4 — Records CONFIRMED to exist in Cloud Firestore (read from it, or written to it with a
+   * confirmed durable write). A sync only discards a local record that was confirmed before and is
+   * no longer in Firestore (deleted by another instance). A record that never reached Firestore
+   * (write skipped by quota, size or timeout) is kept and written again, never discarded.
+   */
+  private remoteConfirmedManuscriptIds: Set<string> = new Set();
+  private remoteConfirmedBookVersionIds: Set<string> = new Set();
+  /** Raw document counts (chunk documents included) seen in the last incremental sync. */
+  private lastRemoteManuscriptDocCount = -1;
+  private lastRemoteBookVersionDocCount = -1;
   private adminManuscriptJobs: Map<
     string,
     {
@@ -987,7 +998,83 @@ export class StorageManager {
     return this.persistRemoteDocDurable('participantBookVersions', versionId, {
       ...version,
       ...(report ? { adminAuditReport: report } : {}),
+    }).then((res) => {
+      if (res.status === 'written') this.remoteConfirmedBookVersionIds.add(versionId);
+      return res;
     });
+  }
+
+  /**
+   * V5.8.4 — Durable remote copy of a manuscript (chunked above 800 KB, retried). Manuscripts carry
+   * the whole text plus both audits and can exceed the size the best-effort writer silently skipped.
+   */
+  private async persistManuscriptDurable(manuscript: ManuscriptRecord): Promise<boolean> {
+    this.saveStateToDisk();
+    const res = await this.persistRemoteDocDurable('manuscripts', manuscript.id, manuscript, ['interviewId', 'title']);
+    if (res.status === 'written') {
+      this.remoteConfirmedManuscriptIds.add(manuscript.id);
+      return true;
+    }
+    return false;
+  }
+
+  /** V5.8.4 — Removes a manuscript from Firestore, chunk documents included. */
+  private async removeManuscriptRemote(manuscriptId: string): Promise<void> {
+    this.remoteConfirmedManuscriptIds.delete(manuscriptId);
+    await this.removeChunkedRemoteDocs('manuscripts', manuscriptId);
+  }
+
+  /** V5.8.4 — Manuscripts read from Firestore (chunked ones reassembled; chunk docs never loaded as records). */
+  private ingestRemoteManuscriptDocs(rawDocs: any[]): { loadedIds: Set<string>; incompleteIds: Set<string> } {
+    const { docs, incomplete } = reassembleChunkedDocs<ManuscriptRecord>(rawDocs);
+    const loadedIds = new Set<string>();
+    for (const raw of docs) {
+      if (!raw || !raw.id) continue;
+      const { _syncedAt: _s, ...manu } = raw as ManuscriptRecord & { _syncedAt?: string };
+      loadedIds.add(manu.id);
+      this.remoteConfirmedManuscriptIds.add(manu.id);
+      if (!this.deletedManuscriptIds.has(manu.id)) this.manuscripts.set(manu.id, manu as ManuscriptRecord);
+    }
+    if (incomplete.length > 0) {
+      console.warn(`[StorageManager] Incomplete chunked manuscripts skipped (kept local copies): ${incomplete.join(', ')}`);
+    }
+    return { loadedIds, incompleteIds: new Set(incomplete) };
+  }
+
+  /**
+   * V5.8.4 — Discards only local records that were CONFIRMED in Firestore before and are no longer
+   * there (removed by another instance). Records that never reached Firestore are kept.
+   */
+  private purgeRemotelyDeletedRecords<T>(
+    local: Map<string, T>,
+    confirmed: Set<string>,
+    loadedIds: Set<string>,
+    incompleteIds: Set<string>
+  ): number {
+    let purged = 0;
+    for (const localId of Array.from(local.keys())) {
+      if (loadedIds.has(localId) || incompleteIds.has(localId)) continue;
+      if (!confirmed.has(localId)) continue; // never reached Firestore: keep it (it is re-sent)
+      local.delete(localId);
+      confirmed.delete(localId);
+      purged++;
+    }
+    return purged;
+  }
+
+  /**
+   * V5.8.4 — Re-sends a few local manuscripts that never reached Firestore (bounded per sync). Book
+   * versions are not re-sent here: they already use the durable writer, and unconfirmed versions are
+   * simply never discarded (some are synthesized locally and must not become Firestore documents).
+   */
+  private async resendUnconfirmedManuscripts(limit = 3): Promise<void> {
+    let budget = limit;
+    for (const manu of Array.from(this.manuscripts.values())) {
+      if (budget <= 0) break;
+      if (!manu?.id || this.remoteConfirmedManuscriptIds.has(manu.id) || this.deletedManuscriptIds.has(manu.id)) continue;
+      budget--;
+      await this.persistManuscriptDurable(manu);
+    }
   }
 
   /**
@@ -1040,6 +1127,7 @@ export class StorageManager {
       const { adminAuditReport, _syncedAt: _s, ...bv } = raw;
       this.participantBookVersions.set(bv.id, bv as ParticipantBookVersionRecord);
       loadedIds.add(bv.id);
+      this.remoteConfirmedBookVersionIds.add(bv.id);
       if (adminAuditReport?.identification?.versionId === bv.id) {
         const local = this.bookAuditReports.get(bv.id);
         // Admin changes only ever append history: the longer history is the newer report.
@@ -2165,21 +2253,12 @@ export class StorageManager {
     }
 
     if (manuscriptsSnap) {
-      const remoteManuscriptIds = new Set<string>();
-      manuscriptsSnap.forEach((docSnap: any) => {
-        const manu = docSnap.data() as ManuscriptRecord;
-        if (manu && manu.id && !this.deletedManuscriptIds.has(manu.id)) {
-          this.manuscripts.set(manu.id, manu);
-          remoteManuscriptIds.add(manu.id);
-        }
-      });
-      // Reconcile against Firestore as source of truth: purge local/disk ghost manuscripts
-      // that no longer exist in Cloud Firestore.
-      for (const localId of Array.from(this.manuscripts.keys())) {
-        if (!remoteManuscriptIds.has(localId)) {
-          this.manuscripts.delete(localId);
-        }
-      }
+      const rawManuscripts: any[] = [];
+      manuscriptsSnap.forEach((docSnap: any) => rawManuscripts.push(docSnap.data()));
+      const { loadedIds, incompleteIds } = this.ingestRemoteManuscriptDocs(rawManuscripts);
+      // V5.8.4: only manuscripts confirmed in Firestore before and now gone are discarded; a
+      // manuscript that never reached Firestore is kept (and re-sent), never silently lost.
+      this.purgeRemotelyDeletedRecords(this.manuscripts, this.remoteConfirmedManuscriptIds, loadedIds, incompleteIds);
     }
 
     if (logsSnap) {
@@ -2252,13 +2331,14 @@ export class StorageManager {
       const rawVersions: any[] = [];
       bookVersionsSnap.forEach((docSnap: any) => rawVersions.push(docSnap.data()));
       const { loadedIds, incompleteIds } = this.ingestRemoteBookVersionDocs(rawVersions);
-      // Reconcile against Firestore as source of truth: purge local/disk ghost book versions
-      // that no longer exist in Cloud Firestore (preserving only any incomplete chunked versions).
-      for (const localId of Array.from(this.participantBookVersions.keys())) {
-        if (!loadedIds.has(localId) && !incompleteIds.has(localId)) {
-          this.participantBookVersions.delete(localId);
-        }
-      }
+      // V5.8.4: same conservative rule as manuscripts (deletions themselves travel through the
+      // deleted registry, which is applied on every sync).
+      this.purgeRemotelyDeletedRecords(
+        this.participantBookVersions,
+        this.remoteConfirmedBookVersionIds,
+        loadedIds,
+        incompleteIds
+      );
     }
   }
 
@@ -2437,10 +2517,12 @@ export class StorageManager {
         const c = d.data() as PrivacyConsentRecord;
         if (c?.id) this.privacyConsents.set(c.id, c);
       });
-      unwrap(3)?.forEach((d: any) => {
-        const m = d.data() as ManuscriptRecord;
-        if (m?.id && !this.deletedManuscriptIds.has(m.id)) this.manuscripts.set(m.id, m);
-      });
+      {
+        // V5.8.4: chunked manuscripts reassembled (chunk documents are never loaded as manuscripts).
+        const rawManuscripts: any[] = [];
+        unwrap(3)?.forEach((d: any) => rawManuscripts.push(d.data()));
+        this.ingestRemoteManuscriptDocs(rawManuscripts);
+      }
       {
         const rawVersions: any[] = [];
         unwrap(4)?.forEach((d: any) => rawVersions.push(d.data()));
@@ -2550,10 +2632,12 @@ export class StorageManager {
         const c = d.data() as PrivacyConsentRecord;
         if (c?.id) this.privacyConsents.set(c.id, c);
       });
-      unwrap(3)?.forEach((d: any) => {
-        const m = d.data() as ManuscriptRecord;
-        if (m?.id && !this.deletedManuscriptIds.has(m.id)) this.manuscripts.set(m.id, m);
-      });
+      {
+        // V5.8.4: chunked manuscripts reassembled (chunk documents are never loaded as manuscripts).
+        const rawManuscripts: any[] = [];
+        unwrap(3)?.forEach((d: any) => rawManuscripts.push(d.data()));
+        this.ingestRemoteManuscriptDocs(rawManuscripts);
+      }
       {
         const rawVersions: any[] = [];
         unwrap(4)?.forEach((d: any) => rawVersions.push(d.data()));
@@ -2769,11 +2853,13 @@ export class StorageManager {
       });
     }
 
-    // Reconcile book versions whenever remote count differs from local (both additions AND deletions/ghosts)
+    // V5.8.4: the remote counts include the chunk documents of large records, so they are compared
+    // with the count seen in the previous sync (not with the number of records in memory, which would
+    // re-read the whole collection on every sync). The first sync always reconciles.
     if (
       remoteBookVersionsCount >= 0 &&
-      (remoteBookVersionsCount !== prevBookVersionsCount ||
-        remoteBookVersionsCount !== this.participantBookVersions.size)
+      (remoteBookVersionsCount !== this.lastRemoteBookVersionDocCount ||
+        remoteBookVersionsCount < prevBookVersionsCount)
     ) {
       const allBvSnap = await firestoreTelemetry
         .trackedGetDocs(serverDb, collection(serverDb, 'participantBookVersions'), 'storage')
@@ -2782,34 +2868,32 @@ export class StorageManager {
         const rawVersions: any[] = [];
         allBvSnap.forEach((docSnap: any) => rawVersions.push(docSnap.data()));
         const { loadedIds, incompleteIds } = this.ingestRemoteBookVersionDocs(rawVersions);
-        for (const localId of Array.from(this.participantBookVersions.keys())) {
-          if (!loadedIds.has(localId) && !incompleteIds.has(localId)) {
-            this.participantBookVersions.delete(localId);
-          }
-        }
+        this.purgeRemotelyDeletedRecords(
+          this.participantBookVersions,
+          this.remoteConfirmedBookVersionIds,
+          loadedIds,
+          incompleteIds
+        );
+        this.lastRemoteBookVersionDocCount = remoteBookVersionsCount;
       }
     }
 
-    // Reconcile manuscripts whenever remote count differs from local (both additions AND deletions/ghosts)
-    if (remoteManuscriptsCount >= 0 && remoteManuscriptsCount !== this.manuscripts.size) {
+    if (remoteManuscriptsCount >= 0 && remoteManuscriptsCount !== this.lastRemoteManuscriptDocCount) {
       const allManuSnap = await firestoreTelemetry
         .trackedGetDocs(serverDb, collection(serverDb, 'manuscripts'), 'storage')
         .catch(() => null);
       if (allManuSnap) {
-        const remoteManuIds = new Set<string>();
-        allManuSnap.forEach((docSnap: any) => {
-          const m = docSnap.data() as ManuscriptRecord;
-          if (m?.id && !this.deletedManuscriptIds.has(m.id)) {
-            this.manuscripts.set(m.id, m);
-            remoteManuIds.add(m.id);
-          }
-        });
-        for (const localId of Array.from(this.manuscripts.keys())) {
-          if (!remoteManuIds.has(localId)) {
-            this.manuscripts.delete(localId);
-          }
-        }
+        const rawManuscripts: any[] = [];
+        allManuSnap.forEach((docSnap: any) => rawManuscripts.push(docSnap.data()));
+        const { loadedIds, incompleteIds } = this.ingestRemoteManuscriptDocs(rawManuscripts);
+        this.purgeRemotelyDeletedRecords(this.manuscripts, this.remoteConfirmedManuscriptIds, loadedIds, incompleteIds);
+        this.lastRemoteManuscriptDocCount = remoteManuscriptsCount;
       }
+    }
+
+    // V5.8.4: manuscripts whose remote write was skipped earlier (quota, size, timeout) are re-sent.
+    if (!this.firestoreSyncStatus.quotaExhausted) {
+      await this.resendUnconfirmedManuscripts(3).catch(() => undefined);
     }
 
     if (logsSnap) {
@@ -4031,7 +4115,7 @@ export class StorageManager {
         interviewId: newInterviewId,
       };
       this.manuscripts.set(newManuId, clonedManu);
-      await this.persistDoc('manuscripts', newManuId, clonedManu);
+      await this.persistManuscriptDurable(clonedManu);
     }
 
     // 6. Clone generated PDF book versions
@@ -4781,7 +4865,7 @@ export class StorageManager {
       if (cleanedContent !== manu.content) {
         manu.content = cleanedContent;
         this.manuscripts.set(manu.id, manu);
-        await this.persistDoc('manuscripts', manu.id, manu);
+        await this.persistManuscriptDurable(manu);
       }
     }
 
@@ -7458,7 +7542,7 @@ export class StorageManager {
       if (this.manuscripts.has(matchingManuId)) {
         this.deletedManuscriptIds.add(matchingManuId);
         this.manuscripts.delete(matchingManuId);
-        await this.removeDoc('manuscripts', matchingManuId);
+        await this.removeManuscriptRemote(matchingManuId);
       }
     }
 
@@ -7658,7 +7742,7 @@ export class StorageManager {
     for (const m of manuscriptsForInterview) {
       this.deletedManuscriptIds.add(m.id);
       this.manuscripts.delete(m.id);
-      await this.removeDoc('manuscripts', m.id);
+      await this.removeManuscriptRemote(m.id);
       deletedManuscriptIds.push(m.id);
     }
     interview.lastActivityAt = new Date().toISOString();
@@ -7791,7 +7875,7 @@ export class StorageManager {
     for (const manu of manuscriptsToDelete) {
       this.deletedManuscriptIds.add(manu.id);
       this.manuscripts.delete(manu.id);
-      await this.removeDoc('manuscripts', manu.id);
+      await this.removeManuscriptRemote(manu.id);
     }
 
     // 4b. Delete all participant book versions
@@ -7998,7 +8082,9 @@ export class StorageManager {
 
     this.deletedManuscriptIds.delete(manuscriptId);
     this.manuscripts.set(manuscriptId, manuscript);
-    await this.persistDoc('manuscripts', manuscriptId, manuscript);
+    // V5.8.4: durable write (chunked above 800 KB, retried); if it still fails the manuscript stays
+    // on this server and is re-sent on the next sync instead of being lost.
+    await this.persistManuscriptDurable(manuscript);
 
     await this.addAuditLog('GENERATE_MANUSCRIPT', 'manuscript', manuscriptId, performedBy, {
       interviewId,
@@ -8143,7 +8229,7 @@ export class StorageManager {
 
     this.deletedManuscriptIds.add(manuscriptId);
     this.manuscripts.delete(manuscriptId);
-    await this.removeDoc('manuscripts', manuscriptId);
+    await this.removeManuscriptRemote(manuscriptId);
 
     // If a synthesized book version existed from this manuscript version, mark it deleted too
     if (manuscript && interviewId) {
@@ -9537,7 +9623,12 @@ export class StorageManager {
     let deleted = 0;
     const warnings: string[] = [];
 
-    const writeDirect = async (collectionName: string, docId: string, payload: Record<string, unknown>) => {
+    /** Returns how many chunk documents were written (0 = a single document). */
+    const writeDirect = async (
+      collectionName: string,
+      docId: string,
+      payload: Record<string, unknown>
+    ): Promise<number> => {
       const fn = this.remoteDocStore.setDocDirect || this.remoteDocStore.setDoc;
       const sanitized = this.sanitizeDocForFirestore(payload) as Record<string, unknown>;
       sanitized._syncedAt = new Date().toISOString();
@@ -9547,9 +9638,10 @@ export class StorageManager {
         if (res.status !== 'written') {
           throw new Error(res.error || 'persistRemoteDocDurable failed');
         }
-        return;
+        return res.chunkCount;
       }
       await fn(collectionName, docId, sanitized);
+      return 0;
     };
 
     const reconcileCollection = async (
@@ -9595,9 +9687,15 @@ export class StorageManager {
                   warnings.push(`${collectionName}/${docId}: ${res.error || 'error al escribir'}`);
                 }
               } else {
-                await writeDirect(collectionName, docId, value);
+                const chunkCount = await writeDirect(collectionName, docId, value);
                 written++;
                 keptRemoteDocIds.add(docId);
+                // V5.8.4: a large record is written as manifest + chunks; keep its chunks too
+                // (they used to be deleted right after, leaving the record unreadable).
+                for (let c = 0; c < chunkCount; c++) {
+                  keptRemoteDocIds.add(chunkDocId(docId, c));
+                }
+                if (collectionName === 'manuscripts') this.remoteConfirmedManuscriptIds.add(docId);
               }
             } catch (err: any) {
               warnings.push(`No se pudo escribir ${collectionName}/${docId}: ${err?.message || err}`);
