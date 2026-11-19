@@ -56,7 +56,12 @@ import {
 } from './adminAuth.ts';
 import { toParticipantAuditLogView } from './participantViews.ts';
 import { ensureFirestoreMode } from './firestoreAdmin.ts';
-import { AccessAttemptLimiter, ForcedRegenerationLimiter, clientKeyFromRequest } from './accessGuard.ts';
+import {
+  AccessAttemptLimiter,
+  ForcedRegenerationLimiter,
+  FreeRegistrationLimiter,
+  clientKeyFromRequest,
+} from './accessGuard.ts';
 import { APP_RELEASE_DATE, APP_RELEASE_SUMMARY, APP_VERSION, APP_VERSION_LABEL } from '../version.ts';
 
 // V5.3.4: moment this server process started (a new deployment always restarts it).
@@ -344,7 +349,9 @@ apiRouter.get('/app-info', (_req: Request, res: Response) => {
 });
 
 // 1. Config
-apiRouter.get('/config', (_req: Request, res: Response) => {
+// V5.8.5 (#14b): administrators only — it holds the literary prompts and who edited them. The only
+// screen that reads it is Configuración Global (which already sends the administrator session).
+apiRouter.get('/config', requireAdmin, (_req: Request, res: Response) => {
   try {
     const config = storage.getConfig();
     res.json({ success: true, data: config });
@@ -1289,10 +1296,15 @@ apiRouter.post('/admin/backups', requireAdmin, async (req: Request, res: Respons
     const admin = (req as any).adminUser as string;
     const label = typeof req.body?.label === 'string' ? req.body.label : undefined;
     const backup = await storage.createDatabaseBackup(label, admin);
+    // V5.8.5 (#3): a Firestore failure no longer loses the backup — it is kept "solo local".
     res.json({
       success: true,
-      message: 'Respaldo completo de la base de datos creado y guardado en Cloud Firestore exitosamente.',
+      message:
+        backup.storageLocation === 'local'
+          ? 'Respaldo creado SOLO en este servidor: Firestore no respondió. Descárgalo a tu equipo; se volverá a intentar subirlo a Firestore.'
+          : 'Respaldo completo de la base de datos creado y guardado en Cloud Firestore exitosamente.',
       data: backup,
+      warnings: backup.warnings || [],
     });
   } catch (err: unknown) {
     res.status(500).json({ success: false, error: (err as Error).message });
@@ -1302,7 +1314,7 @@ apiRouter.post('/admin/backups', requireAdmin, async (req: Request, res: Respons
 apiRouter.get('/admin/backups/:id/download', requireAdmin, async (req: Request, res: Response) => {
   try {
     const payload = await storage.getDatabaseBackupPayload(req.params.id);
-    const serialized = JSON.stringify(payload, null, 2);
+    const serialized = JSON.stringify(payload);
     const safeName = `YouForever_Respaldo_BDD_${req.params.id}.json`;
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${safeName}"`);
@@ -1318,11 +1330,18 @@ apiRouter.post('/admin/backups/:id/restore', requireAdmin, async (req: Request, 
     const result = await storage.restoreDatabaseBackup(req.params.id, admin);
     res.json({
       success: true,
-      message: 'La base de datos ha sido restaurada exitosamente a partir del respaldo seleccionado.',
+      message: `La base de datos ha sido restaurada exitosamente a partir del respaldo seleccionado. Antes se guardó un respaldo automático del estado anterior: «${result.preRestoreBackup.label}».`,
       data: result,
     });
   } catch (err: unknown) {
-    res.status(400).json({ success: false, error: (err as Error).message });
+    const e = err as any;
+    // V5.8.5 (#2): 409 = nothing was restored because the safety backup could not be created.
+    res.status(e?.code === 'PRE_RESTORE_BACKUP_FAILED' ? 409 : 400).json({
+      success: false,
+      error: e?.message || String(err),
+      ...(e?.code ? { code: e.code } : {}),
+      ...(e?.localBackupId ? { localBackupId: e.localBackupId } : {}),
+    });
   }
 });
 
@@ -1335,12 +1354,19 @@ apiRouter.post('/admin/backups/import', requireAdmin, async (req: Request, res: 
     res.json({
       success: true,
       message: restoreImmediately
-        ? 'Archivo de respaldo cargado y restaurado exitosamente en la base de datos.'
+        ? 'Archivo de respaldo cargado y restaurado exitosamente en la base de datos (antes se guardó un respaldo automático del estado anterior).'
         : 'Archivo de respaldo importado y guardado en la lista del servidor.',
       data: result,
+      warnings: result.warnings || [],
     });
   } catch (err: unknown) {
-    res.status(400).json({ success: false, error: (err as Error).message });
+    const e = err as any;
+    res.status(e?.code === 'PRE_RESTORE_BACKUP_FAILED' ? 409 : 400).json({
+      success: false,
+      error: e?.message || String(err),
+      ...(e?.code ? { code: e.code } : {}),
+      ...(e?.localBackupId ? { localBackupId: e.localBackupId } : {}),
+    });
   }
 });
 
@@ -1983,18 +2009,21 @@ apiRouter.post('/participant/book/jobs/start', async (req: Request, res: Respons
 });
 
 // Participant Book Studio: Poll background manuscript generation job progress/result
-apiRouter.get('/participant/book/jobs/status', async (req: Request, res: Response) => {
+// V5.8.5 (#14a): POST keeps the access code out of URLs (server logs, browser history). The GET
+// form stays only so a page already open with the previous version keeps working.
+const handleParticipantBookJobStatus = async (req: Request, res: Response) => {
   try {
-    const token = typeof req.query.token === 'string' ? req.query.token : '';
-    const jobId = typeof req.query.jobId === 'string' ? req.query.jobId : undefined;
+    const src: any = req.method === 'POST' ? req.body || {} : req.query;
+    const token = typeof src.token === 'string' ? src.token : '';
+    const jobId = typeof src.jobId === 'string' ? src.jobId : undefined;
     const narrativeStyle =
-      typeof req.query.narrativeStyle === 'string'
-        ? (req.query.narrativeStyle as any)
+      typeof src.narrativeStyle === 'string'
+        ? (src.narrativeStyle as any)
         : undefined;
     const scope =
-      req.query.scope === 'preview'
+      src.scope === 'preview'
         ? 'preview'
-        : req.query.scope === 'full'
+        : src.scope === 'full'
         ? 'full'
         : undefined;
 
@@ -2012,7 +2041,9 @@ apiRouter.get('/participant/book/jobs/status', async (req: Request, res: Respons
   } catch (err: unknown) {
     res.status(400).json({ success: false, error: (err as Error).message });
   }
-});
+};
+apiRouter.post('/participant/book/jobs/status', handleParticipantBookJobStatus);
+apiRouter.get('/participant/book/jobs/status', handleParticipantBookJobStatus);
 
 // Participant Book Studio: Cancel active background book generation job
 apiRouter.post('/participant/book/jobs/cancel', async (req: Request, res: Response) => {
@@ -2851,8 +2882,27 @@ apiRouter.get('/public/manual-pdf', (req: Request, res: Response) => {
 });
 
 // Public: Self-registration (/free) — creates interview + access tokens + privacy consent + sends welcome email(s)
+// V5.8.5 (#9): anti-spam limits, editable in Configuración Global.
+const freeRegistrationLimiter = new FreeRegistrationLimiter(() => storage.getConfig().freeRegistrationLimits!);
+
+function freeRegistrationEmails(body: any): string[] {
+  const list = Array.isArray(body?.participants) ? body.participants : [];
+  const emails = list
+    .map((p: any) => String(p?.email || '').trim().toLowerCase())
+    .filter((e: string) => e.length > 0);
+  return Array.from(new Set<string>(emails));
+}
+
 apiRouter.post('/public/free-register', async (req: Request, res: Response) => {
   try {
+    const clientKey = clientKeyFromRequest(req);
+    const emails = freeRegistrationEmails(req.body);
+    const limitMessage = freeRegistrationLimiter.checkRegistration(clientKey, emails);
+    if (limitMessage) {
+      res.status(429).json({ success: false, error: limitMessage });
+      return;
+    }
+
     const result = await storage.createFreeSelfRegisteredInterview({
       payload: req.body,
       userAgent: String(req.headers['user-agent'] || ''),
@@ -2881,6 +2931,7 @@ apiRouter.post('/public/free-register', async (req: Request, res: Response) => {
     );
 
     const emailResultMap = new Map(emailResults.map((er) => [er.participantId, er]));
+    freeRegistrationLimiter.recordRegistration(clientKey, emails);
 
     res.json({
       success: true,
@@ -2948,6 +2999,13 @@ apiRouter.post('/public/free-register/:interviewId/retry-email', async (req: Req
       return;
     }
 
+    // V5.8.5 (#9): one resend per interview every N minutes (Configuración Global).
+    const resendMessage = freeRegistrationLimiter.checkResend(interview.id);
+    if (resendMessage) {
+      res.status(429).json({ success: false, error: resendMessage });
+      return;
+    }
+
     const participants = storage.getParticipantsForInterview(interview.id);
     const requestedIds: string[] | null = Array.isArray(req.body?.participantIds)
       ? req.body.participantIds.map((id: unknown) => String(id))
@@ -2989,6 +3047,7 @@ apiRouter.post('/public/free-register/:interviewId/retry-email', async (req: Req
         })
       )
     );
+    freeRegistrationLimiter.recordResend(interview.id);
 
     res.json({
       success: true,

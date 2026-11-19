@@ -182,3 +182,92 @@ export function resolveTrustProxyHops(env: Record<string, string | undefined> = 
   const n = Number(raw);
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 1;
 }
+
+/**
+ * V5.8.5 (#9) — Anti-spam limits of the public free registration, so nobody can use the
+ * registration form to send mass e-mails from YouForever's Gmail account. The numbers come from
+ * Configuración Global (FreeRegistrationLimits; 0 = no limit) and are read on every request, so a
+ * change applies immediately. In memory, per server instance.
+ *
+ * - Registrations per connection (IP) in a rolling hour.
+ * - Registrations per e-mail address in a rolling 24 hours.
+ * - "Reenviar correo": one per interview every N minutes.
+ * Only successful registrations / sends are counted (a form error is never penalized).
+ */
+export interface FreeRegistrationLimitValues {
+  perIpPerHour: number;
+  perEmailPerDay: number;
+  resendCooldownMinutes: number;
+}
+
+export class FreeRegistrationLimiter {
+  private readonly byIp = new Map<string, number[]>();
+  private readonly byEmail = new Map<string, number[]>();
+  private readonly lastResend = new Map<string, number>();
+  private lastPruneAt = 0;
+
+  constructor(
+    private readonly limits: () => FreeRegistrationLimitValues,
+    private readonly now: () => number = () => Date.now()
+  ) {}
+
+  private recent(map: Map<string, number[]>, key: string, windowMs: number): number[] {
+    const t = this.now();
+    const list = (map.get(key) || []).filter((ts) => t - ts < windowMs);
+    if (list.length) map.set(key, list);
+    else map.delete(key);
+    return list;
+  }
+
+  /** null = allowed; otherwise the message to show (Spanish, no technical details). */
+  checkRegistration(clientKey: string, emails: string[]): string | null {
+    this.maybePrune();
+    const { perIpPerHour, perEmailPerDay } = this.limits();
+    if (perIpPerHour > 0 && this.recent(this.byIp, clientKey, 3_600_000).length >= perIpPerHour) {
+      return 'Se alcanzó el número máximo de registros desde esta conexión por ahora. Intenta de nuevo en una hora.';
+    }
+    if (perEmailPerDay > 0) {
+      for (const email of emails) {
+        if (this.recent(this.byEmail, email, 86_400_000).length >= perEmailPerDay) {
+          return `El correo ${email} ya alcanzó el número máximo de registros por hoy. Intenta de nuevo mañana o revisa tu bandeja de entrada (y la carpeta de spam).`;
+        }
+      }
+    }
+    return null;
+  }
+
+  recordRegistration(clientKey: string, emails: string[]): void {
+    const t = this.now();
+    this.byIp.set(clientKey, [...this.recent(this.byIp, clientKey, 3_600_000), t]);
+    for (const email of emails) {
+      this.byEmail.set(email, [...this.recent(this.byEmail, email, 86_400_000), t]);
+    }
+  }
+
+  /** null = allowed; otherwise the message to show. */
+  checkResend(interviewId: string): string | null {
+    const { resendCooldownMinutes } = this.limits();
+    if (resendCooldownMinutes <= 0) return null;
+    const last = this.lastResend.get(interviewId);
+    if (last === undefined) return null;
+    const waitMs = last + resendCooldownMinutes * 60_000 - this.now();
+    if (waitMs <= 0) return null;
+    const minutes = Math.max(1, Math.ceil(waitMs / 60_000));
+    return `El correo se acaba de reenviar. Podrás reenviarlo de nuevo en ${minutes} minuto(s); revisa también la carpeta de spam.`;
+  }
+
+  recordResend(interviewId: string): void {
+    this.lastResend.set(interviewId, this.now());
+  }
+
+  private maybePrune(): void {
+    const t = this.now();
+    if (t - this.lastPruneAt < 600_000) return;
+    this.lastPruneAt = t;
+    for (const key of Array.from(this.byIp.keys())) this.recent(this.byIp, key, 3_600_000);
+    for (const key of Array.from(this.byEmail.keys())) this.recent(this.byEmail, key, 86_400_000);
+    for (const [key, ts] of Array.from(this.lastResend.entries())) {
+      if (t - ts > 86_400_000) this.lastResend.delete(key);
+    }
+  }
+}

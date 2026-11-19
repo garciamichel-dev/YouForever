@@ -16,3 +16,7 @@ data/mi_esencia_state.json
 data/ai_manuscript_cache.json
 data/firestore_quota_telemetry.json
 data/backups/
+
+# V5.8.5: runtime media written by the server (never versioned)
+data/audios/
+data/photos/

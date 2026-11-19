@@ -49,6 +49,7 @@ import {
   deriveDeterministicPlainToken,
   extractCleanTokenOrCode,
   matchTokenRecord,
+  normalizeFreeRegistrationLimits,
   legacyDerivedAccessCodesEnabled,
   canSubmitAnswer,
   isTokenActive,
@@ -3335,7 +3336,12 @@ export class StorageManager {
   // --- Configuration ---
   public getConfig(): AppConfig {
     // V5.6.3: a configuration saved with the family name "gpt-6" is shown and used as gpt-6-luna.
-    return { ...this.config, bookAiOpenAiModel: normalizeOpenAiModelId(this.config.bookAiOpenAiModel) };
+    return {
+      ...this.config,
+      bookAiOpenAiModel: normalizeOpenAiModelId(this.config.bookAiOpenAiModel),
+      // V5.8.5 (#9): configurations saved before V5.8.5 get the default limits.
+      freeRegistrationLimits: normalizeFreeRegistrationLimits(this.config.freeRegistrationLimits),
+    };
   }
 
   public async updateConfig(newConfig: Partial<AppConfig>, performedBy: string): Promise<AppConfig> {
@@ -3369,6 +3375,23 @@ export class StorageManager {
 
     if (typeof newConfig.allowAdditionalMemories === 'boolean') {
       this.config.allowAdditionalMemories = newConfig.allowAdditionalMemories;
+    }
+
+    // V5.8.5 (#9): anti-spam limits of the free registration (whole numbers, 0 = no limit).
+    if (newConfig.freeRegistrationLimits !== undefined && newConfig.freeRegistrationLimits !== null) {
+      const raw = newConfig.freeRegistrationLimits as any;
+      for (const key of ['perIpPerHour', 'perEmailPerDay', 'resendCooldownMinutes'] as const) {
+        if (raw[key] !== undefined) {
+          const n = Number(raw[key]);
+          if (!Number.isInteger(n) || n < 0) {
+            throw new Error('Los límites del registro gratuito deben ser números enteros mayores o iguales a 0 (0 = sin límite).');
+          }
+        }
+      }
+      this.config.freeRegistrationLimits = normalizeFreeRegistrationLimits({
+        ...normalizeFreeRegistrationLimits(this.config.freeRegistrationLimits),
+        ...raw,
+      });
     }
 
     if (newConfig.bookAiProvider === 'gemini' || newConfig.bookAiProvider === 'openai') {
@@ -9343,6 +9366,8 @@ export class StorageManager {
       };
     }>
   > {
+    // V5.8.5 (#3): local-only backups are retried in the background whenever the list is opened.
+    void this.retryPendingBackupUploads();
     const localItems = this.listLocalDatabaseBackups();
     const mergedMap = new Map<string, any>();
 
@@ -9363,6 +9388,8 @@ export class StorageManager {
           compressedBytes: Number(d.compressedBytes) || undefined,
           chunkCount: Number(d.chunkCount) || undefined,
           storageLocation: hasLocal ? 'firestore_and_local' : 'firestore',
+          ...(d.kind ? { kind: d.kind } : {}),
+          ...(d.mediaCheck ? { mediaCheck: d.mediaCheck } : {}),
           counts: d.counts || {
             interviews: 0,
             participants: 0,
@@ -9400,9 +9427,152 @@ export class StorageManager {
     }
   }
 
+  /**
+   * V5.8.5 (#4) — Full photo / voice-note content for a backup. The in-memory records can hold an
+   * empty image or audio when the server started from the local snapshot (it leaves out images
+   * above 750 KB and audios above 50,000 characters) or when the bytes live only on disk / in
+   * Firestore chunks. Each one is read with the same helpers the app uses to SHOW them, and the
+   * result says which ones could not be recovered at all.
+   */
+  private async collectBackupMedia(): Promise<{
+    photos: InterviewPhotoRecord[];
+    audios: InterviewAudioRecord[];
+    mediaCheck: {
+      photosTotal: number;
+      photosMissing: number;
+      missingPhotoIds: string[];
+      audiosTotal: number;
+      audiosMissing: number;
+      missingAudioIds: string[];
+    };
+  }> {
+    const CONCURRENCY = 4;
+    const runLimited = async <T, R>(items: T[], fn: (item: T) => Promise<R>): Promise<R[]> => {
+      const results: R[] = new Array(items.length);
+      let next = 0;
+      const workers = Array.from({ length: Math.min(CONCURRENCY, items.length) }, async () => {
+        while (next < items.length) {
+          const idx = next++;
+          results[idx] = await fn(items[idx]);
+        }
+      });
+      await Promise.all(workers);
+      return results;
+    };
+
+    const missingPhotoIds: string[] = [];
+    const photos = await runLimited(Array.from(this.photos.values()), async (p) => {
+      const copy: any = { ...p };
+      if (!isRealPhotoDataUrl(copy.dataUrl)) {
+        let buf: { buffer: Buffer; mimeType: string } | null = null;
+        try {
+          buf = await this.getPhotoBufferAsync(p.id);
+        } catch {
+          buf = null;
+        }
+        if (buf && buf.buffer.length > 0) {
+          copy.dataUrl = `data:${buf.mimeType || 'image/jpeg'};base64,${buf.buffer.toString('base64')}`;
+        } else {
+          missingPhotoIds.push(p.id);
+        }
+      }
+      if (isRealPhotoDataUrl(copy.dataUrl)) {
+        delete copy.storedOnDisk;
+        delete copy.dataUrl_storedSeparately;
+      }
+      return copy as InterviewPhotoRecord;
+    });
+
+    const hasAudio = (a: any) => typeof a?.audioDataUrl === 'string' && a.audioDataUrl.startsWith('data:') && a.audioDataUrl.length > 64;
+    const missingAudioIds: string[] = [];
+    const audios = await runLimited(Array.from(this.audios.values()), async (a) => {
+      const copy: any = { ...a };
+      if (!hasAudio(copy)) {
+        let buf: { buffer: Buffer; mimeType: string } | null = null;
+        try {
+          buf = await this.getAudioBufferAsync(a.id);
+        } catch {
+          buf = null;
+        }
+        if (buf && buf.buffer.length > 0) {
+          copy.audioDataUrl = `data:${buf.mimeType || 'audio/webm'};base64,${buf.buffer.toString('base64')}`;
+        } else {
+          missingAudioIds.push(a.id);
+        }
+      }
+      if (hasAudio(copy)) {
+        delete copy.storedOnDisk;
+        delete copy.audioDataUrl_storedSeparately;
+      }
+      return copy as InterviewAudioRecord;
+    });
+
+    return {
+      photos,
+      audios,
+      mediaCheck: {
+        photosTotal: photos.length,
+        photosMissing: missingPhotoIds.length,
+        missingPhotoIds: missingPhotoIds.slice(0, 50),
+        audiosTotal: audios.length,
+        audiosMissing: missingAudioIds.length,
+        missingAudioIds: missingAudioIds.slice(0, 50),
+      },
+    };
+  }
+
+  /**
+   * V5.8.5 (#3) — Backups that could only be saved on this server's disk (Firestore failed) are
+   * uploaded again. Called when the backup list is opened and when a new backup is created.
+   * Never throws.
+   */
+  private pendingBackupUploadRunning = false;
+  public async retryPendingBackupUploads(): Promise<{ uploaded: string[]; failed: string[] }> {
+    const uploaded: string[] = [];
+    const failed: string[] = [];
+    if (this.pendingBackupUploadRunning) return { uploaded, failed };
+    this.pendingBackupUploadRunning = true;
+    try {
+      const localItems = this.listLocalDatabaseBackups();
+      const pending = localItems.filter((i: any) => i.storageLocation === 'local' && i.pendingUpload);
+      for (const item of pending) {
+        try {
+          const serialized = fs.readFileSync(path.join(this.getBackupsDir(), `${item.id}.json`), 'utf-8');
+          const { pendingUpload: _p, remoteError: _e, storageLocation: _s, ...baseMeta } = item as any;
+          const remote = await this.persistDatabaseBackupToFirestore(baseMeta, serialized);
+          const refreshed = this.listLocalDatabaseBackups().map((i: any) =>
+            i.id === item.id
+              ? {
+                  ...baseMeta,
+                  compressedBytes: remote.compressedBytes,
+                  chunkCount: remote.chunkCount,
+                  storageLocation: 'firestore_and_local',
+                }
+              : i
+          );
+          this.saveBackupsIndex(refreshed);
+          uploaded.push(item.id);
+        } catch {
+          failed.push(item.id);
+        }
+      }
+    } catch (err: any) {
+      console.warn('[StorageManager] retryPendingBackupUploads:', err?.message || err);
+    } finally {
+      this.pendingBackupUploadRunning = false;
+    }
+    return { uploaded, failed };
+  }
+
   public async createDatabaseBackup(
     label: string | undefined,
-    performedBy: string
+    performedBy: string,
+    options: {
+      /** 'pre_restore' = automatic safety copy taken right before a restore (never auto-deleted). */
+      kind?: 'manual' | 'pre_restore';
+      /** When true, a backup that could only be saved locally is reported as an error (after keeping it). */
+      requireRemote?: boolean;
+    } = {}
   ): Promise<{
     id: string;
     label: string;
@@ -9426,18 +9596,35 @@ export class StorageManager {
       miEsenciaSubscriptions: number;
       miEsenciaConversations?: number;
     };
+    kind?: 'manual' | 'pre_restore';
+    mediaCheck?: {
+      photosTotal: number;
+      photosMissing: number;
+      missingPhotoIds: string[];
+      audiosTotal: number;
+      audiosMissing: number;
+      missingAudioIds: string[];
+    };
+    /** V5.8.5: present when Firestore could not store it (only this server's disk has it). */
+    remoteError?: string;
+    pendingUpload?: boolean;
+    warnings?: string[];
   }> {
     if (this.initPromise) {
       await this.initPromise;
     }
+    const kind = options.kind || 'manual';
+    // A previous backup that stayed local gets another chance to reach Firestore.
+    void this.retryPendingBackupUploads();
     const { miEsenciaStore } = await import('./miEsencia/miEsenciaStore.ts');
     const miEsenciaBackup = miEsenciaStore.exportFullStateForBackup();
+    const media = await this.collectBackupMedia();
 
     const nowIso = new Date().toISOString();
     const backupId = `bkp_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
     const cleanLabel =
       (label || '').trim() ||
-      `Respaldo completo ${new Date().toLocaleDateString('es-MX', {
+      `${kind === 'pre_restore' ? 'Automático antes de restaurar' : 'Respaldo completo'} ${new Date().toLocaleDateString('es-MX', {
         day: '2-digit',
         month: 'short',
         year: 'numeric',
@@ -9452,8 +9639,8 @@ export class StorageManager {
       participants: Array.from(this.participants.values()),
       tokens: Array.from(this.tokens.values()),
       answers: Array.from(this.answers.values()),
-      photos: Array.from(this.photos.values()),
-      audios: Array.from(this.audios.values()),
+      photos: media.photos,
+      audios: media.audios,
       manuscripts: Array.from(this.manuscripts.values()).filter(
         (m) => !this.deletedManuscriptIds.has(m.id)
       ),
@@ -9498,12 +9685,15 @@ export class StorageManager {
       label: cleanLabel,
       createdAt: nowIso,
       createdBy: performedBy,
+      kind,
       counts,
+      mediaCheck: media.mediaCheck,
       storage: storageSnapshot,
       miEsencia: miEsenciaBackup,
     };
 
-    const serialized = JSON.stringify(fullPayload, null, 2);
+    // V5.8.5: no indentation (same content, noticeably smaller now that photos travel inside).
+    const serialized = JSON.stringify(fullPayload);
     const sizeBytes = Buffer.byteLength(serialized, 'utf-8');
 
     const baseMeta = {
@@ -9511,36 +9701,70 @@ export class StorageManager {
       label: cleanLabel,
       createdAt: nowIso,
       createdBy: performedBy,
+      kind,
       sizeBytes,
       counts,
+      mediaCheck: media.mediaCheck,
     };
 
-    // 1. Persist compressed chunks + manifest durably to Cloud Firestore
-    const remoteMeta = await this.persistDatabaseBackupToFirestore(baseMeta, serialized);
+    const warnings: string[] = [];
+    if (media.mediaCheck.photosMissing > 0 || media.mediaCheck.audiosMissing > 0) {
+      warnings.push(
+        `No se encontró el contenido de ${media.mediaCheck.photosMissing} foto(s) y ${media.mediaCheck.audiosMissing} nota(s) de voz en ningún almacenamiento; el respaldo las incluye sin contenido.`
+      );
+    }
 
-    // 2. Also keep a local cache copy on disk for fast download/restore
+    // V5.8.5 (#3): 1. the local copy is written FIRST, so a Firestore failure never leaves you
+    // without a backup.
     const filePath = path.join(this.getBackupsDir(), `${backupId}.json`);
     fs.writeFileSync(filePath, serialized, 'utf-8');
 
-    const meta = {
-      ...baseMeta,
-      compressedBytes: remoteMeta.compressedBytes,
-      chunkCount: remoteMeta.chunkCount,
-      storageLocation: 'firestore_and_local' as const,
-    };
+    // 2. Durable copy in Cloud Firestore (compressed chunks + manifest).
+    let meta: any;
+    try {
+      const remoteMeta = await this.persistDatabaseBackupToFirestore(baseMeta, serialized);
+      meta = {
+        ...baseMeta,
+        compressedBytes: remoteMeta.compressedBytes,
+        chunkCount: remoteMeta.chunkCount,
+        storageLocation: 'firestore_and_local' as const,
+      };
+    } catch (remoteErr: any) {
+      const remoteError = String(remoteErr?.message || remoteErr);
+      meta = {
+        ...baseMeta,
+        storageLocation: 'local' as const,
+        pendingUpload: true,
+        remoteError,
+      };
+      warnings.push(
+        'El respaldo solo quedó en el disco de este servidor (Firestore no respondió). Descárgalo a tu equipo: ese disco se borra si el servidor se reinicia. Se volverá a intentar subirlo a Firestore.'
+      );
+    }
 
     const existingList = this.listLocalDatabaseBackups();
     this.saveBackupsIndex([meta, ...existingList.filter((i) => i.id !== backupId)]);
 
     await this.addAuditLog('CREATE_DATABASE_BACKUP', 'system', backupId, performedBy, {
       label: cleanLabel,
+      kind,
       sizeBytes,
-      compressedBytes: remoteMeta.compressedBytes,
-      chunkCount: remoteMeta.chunkCount,
+      compressedBytes: meta.compressedBytes,
+      chunkCount: meta.chunkCount,
+      storageLocation: meta.storageLocation,
       counts,
+      mediaCheck: media.mediaCheck,
     });
 
-    return meta;
+    if (options.requireRemote && meta.storageLocation === 'local') {
+      const err: any = new Error(
+        `No se pudo guardar el respaldo en Cloud Firestore (${meta.remoteError}). Se conservó una copia solo en este servidor (${backupId}); descárgala desde la lista de respaldos.`
+      );
+      err.localBackupId = backupId;
+      throw err;
+    }
+
+    return { ...meta, warnings };
   }
 
   public async getDatabaseBackupPayload(backupId: string): Promise<any> {
@@ -9965,9 +10189,44 @@ export class StorageManager {
     };
   }
 
+  /**
+   * V5.8.5 (#2) — Restoring replaces everything and deletes from Firestore whatever is not in the
+   * backup. Before that, the CURRENT state is backed up automatically and must reach Firestore; if
+   * it cannot, nothing is restored and the current data stays untouched (administrator's decision).
+   * These automatic backups are kept (never auto-deleted).
+   */
+  private async createPreRestoreSafetyBackup(
+    restoringLabel: string,
+    performedBy: string
+  ): Promise<{ id: string; label: string }> {
+    try {
+      const safety = await this.createDatabaseBackup(
+        `Automático antes de restaurar «${restoringLabel}» (${new Date().toLocaleString('es-MX', {
+          day: '2-digit',
+          month: 'short',
+          year: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+        })})`,
+        performedBy,
+        { kind: 'pre_restore', requireRemote: true }
+      );
+      return { id: safety.id, label: safety.label };
+    } catch (err: any) {
+      const wrapped: any = new Error(
+        `No se restauró nada: no se pudo crear el respaldo automático del estado actual (${err?.message || err}). Tus datos actuales no se modificaron. Vuelve a intentarlo cuando Firestore responda.`
+      );
+      wrapped.code = 'PRE_RESTORE_BACKUP_FAILED';
+      if (err?.localBackupId) wrapped.localBackupId = err.localBackupId;
+      throw wrapped;
+    }
+  }
+
   public async restoreDatabaseBackup(backupId: string, performedBy: string) {
     const payload = await this.getDatabaseBackupPayload(backupId);
-    return this.applyDatabaseBackupObject(payload, performedBy);
+    const safety = await this.createPreRestoreSafetyBackup(String(payload?.label || backupId), performedBy);
+    const result = await this.applyDatabaseBackupObject(payload, performedBy);
+    return { ...result, preRestoreBackup: safety };
   }
 
   public async importDatabaseBackupPayload(
@@ -10029,7 +10288,7 @@ export class StorageManager {
       storage: storageData,
     };
 
-    const serialized = JSON.stringify(normalizedPayload, null, 2);
+    const serialized = JSON.stringify(normalizedPayload);
     const sizeBytes = Buffer.byteLength(serialized, 'utf-8');
 
     const baseMeta = {
@@ -10041,24 +10300,43 @@ export class StorageManager {
       counts,
     };
 
-    const remoteMeta = await this.persistDatabaseBackupToFirestore(baseMeta, serialized);
-
+    // V5.8.5 (#3): local copy first; Firestore failure leaves it "solo local" (retried later).
     const filePath = path.join(this.getBackupsDir(), `${backupId}.json`);
     fs.writeFileSync(filePath, serialized, 'utf-8');
 
-    const meta = {
-      ...baseMeta,
-      compressedBytes: remoteMeta.compressedBytes,
-      chunkCount: remoteMeta.chunkCount,
-      storageLocation: 'firestore_and_local' as const,
-    };
+    let meta: any;
+    const warnings: string[] = [];
+    try {
+      const remoteMeta = await this.persistDatabaseBackupToFirestore(baseMeta, serialized);
+      meta = {
+        ...baseMeta,
+        compressedBytes: remoteMeta.compressedBytes,
+        chunkCount: remoteMeta.chunkCount,
+        storageLocation: 'firestore_and_local' as const,
+      };
+    } catch (remoteErr: any) {
+      meta = {
+        ...baseMeta,
+        storageLocation: 'local' as const,
+        pendingUpload: true,
+        remoteError: String(remoteErr?.message || remoteErr),
+      };
+      warnings.push(
+        'El respaldo importado solo quedó en el disco de este servidor (Firestore no respondió). Se volverá a intentar subirlo.'
+      );
+    }
 
     const existingList = this.listLocalDatabaseBackups();
     this.saveBackupsIndex([meta, ...existingList.filter((i) => i.id !== backupId)]);
 
     let restoreResult = null;
     if (restoreImmediately) {
-      restoreResult = await this.applyDatabaseBackupObject(normalizedPayload, performedBy);
+      // V5.8.5 (#2): automatic backup of the current state first; no restore without it.
+      const safety = await this.createPreRestoreSafetyBackup(cleanLabel, performedBy);
+      restoreResult = {
+        ...(await this.applyDatabaseBackupObject(normalizedPayload, performedBy)),
+        preRestoreBackup: safety,
+      };
     }
 
     return {
@@ -10066,6 +10344,7 @@ export class StorageManager {
       summary: meta,
       restored: Boolean(restoreImmediately),
       restoreResult,
+      warnings,
     };
   }
 

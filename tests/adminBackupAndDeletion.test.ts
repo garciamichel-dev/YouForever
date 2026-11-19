@@ -1,10 +1,89 @@
-import test from 'node:test';
+/**
+ * Admin backups and permanent deletions.
+ *
+ * V5.8.5 (#10): this file used to run against the REAL Firestore and the real data/ folder: on a
+ * machine with credentials it created, restored and deleted backups in the production database.
+ * It now runs fully isolated — its own temporary working folder, an in-memory document store in
+ * place of Firestore, every Firestore read pointed at a closed local port, and no AI providers —
+ * and it is part of `npm test`.
+ */
+import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { storage } from '../src/server/storage.ts';
-import {
-  resolveOpenAiCandidateModels,
-  recordOpenAiModelAccessError,
-} from '../src/server/geminiService.ts';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const ISOLATED_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'yf_admin_backups_'));
+process.chdir(ISOLATED_ROOT);
+process.env.YOUFOREVER_ALLOW_TEST_DOUBLES = '1';
+process.env.GEMINI_API_KEY = '';
+process.env.OPENAI_API_KEY = '';
+process.env.YF_SEED_TEST_STORIES = '0';
+process.env.FIREBASE_PROJECT_ID = 'demo-youforever-tests';
+process.env.FIRESTORE_EMULATOR_HOST = '127.0.0.1:9';
+process.env.FIRESTORE_SERVER_MODE = 'admin';
+
+/** In-memory stand-in for Firestore (setDoc / getDoc / deleteDoc / listCollection). */
+function createMemoryDocStore() {
+  const collections = new Map<string, Map<string, Record<string, unknown>>>();
+  const col = (name: string) => {
+    let c = collections.get(name);
+    if (!c) {
+      c = new Map();
+      collections.set(name, c);
+    }
+    return c;
+  };
+  const store = {
+    failWrites: false,
+    collections,
+    async setDoc(name: string, id: string, data: Record<string, unknown>) {
+      if (store.failWrites) throw new Error('Firestore simulado sin conexión');
+      col(name).set(id, JSON.parse(JSON.stringify(data)));
+    },
+    async setDocDirect(name: string, id: string, data: Record<string, unknown>) {
+      return store.setDoc(name, id, data);
+    },
+    async deleteDoc(name: string, id: string) {
+      if (store.failWrites) throw new Error('Firestore simulado sin conexión');
+      col(name).delete(id);
+    },
+    async getDoc(name: string, id: string) {
+      const v = col(name).get(id);
+      return v ? JSON.parse(JSON.stringify(v)) : null;
+    },
+    async listCollection(name: string) {
+      return Array.from(col(name).entries()).map(([id, data]) => ({
+        id,
+        data: JSON.parse(JSON.stringify(data)),
+      }));
+    },
+  };
+  return store;
+}
+
+const memoryStore = createMemoryDocStore();
+let storage: typeof import('../src/server/storage.ts')['storage'];
+let resolveOpenAiCandidateModels: any;
+let recordOpenAiModelAccessError: any;
+
+before(async () => {
+  ({ storage } = await import(path.join(REPO_ROOT, 'src/server/storage.ts')));
+  ({ resolveOpenAiCandidateModels, recordOpenAiModelAccessError } = await import(
+    path.join(REPO_ROOT, 'src/server/geminiService.ts')
+  ));
+  storage.configureTestDoubles({ remoteDocStore: memoryStore });
+  // Mi Esencia writes to Firestore through its own connection (no test double): after a restore it
+  // would wait for the unreachable test address. Its sync is replaced by a no-op here.
+  const { miEsenciaStore } = await import(path.join(REPO_ROOT, 'src/server/miEsencia/miEsenciaStore.ts'));
+  (miEsenciaStore as any).syncFullStateToFirestore = async () => ({ written: 0, deleted: 0, warnings: [] });
+});
+
+after(() => {
+  assert.equal(process.cwd(), ISOLATED_ROOT, 'las pruebas no deben salir de su carpeta temporal');
+});
 
 test('OpenAI model resolution prioritizes gpt-4o and remembers 403 project-restricted models like gpt-4.1', () => {
   // Unpublished aliases like gpt-6-luna resolve to universally accessible gpt-4o / gpt-4o-mini first
@@ -135,6 +214,8 @@ test('Full Database Backup creation, listing, restoration, and deletion', async 
   );
   assert.equal(restoredRes.counts.interviews, initialCount);
   assert.ok(restoredRes.remoteSync.written > 0, 'Restore must write collections back to Firestore');
+  // V5.8.5 (#2): an automatic backup of the state before restoring was created first.
+  assert.ok(restoredRes.preRestoreBackup?.id, 'Restore must create an automatic pre-restore backup');
 
   const afterRestoreInterviews = storage.getInterviews();
   assert.equal(afterRestoreInterviews.length, initialCount);

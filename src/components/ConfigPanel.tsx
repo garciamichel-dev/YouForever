@@ -35,6 +35,11 @@ import {
   LiteraryPromptVersion,
   LiteraryStylePromptConfig,
 } from '../logic/interviewRules.ts';
+import {
+  DEFAULT_FREE_REGISTRATION_LIMITS,
+  normalizeFreeRegistrationLimits,
+  type FreeRegistrationLimits,
+} from '../logic/interviewRules.ts';
 import { DEMO_NARRATIVE_STYLES } from '../logic/demoStoryRules.ts';
 import {
   normalizeBookLayoutMode,
@@ -68,6 +73,12 @@ interface DatabaseBackupSummaryItem {
     miEsenciaSubscriptions: number;
     miEsenciaConversations: number;
   };
+  /** V5.8.5: 'local' = only on this server's disk (Firestore failed); retried automatically. */
+  storageLocation?: 'firestore_and_local' | 'firestore' | 'local';
+  pendingUpload?: boolean;
+  /** V5.8.5: 'pre_restore' = automatic copy taken right before a restore. */
+  kind?: 'manual' | 'pre_restore';
+  mediaCheck?: { photosTotal: number; photosMissing: number; audiosTotal: number; audiosMissing: number };
 }
 
 interface ConfigPanelProps {
@@ -201,7 +212,12 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ adminEmail }) => {
   // Database Backup & Restore state
   const [backups, setBackups] = useState<DatabaseBackupSummaryItem[]>([]);
   const [newBackupLabel, setNewBackupLabel] = useState<string>('');
-  const [backupNotice, setBackupNotice] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const [backupNotice, setBackupNotice] = useState<{
+    type: 'ok' | 'err';
+    text: string;
+    /** V5.8.5: offer to download a backup that stayed only on this server. */
+    downloadBackup?: DatabaseBackupSummaryItem;
+  } | null>(null);
   const [backupToRestore, setBackupToRestore] = useState<DatabaseBackupSummaryItem | null>(null);
   const [backupToDelete, setBackupToDelete] = useState<DatabaseBackupSummaryItem | null>(null);
   const [restoreUploadedImmediately, setRestoreUploadedImmediately] = useState<boolean>(false);
@@ -216,6 +232,10 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ adminEmail }) => {
   const [maxFollowUps, setMaxFollowUps] = useState<number>(2);
   const [allowEditing, setAllowEditing] = useState<boolean>(true);
   const [allowAdditional, setAllowAdditional] = useState<boolean>(true);
+  // V5.8.5 (#9): anti-spam limits of the free registration (0 = no limit).
+  const [freeRegLimits, setFreeRegLimits] = useState<FreeRegistrationLimits>({
+    ...DEFAULT_FREE_REGISTRATION_LIMITS,
+  });
 
   // AI Provider & Model for Book Generation
   const [bookAiProvider, setBookAiProvider] = useState<BookAiProvider>('gemini');
@@ -285,8 +305,14 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ adminEmail }) => {
   // Validation errors
   const [errors, setErrors] = useState<{ [key: string]: string }>({});
 
-  const showBackupFeedback = (type: 'ok' | 'err', text: string) => {
-    setBackupNotice({ type, text });
+  const showBackupFeedback = (
+    type: 'ok' | 'err',
+    text: string,
+    downloadBackup?: DatabaseBackupSummaryItem
+  ) => {
+    setBackupNotice({ type, text, downloadBackup });
+    // A notice with a download offer stays until it is closed (it matters too much to vanish).
+    if (downloadBackup) return;
     setTimeout(() => {
       setBackupNotice((prev) => (prev?.text === text ? null : prev));
     }, 5500);
@@ -344,6 +370,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ adminEmail }) => {
           setMaxFollowUps(data.defaultMaxFollowUps);
           setAllowEditing(data.allowAnswerEditing);
           setAllowAdditional(data.allowAdditionalMemories);
+          setFreeRegLimits(normalizeFreeRegistrationLimits(data.freeRegistrationLimits));
 
           const provider = data.bookAiProvider === 'openai' ? 'openai' : 'gemini';
           const gemModel = data.bookAiGeminiModel || 'gemini-3-flash-preview';
@@ -432,10 +459,26 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ adminEmail }) => {
           update(85, 'Guardando respaldo en servidor y actualizando catálogo...');
           setBackups((prev) => [data.data, ...prev.filter((b) => b.id !== data.data.id)]);
           setNewBackupLabel('');
-          showBackupFeedback(
-            'ok',
-            `Respaldo «${data.data.label}» creado con éxito (${data.data.counts.interviews} entrevistas, ${data.data.counts.answers} respuestas, ${data.data.counts.bookVersions} libros PDF, ${data.data.counts.manuscripts} manuscritos y ${data.data.counts.miEsenciaPersons} perfiles de Mi Esencia).`
+          const extraWarnings: string[] = (data.warnings || []).filter(
+            (w: string) => !/solo quedó en el disco/.test(w)
           );
+          if (data.data.storageLocation === 'local') {
+            // V5.8.5 (#3): Firestore failed — the backup exists only on this server's disk.
+            showBackupFeedback(
+              'err',
+              `El respaldo «${data.data.label}» quedó SOLO en este servidor: Firestore no respondió. Descárgalo ahora a tu equipo (ese disco se borra si el servidor se reinicia); se volverá a intentar subirlo a Firestore.${
+                extraWarnings.length ? ' ' + extraWarnings.join(' ') : ''
+              }`,
+              data.data
+            );
+          } else {
+            showBackupFeedback(
+              extraWarnings.length ? 'err' : 'ok',
+              `Respaldo «${data.data.label}» creado con éxito (${data.data.counts.interviews} entrevistas, ${data.data.counts.answers} respuestas, ${data.data.counts.photos} fotos, ${data.data.counts.audios} notas de voz, ${data.data.counts.bookVersions} libros PDF, ${data.data.counts.manuscripts} manuscritos y ${data.data.counts.miEsenciaPersons} perfiles de Mi Esencia).${
+                extraWarnings.length ? ' ' + extraWarnings.join(' ') : ''
+              }`
+            );
+          }
         }
       );
     } catch (err: any) {
@@ -539,9 +582,13 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ adminEmail }) => {
                 // ignore
               }
               await fetchConfig(true);
+              const safetyLabel = data.data?.restoreResult?.preRestoreBackup?.label;
+              await fetchBackupsList();
               showBackupFeedback(
                 'ok',
-                `Archivo «${summary.label}» importado y restaurado íntegramente en la base de datos.`
+                `Archivo «${summary.label}» importado y restaurado íntegramente en la base de datos.${
+                  safetyLabel ? ` Antes se guardó un respaldo automático del estado anterior: «${safetyLabel}».` : ''
+                }`
               );
             } else {
               showBackupFeedback(
@@ -588,6 +635,10 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ adminEmail }) => {
           });
           const data = await res.json();
           if (!res.ok || !data.success) {
+            // V5.8.5 (#2): 409 = nothing was restored (no safety backup could be created).
+            if (data.code === 'PRE_RESTORE_BACKUP_FAILED') {
+              await fetchBackupsList();
+            }
             throw new Error(data.error || 'No se pudo restaurar el respaldo seleccionado.');
           }
           update(85, 'Limpiando caché local y recargando configuración...');
@@ -603,9 +654,13 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ adminEmail }) => {
                 data.data.remoteSync.deleted > 0 ? `, ${data.data.remoteSync.deleted} removidos` : ''
               })`
             : '';
+          const safetyInfo = data.data?.preRestoreBackup?.label
+            ? ` Antes se guardó un respaldo automático del estado anterior: «${data.data.preRestoreBackup.label}».`
+            : '';
+          await fetchBackupsList();
           showBackupFeedback(
             'ok',
-            `¡Base de datos restaurada y sincronizada permanentemente en Cloud Firestore al punto «${target.label}»!${remoteInfo}`
+            `¡Base de datos restaurada y sincronizada permanentemente en Cloud Firestore al punto «${target.label}»!${remoteInfo}${safetyInfo}`
           );
         }
       );
@@ -739,6 +794,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ adminEmail }) => {
               bookLayoutMode: layoutModeToSave,
               literaryPrompts: promptsToSave,
               literaryPromptVersions: versionsToSave,
+              freeRegistrationLimits: freeRegLimits,
             }),
           });
 
@@ -2121,6 +2177,59 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ adminEmail }) => {
           </span>
         </div>
 
+        {/* V5.8.5 (#9): anti-spam limits of the public free registration — placed right before
+            the database backup / restore section, as the administrator asked. */}
+        <div data-testid="free-registration-limits-section" className="border-t border-stone-200 pt-6 space-y-4">
+          <div>
+            <h3 className="text-sm font-bold text-stone-800 uppercase tracking-wide">
+              Límites del Registro Gratuito (anti-spam)
+            </h3>
+            <p className="text-xs text-stone-500 mt-1">
+              Evitan que alguien use el formulario de registro gratuito para enviar correos masivos desde la cuenta de YouForever. Solo cuentan los registros y reenvíos exitosos. Escribe <strong>0</strong> para no poner límite.
+            </p>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            {(
+              [
+                {
+                  key: 'perIpPerHour',
+                  label: 'Registros por conexión por hora',
+                  hint: 'Desde una misma conexión a internet (dirección IP).',
+                },
+                {
+                  key: 'perEmailPerDay',
+                  label: 'Registros por correo al día',
+                  hint: 'Con una misma dirección de correo, en 24 horas.',
+                },
+                {
+                  key: 'resendCooldownMinutes',
+                  label: 'Minutos entre reenvíos de correo',
+                  hint: 'Espera mínima para «reenviar correo» de una misma entrevista.',
+                },
+              ] as Array<{ key: keyof FreeRegistrationLimits; label: string; hint: string }>
+            ).map((field) => (
+              <label key={field.key} className="p-3.5 bg-stone-50 rounded-lg border border-stone-200 block space-y-1">
+                <span className="font-semibold text-sm text-stone-900 block">{field.label}</span>
+                <input
+                  type="number"
+                  min={0}
+                  step={1}
+                  data-testid={`free-registration-limit-${field.key}`}
+                  value={freeRegLimits[field.key]}
+                  onChange={(e) => {
+                    const n = Math.max(0, Math.floor(Number(e.target.value) || 0));
+                    setFreeRegLimits((prev) => ({ ...prev, [field.key]: n }));
+                  }}
+                  className="w-full px-3 py-2 border border-stone-300 rounded-lg text-sm focus:ring-2 focus:ring-amber-600 focus:border-amber-600"
+                />
+                <span className="text-[11px] text-stone-500 block">
+                  {field.hint} Predeterminado: {DEFAULT_FREE_REGISTRATION_LIMITS[field.key]}.
+                </span>
+              </label>
+            ))}
+          </div>
+        </div>
+
         {/* Action Button */}
         <div className="flex justify-end pt-2">
           <button
@@ -2178,6 +2287,19 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ adminEmail }) => {
               )}
               <span className="font-medium">{backupNotice.text}</span>
             </div>
+            {backupNotice.downloadBackup && (
+              <button
+                type="button"
+                data-testid="database-backup-notice-download"
+                onClick={() => {
+                  const target = backupNotice.downloadBackup!;
+                  void handleDownloadBackupFile(target);
+                }}
+                className="shrink-0 px-3 py-1.5 rounded-lg bg-rose-600 text-white font-bold hover:bg-rose-700"
+              >
+                Descargar respaldo
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setBackupNotice(null)}
@@ -2295,6 +2417,20 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ adminEmail }) => {
                       <span className="px-2 py-0.5 rounded bg-amber-50 text-amber-900 border border-amber-200 text-[11px] font-mono">
                         {formatBytesLabel(b.sizeBytes)}
                       </span>
+                      {b.kind === 'pre_restore' && (
+                        <span className="px-2 py-0.5 rounded bg-sky-50 text-sky-900 border border-sky-200 text-[11px] font-bold">
+                          Automático antes de restaurar
+                        </span>
+                      )}
+                      {b.storageLocation === 'local' && (
+                        <span
+                          data-testid={`backup-local-only-${b.id}`}
+                          title="Firestore no respondió al crearlo: solo existe en el disco de este servidor, que se borra al reiniciar. Descárgalo; se reintenta la subida al abrir esta lista."
+                          className="px-2 py-0.5 rounded bg-rose-50 text-rose-900 border border-rose-200 text-[11px] font-bold"
+                        >
+                          Solo en este servidor — descárgalo
+                        </span>
+                      )}
                     </div>
                     <div className="text-xs text-stone-500">
                       Creado el{' '}
@@ -2403,6 +2539,12 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ adminEmail }) => {
                 • {backupToRestore.counts?.miEsenciaPersons ?? 0} perfiles de Mi Esencia y{' '}
                 {backupToRestore.counts?.questions ?? 0} preguntas
               </div>
+            </div>
+
+            <div className="p-3 rounded-xl bg-sky-50 border border-sky-200 text-xs text-sky-950">
+              Antes de restaurar se creará <strong>automáticamente un respaldo del estado actual</strong> en
+              Cloud Firestore. Si ese respaldo no se puede crear, <strong>no se restaurará nada</strong> y tus
+              datos actuales quedarán intactos.
             </div>
 
             <div className="flex items-center justify-end gap-2 pt-2">

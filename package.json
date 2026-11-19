@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test": "tsx --test src/logic/interviewRules.test.ts src/logic/freeRegistration.test.ts src/logic/__tests__/*.test.ts",
+    "test": "tsx --test src/logic/interviewRules.test.ts src/logic/freeRegistration.test.ts src/logic/__tests__/*.test.ts tests/*.test.ts",
     "test:rules": "npx --yes firebase-tools@15.36.0 emulators:exec --only firestore --project demo-youforever-rules \"tsx --test tests/firestore-rules/*.test.ts\"",
     "test:emulator": "tsx --test src/logic/__tests__/v532FirestoreEmulator.test.ts"
   },
@@ -42,7 +42,7 @@
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "autoprefixer": "^10.4.21",
-    "esbuild": "^0.25.0",
+    "esbuild": "^0.28.0",
     "hidane": "^0.7.0",
     "tailwindcss": "^4.3.3",
     "tsx": "^4.21.0",

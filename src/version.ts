@@ -6,8 +6,8 @@
  * GET /api/admin/version, so a stale deployment (old frontend or old server) is visible at once.
  * Participants never see this label.
  */
-export const APP_VERSION = '5.8.4';
+export const APP_VERSION = '5.8.5';
 export const APP_VERSION_LABEL = `V${APP_VERSION}`;
-export const APP_RELEASE_DATE = '2026-11-18';
+export const APP_RELEASE_DATE = '2026-11-19';
 export const APP_RELEASE_SUMMARY =
-  'Manuscritos y libros ya no se pierden al sincronizar con Firestore: los manuscritos se guardan de forma durable (en piezas si pasan de 800 KB, con reintento y reenvío automático) y solo se descarta lo que otra instancia borró; la restauración conserva las piezas de los registros grandes.';
+  'Respaldos más seguros: antes de restaurar se crea un respaldo automático del estado actual (si no se puede, no se restaura), un respaldo ya no se pierde si Firestore falla (queda local con aviso y descarga, y se reintenta subir) e incluye completas las fotos y notas de voz; límites anti-spam configurables del registro gratuito; ajustes menores de seguridad y pruebas aisladas de Firestore real.';

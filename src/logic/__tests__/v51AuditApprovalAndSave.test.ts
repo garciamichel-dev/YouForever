@@ -286,6 +286,11 @@ test('V5.1-A2: una sospecha heurística es un localizador, no un veredicto: el j
 
 test('V5.1-A3: la evidencia de la auditoría V5 (46 respuestas, 316 unidades) deja de producir contradicciones falsas en los estilos A, B y C', (t) => {
   const statePath = path.join(process.cwd(), 'data', 'storage_state.json');
+  // V5.8.5 (#11): the snapshot is runtime data and no longer travels with the repository.
+  if (!fs.existsSync(statePath)) {
+    t.skip('data/storage_state.json no existe en esta copia (datos locales, fuera de git).');
+    return;
+  }
   const rawState = JSON.parse(fs.readFileSync(statePath, 'utf-8'));
   const allAnswers: any[] = rawState.answers || [];
   const target = (rawState.interviews || []).find(

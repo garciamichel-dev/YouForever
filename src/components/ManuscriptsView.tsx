@@ -406,15 +406,23 @@ export const ManuscriptsView: React.FC<ManuscriptsViewProps> = ({
       });
       const data = await res.json();
       if (data.success) {
-        const deletedSet = new Set(ids);
+        // V5.8.5 (#15): remove only what the server confirms; the rest stays listed (and selected),
+        // so nothing "comes back" after a reload.
+        const confirmedIds: string[] = Array.isArray(data.data?.deletedVersionIds)
+          ? data.data.deletedVersionIds
+          : ids;
+        const deletedSet = new Set(confirmedIds);
+        const notDeleted = ids.filter((id) => !deletedSet.has(id));
         setParticipantBookVersions((prev) => prev.filter((v) => !deletedSet.has(v.id)));
-        setSelectedVersionIds(new Set());
-        removeDeletedBookVersionsFromLocalCache(ids);
+        setSelectedVersionIds(new Set(notDeleted));
+        removeDeletedBookVersionsFromLocalCache(confirmedIds);
         setShowBatchDeleteVersionsModal(false);
         setQuotaNotice(
-          `Se eliminaron permanentemente ${data.data?.deletedCount ?? ids.length} versión(es) de libro en PDF.`
+          notDeleted.length > 0
+            ? `Se eliminaron ${confirmedIds.length} versión(es) de libro en PDF. ${notDeleted.length} no se pudieron eliminar y siguen seleccionadas; inténtalo de nuevo.`
+            : `Se eliminaron permanentemente ${confirmedIds.length} versión(es) de libro en PDF.`
         );
-        setTimeout(() => setQuotaNotice(null), 5000);
+        setTimeout(() => setQuotaNotice(null), notDeleted.length > 0 ? 9000 : 5000);
       } else {
         alert(data.error || 'Error al eliminar las versiones PDF seleccionadas.');
       }

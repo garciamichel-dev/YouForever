@@ -616,11 +616,12 @@ export const ParticipantBookStudio: React.FC<ParticipantBookStudioProps> = ({
       if (isStale() || isUnmountedRef.current) return null;
 
       try {
-        const statusRes = await fetch(
-          `/api/participant/book/jobs/status?token=${encodeURIComponent(
-            token
-          )}&jobId=${encodeURIComponent(currentJob.jobId)}`
-        );
+        // V5.8.5: POST so the access code never travels in the URL.
+        const statusRes = await fetch('/api/participant/book/jobs/status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token, jobId: currentJob.jobId }),
+        });
         const statusData = await safeReadJsonResponse(statusRes);
         if (isStale() || isUnmountedRef.current) return null;
 
@@ -698,9 +699,11 @@ BOOK_IN_PROGRESS_MESSAGE
     const resumeIfActive = async () => {
       if (!isEditingLayout || !token) return;
       try {
-        const res = await fetch(
-          `/api/participant/book/jobs/status?token=${encodeURIComponent(token)}`
-        );
+        const res = await fetch('/api/participant/book/jobs/status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token }),
+        });
         const data = await safeReadJsonResponse(res);
         if (cancelledEffect || !res.ok || !data.success || !data.data) return;
 

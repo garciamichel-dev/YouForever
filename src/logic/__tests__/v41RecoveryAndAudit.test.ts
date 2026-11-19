@@ -681,8 +681,13 @@ test('V4.1 Admin Reason Classifier: accurately assigns all granular internalReas
   );
 });
 
-test('V4.1 Real Snapshot Verification (Read-Only): audits populated interviews in data/storage_state.json fast (<1500ms) with zero false semantic contradictions and preserves prompt/data SHA-256', () => {
+test('V4.1 Real Snapshot Verification (Read-Only): audits populated interviews in data/storage_state.json fast (<1500ms) with zero false semantic contradictions and preserves prompt/data SHA-256', (t) => {
   const statePath = path.join(process.cwd(), 'data', 'storage_state.json');
+  // V5.8.5 (#11): the snapshot is runtime data and no longer travels with the repository.
+  if (!fs.existsSync(statePath)) {
+    t.skip('data/storage_state.json no existe en esta copia (datos locales, fuera de git).');
+    return;
+  }
   const rulesPath = path.join(process.cwd(), 'src', 'logic', 'interviewRules.ts');
   const beforeStateSha = crypto.createHash('sha256').update(fs.readFileSync(statePath)).digest('hex');
 

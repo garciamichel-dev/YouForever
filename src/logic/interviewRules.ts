@@ -47,8 +47,40 @@ export interface AppConfig {
   bookLayoutMode?: BookLayoutMode;
   literaryPrompts?: Record<LiteraryPromptStyleId, LiteraryStylePromptConfig>;
   literaryPromptVersions?: LiteraryPromptVersion[];
+  /** V5.8.5 (#9): anti-spam limits of the public free registration (0 = no limit). */
+  freeRegistrationLimits?: FreeRegistrationLimits;
   updatedAt?: string;
   updatedBy?: string;
+}
+
+/** V5.8.5 (#9) — editable in Configuración Global (administrator's defaults: 10 / 5 / 5). */
+export interface FreeRegistrationLimits {
+  /** Registrations allowed per connection (IP address) per rolling hour. */
+  perIpPerHour: number;
+  /** Registrations allowed per e-mail address per rolling 24 hours. */
+  perEmailPerDay: number;
+  /** Minutes between two "reenviar correo" for the same interview. */
+  resendCooldownMinutes: number;
+}
+
+export const DEFAULT_FREE_REGISTRATION_LIMITS: FreeRegistrationLimits = {
+  perIpPerHour: 10,
+  perEmailPerDay: 5,
+  resendCooldownMinutes: 5,
+};
+
+/** Fills missing values with the defaults and clamps them to sane ranges (0 = no limit). */
+export function normalizeFreeRegistrationLimits(raw: Partial<FreeRegistrationLimits> | undefined | null): FreeRegistrationLimits {
+  const pick = (value: unknown, fallback: number, max: number) => {
+    const n = Number(value);
+    if (value === undefined || value === null || value === '' || !Number.isFinite(n)) return fallback;
+    return Math.min(max, Math.max(0, Math.floor(n)));
+  };
+  return {
+    perIpPerHour: pick(raw?.perIpPerHour, DEFAULT_FREE_REGISTRATION_LIMITS.perIpPerHour, 1000),
+    perEmailPerDay: pick(raw?.perEmailPerDay, DEFAULT_FREE_REGISTRATION_LIMITS.perEmailPerDay, 1000),
+    resendCooldownMinutes: pick(raw?.resendCooldownMinutes, DEFAULT_FREE_REGISTRATION_LIMITS.resendCooldownMinutes, 1440),
+  };
 }
 
 export const DEFAULT_LITERARY_PROMPTS_TEXT: Record<LiteraryPromptStyleId, string> = {
@@ -145,6 +177,7 @@ export const INITIAL_APP_CONFIG: AppConfig = {
     third_person_biography: { ...DEFAULT_LITERARY_PROMPTS_CONFIG.third_person_biography },
   },
   literaryPromptVersions: DEFAULT_LITERARY_PROMPT_VERSIONS.map((v) => ({ ...v })),
+  freeRegistrationLimits: { ...DEFAULT_FREE_REGISTRATION_LIMITS },
 };
 
 export type StoryMode = 'individual' | 'compartida';
