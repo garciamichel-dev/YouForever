@@ -1,6 +1,8 @@
 /**
  * V5.9.0 — Llamadas del navegador a /api/voice/* (la clave de ElevenLabs nunca sale del servidor).
  */
+import type { VoiceErrorCategory } from '../../logic/voiceActivationProgress.ts';
+
 export type VoiceStatus = 'sin_configurar' | 'en_proceso' | 'pendiente_verificacion' | 'lista' | 'error';
 
 export interface ParticipantVoiceView {
@@ -11,6 +13,13 @@ export interface ParticipantVoiceView {
   inProgress: boolean;
   ready: boolean;
   lastError: string | null;
+  /** V5.9.3 — Kind of problem of the last error (to tell the participant what to do). */
+  errorCategory?: VoiceErrorCategory | null;
+  /** V5.9.3 — Short code the administrator uses to find this voice configuration. */
+  supportCode?: string | null;
+  /** V5.9.3 — Set when the verification step failed (the voice stays pending). */
+  verificationError?: string;
+  verificationErrorCategory?: VoiceErrorCategory;
   analysis: {
     sufficient: boolean;
     usableSpeechSeconds: number;
@@ -35,8 +44,10 @@ export interface ParticipantVoiceView {
 export class VoiceApiError extends Error {
   code?: string;
   status: number;
-  constructor(message: string, status: number, code?: string) {
+  category?: VoiceErrorCategory;
+  constructor(message: string, status: number, code?: string, category?: VoiceErrorCategory) {
     super(message);
+    this.category = category;
     this.status = status;
     this.code = code;
   }
@@ -51,7 +62,12 @@ export async function voicePost<T>(path: string, body: Record<string, unknown>):
   });
   const json = await res.json().catch(() => null);
   if (!res.ok || !json?.success) {
-    throw new VoiceApiError(json?.error || 'No fue posible completar la operación de voz.', res.status, json?.code);
+    throw new VoiceApiError(
+      json?.error || 'No fue posible completar la operación de voz.',
+      res.status,
+      json?.code,
+      json?.category || (res.status === 0 || res.status >= 500 ? 'temporal' : undefined)
+    );
   }
   return json.data as T;
 }

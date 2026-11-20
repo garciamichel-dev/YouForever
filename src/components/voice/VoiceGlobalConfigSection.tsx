@@ -8,6 +8,7 @@
  * - Prueba comparativa con voces autorizadas: modalidades con el modelo fijo, y modelos con la
  *   misma voz y el mismo texto. Las pruebas no consumen la cuota de los familiares.
  */
+import { voiceSupportCode } from '../../logic/voiceActivationProgress.ts';
 import React, { useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, Loader2, Mic, Play, Save } from 'lucide-react';
 import { apiFetch } from '../../utils/apiClient.ts';
@@ -307,7 +308,10 @@ export const VoiceGlobalConfigSection: React.FC = () => {
               <tbody>
                 {profiles.map((p) => (
                   <tr key={p.profileId} className="border-t border-stone-100">
-                    <td className="py-1 pr-2">{p.participantName}</td>
+                    <td className="py-1 pr-2">
+                      {p.participantName}
+                      <span className="block font-mono text-[10px] text-stone-400" title="Código de soporte que ve el participante">{voiceSupportCode(p.profileId)}</span>
+                    </td>
                     <td className="py-1 pr-2">{p.mode.toUpperCase()}</td>
                     <td className="py-1 pr-2">{VOICE_STATUS_LABELS[p.status] || p.status}</td>
                     <td className="py-1 text-amber-900">{p.requirementPending || p.lastError || (p.analysis?.lastErrorDetail ? `Revisión de grabaciones: ${p.analysis.lastErrorDetail}` : '—')}</td>

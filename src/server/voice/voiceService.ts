@@ -42,6 +42,7 @@ import {
   type VoiceQuotaDayDoc,
 } from '../../logic/voiceCloningRules.ts';
 import { ElevenLabsError, type AudioFileInput, type ElevenLabsApi } from './elevenLabsClient.ts';
+import { voiceSupportCode, type VoiceErrorCategory } from '../../logic/voiceActivationProgress.ts';
 import { VOICE_COLLECTIONS, type VoiceDocStore } from './voiceDocStore.ts';
 
 // ---------------------------------------------------------------------------------------------
@@ -86,6 +87,10 @@ export interface VoiceProfileRecord {
   attemptCount: number;
   lastError?: string | null;
   lastErrorAt?: string | null;
+  /** V5.9.3 — What the participant should do about the last error. */
+  lastErrorCategory?: VoiceErrorCategory | null;
+  /** V5.9.3 — «Escuchar mi voz» previews used today. */
+  previewUsage?: { dayKey: string; count: number } | null;
   verifiedAt?: string | null;
   personId?: string | null;
   avatarId?: string | null;
@@ -196,6 +201,9 @@ function describeFailure(err: unknown): string {
 }
 const MAX_CLONE_FILES = 10;
 const VERIFY_TEXT = 'Hola.';
+/** V5.9.3 — Frase de «Escuchar mi voz» y cuántas veces al día se puede escuchar. */
+export const VOICE_PREVIEW_TEXT = 'Hola, soy yo. Me da mucho gusto que estés aquí para escuchar mis historias.';
+export const VOICE_PREVIEW_DAILY_LIMIT = 5;
 
 const extFor = (mime: string) =>
   /webm/.test(mime) ? 'webm' : /ogg/.test(mime) ? 'ogg' : /mp4|m4a|aac/.test(mime) ? 'm4a' : /mpeg|mp3/.test(mime) ? 'mp3' : /wav/.test(mime) ? 'wav' : 'audio';
@@ -210,6 +218,24 @@ function friendlyError(err: unknown): string {
     return 'El servicio de voz no respondió correctamente. Inténtalo más tarde.';
   }
   return 'Ocurrió un error inesperado en el servicio de voz.';
+}
+
+/** V5.9.3 — Qué tipo de problema es, para decirle al participante qué hacer. */
+export function voiceErrorCategory(err: unknown): VoiceErrorCategory {
+  if (err instanceof VoiceServiceError) {
+    if (err.code === 'needs_extra_sample' || err.code === 'empty_sample' || err.code === 'sample_too_large') return 'muestras';
+    if (err.code === 'service_not_configured') return 'configuracion';
+    return 'otro';
+  }
+  if (err instanceof ElevenLabsError) {
+    const detail = String(err.detail || '');
+    if (detail === 'missing_api_key' || err.status === 401 || err.status === 403) return 'configuracion';
+    if (err.status === 402 || /quota|credits|plan|subscription|tier|upgrade|voice_limit|limit_reached/i.test(detail)) return 'cuenta';
+    if (detail === 'timeout' || detail === 'network' || err.status === 0 || err.status === 429 || err.status >= 500) return 'temporal';
+    if (err.status === 400 || err.status === 422) return 'muestras';
+    return 'otro';
+  }
+  return 'otro';
 }
 
 /** Requisito de plan o cuenta que el administrador debe resolver (o null si es un error común). */
@@ -337,6 +363,8 @@ export class VoiceService {
       inProgress: p?.status === 'en_proceso' && lockActive,
       ready: p?.status === 'lista' && Boolean(p?.voiceId),
       lastError: p?.status === 'error' ? p?.lastError || null : null,
+      errorCategory: p?.status === 'error' ? p?.lastErrorCategory || 'otro' : null,
+      supportCode: p ? voiceSupportCode(p.profileId) : null,
       analysis: p?.analysis
         ? {
             sufficient: p.analysis.sufficient,
@@ -428,7 +456,7 @@ export class VoiceService {
    * Revisa las grabaciones de la entrevista del propio participante (copias) y decide si alcanzan
    * para un clon instantáneo. Se analiza una sola vez por grabación.
    */
-  async analyzeSamples(token: string) {
+  async analyzeSamples(token: string, opts: { maxRecordings?: number } = {}) {
     const { ctx, profile } = await this.requireConsentedProfile(token);
     const settings = await this.getSettings();
     const recordings = this.deps.interviews.listParticipantRecordings(ctx.interviewId, ctx.participantId);
@@ -461,7 +489,12 @@ export class VoiceService {
       }
     };
 
-    const candidates = selectCandidateRecordings(recordings, MAX_ANALYZED_SAMPLE_SECONDS, already);
+    // V5.9.3 — The participant window reviews a few at a time to show real progress.
+    const maxRecordings = Math.max(1, Math.floor(Number(opts.maxRecordings) || 0)) || Infinity;
+    const candidates = selectCandidateRecordings(recordings, MAX_ANALYZED_SAMPLE_SECONDS, already).slice(
+      0,
+      opts.maxRecordings ? maxRecordings : undefined
+    );
     const reviewOne = async (rec: (typeof candidates)[number]) => {
       analyzedSeconds += rec.durationSeconds || 0;
       let media: { buffer: Buffer; mimeType: string } | null = null;
@@ -630,7 +663,11 @@ export class VoiceService {
   }
 
   // ----------------------------------------------------------------- IVC --------------------
-  async startInstantClone(token: string) {
+  /**
+   * Crea el clon instantáneo. Con `verify: false` (V5.9.3) termina en «pendiente de verificación» y la
+   * ventana del participante hace la comprobación como un paso aparte (`recheckPending`).
+   */
+  async startInstantClone(token: string, opts: { verify?: boolean } = {}) {
     const { ctx, profile } = await this.requireConsentedProfile(token);
     const settings = await this.getSettings();
     if (profile.mode !== 'ivc') {
@@ -660,6 +697,16 @@ export class VoiceService {
         voiceId = created.voiceId;
         requiresVerification = created.requiresVerification;
       }
+      if (opts.verify === false && !requiresVerification) {
+        const saved = await this.finishCloneAttempt(profile.profileId, lock.lockId, {
+          voiceId,
+          voiceName,
+          status: 'pendiente_verificacion',
+          requirementPending: null,
+          lastErrorCategory: null,
+        });
+        return this.publicProfile(saved, settings);
+      }
       if (requiresVerification) {
         const saved = await this.finishCloneAttempt(profile.profileId, lock.lockId, {
           voiceId,
@@ -679,10 +726,12 @@ export class VoiceService {
       });
       return this.publicProfile(saved, settings);
     } catch (err) {
+      console.warn(`[voz] No se pudo crear la voz de ${profile.profileId}: ${describeFailure(err)}`);
       const saved = await this.finishCloneAttempt(profile.profileId, lock.lockId, {
         status: 'error',
         lastError: friendlyError(err),
         lastErrorAt: this.nowIso(),
+        lastErrorCategory: voiceErrorCategory(err),
         requirementPending: requirementFromError(err, 'ivc'),
       });
       return this.publicProfile(saved, settings);
@@ -748,10 +797,12 @@ export class VoiceService {
         const sub = await this.deps.client.getSubscription().catch(() => null);
         if (sub && /free/i.test(sub.tier)) requirement = 'Las voces compartidas no están disponibles por API en el plan gratuito de ElevenLabs.';
       }
+      console.warn(`[voz] No se pudo vincular la voz profesional de ${profile.profileId}: ${describeFailure(err)}`);
       const saved = await this.finishCloneAttempt(profile.profileId, lock.lockId, {
         status: 'error',
         lastError: friendlyError(err),
         lastErrorAt: this.nowIso(),
+        lastErrorCategory: requirement ? 'cuenta' : voiceErrorCategory(err),
         requirementPending: requirement,
       });
       return this.publicProfile(saved, settings);
@@ -774,12 +825,54 @@ export class VoiceService {
       });
       return this.publicProfile(saved, settings);
     } catch (err) {
+      console.warn(`[voz] No se pudo comprobar la voz de ${profile.profileId}: ${describeFailure(err)}`);
       const saved = await this.finishCloneAttempt(profile.profileId, lock.lockId, {
         status: 'pendiente_verificacion',
         lastError: friendlyError(err),
         lastErrorAt: this.nowIso(),
+        lastErrorCategory: voiceErrorCategory(err),
       });
-      return this.publicProfile(saved, settings);
+      return { ...this.publicProfile(saved, settings), verificationError: friendlyError(err), verificationErrorCategory: voiceErrorCategory(err) };
+    }
+  }
+
+  /** V5.9.3 — «Escuchar mi voz»: una frase fija con la voz lista (unas pocas veces al día). */
+  async previewVoice(token: string): Promise<{ audioBase64: string; mimeType: string; remainingToday: number; text: string }> {
+    const { profile } = await this.requireConsentedProfile(token);
+    const settings = await this.getSettings();
+    if (profile.status !== 'lista' || !profile.voiceId) {
+      throw new VoiceServiceError('Tu voz todavía no está lista.', 'not_ready', 409);
+    }
+    const dayKey = voiceQuotaDayKey(new Date(this.now()));
+    const remaining = await this.deps.store.atomicUpdate<VoiceProfileRecord, number>(VOICE_COLLECTIONS.profiles, profile.profileId, (current) => {
+      if (!current) throw new VoiceServiceError('No se encontró la configuración de voz.', 'not_found', 404);
+      const used = current.previewUsage?.dayKey === dayKey ? current.previewUsage.count : 0;
+      if (used >= VOICE_PREVIEW_DAILY_LIMIT) {
+        throw new VoiceServiceError(
+          `Ya escuchaste tu voz ${VOICE_PREVIEW_DAILY_LIMIT} veces hoy. Podrás volver a escucharla mañana.`,
+          'preview_limit',
+          429
+        );
+      }
+      return { next: { ...current, previewUsage: { dayKey, count: used + 1 } }, result: VOICE_PREVIEW_DAILY_LIMIT - used - 1 };
+    });
+    try {
+      const tts = await this.deps.client.textToSpeech({
+        voiceId: profile.voiceId,
+        text: VOICE_PREVIEW_TEXT,
+        modelId: settings.conversationTtsModelId,
+        languageCode: 'es',
+      });
+      return { audioBase64: tts.audio.toString('base64'), mimeType: tts.mimeType || 'audio/mpeg', remainingToday: remaining, text: VOICE_PREVIEW_TEXT };
+    } catch (err) {
+      // A failed preview does not use one of the day's previews.
+      await this.deps.store
+        .atomicUpdate<VoiceProfileRecord, null>(VOICE_COLLECTIONS.profiles, profile.profileId, (current) => ({
+          next: current?.previewUsage?.dayKey === dayKey ? { ...current, previewUsage: { dayKey, count: Math.max(0, current.previewUsage.count - 1) } } : undefined,
+          result: null,
+        }))
+        .catch(() => null);
+      throw new VoiceServiceError(friendlyError(err), `voice_${voiceErrorCategory(err)}`, 502);
     }
   }
 

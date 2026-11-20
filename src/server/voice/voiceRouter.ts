@@ -10,9 +10,9 @@
 import express, { type Request, type Response, Router } from 'express';
 import { storage } from '../storage.ts';
 import { miEsenciaStore } from '../miEsencia/miEsenciaStore.ts';
-import { createElevenLabsClient } from './elevenLabsClient.ts';
+import { createElevenLabsClient, ElevenLabsError } from './elevenLabsClient.ts';
 import { createFirestoreVoiceDocStore } from './voiceDocStore.ts';
-import { VoiceService, VoiceServiceError, type VoiceFamilyAdapter, type VoiceInterviewAdapter } from './voiceService.ts';
+import { VoiceService, VoiceServiceError, voiceErrorCategory, type VoiceFamilyAdapter, type VoiceInterviewAdapter } from './voiceService.ts';
 
 export const interviewAdapter: VoiceInterviewAdapter = {
   resolveParticipantToken(token: string) {
@@ -80,8 +80,24 @@ const send = (res: Response, fn: () => Promise<unknown>) =>
   fn()
     .then((data) => res.json({ success: true, data }))
     .catch((err: any) => {
-      const status = err instanceof VoiceServiceError ? err.httpStatus : 400;
-      res.status(status).json({ success: false, error: err?.message || 'Error del servicio de voz.', code: err?.code });
+      if (err instanceof VoiceServiceError) {
+        res.status(err.httpStatus).json({ success: false, error: err.message, code: err.code, category: voiceErrorCategory(err) });
+        return;
+      }
+      // V5.9.3 — ElevenLabs failures: a message the participant understands and what kind of problem it is.
+      console.warn(`[voz] ${err?.message || err}`);
+      const category = voiceErrorCategory(err);
+      const message =
+        err instanceof ElevenLabsError
+          ? category === 'configuracion'
+            ? 'El servicio de voz no está configurado correctamente.'
+            : category === 'cuenta'
+            ? 'La cuenta del servicio de voz alcanzó un límite de su plan.'
+            : category === 'temporal'
+            ? 'El servicio de voz no respondió a tiempo.'
+            : 'El servicio de voz no pudo completar la operación.'
+          : err?.message || 'Error del servicio de voz.';
+      res.status(err instanceof ElevenLabsError ? 502 : 400).json({ success: false, error: message, code: `voice_${category}`, category });
     });
 
 export const voiceRouter: Router = express.Router();
@@ -96,7 +112,7 @@ voiceRouter.post('/participant/authorize', (req: Request, res: Response) =>
   )
 );
 voiceRouter.post('/participant/analyze', (req: Request, res: Response) =>
-  send(res, () => getVoiceService().analyzeSamples(req.body?.token))
+  send(res, () => getVoiceService().analyzeSamples(req.body?.token, { maxRecordings: Number(req.body?.maxRecordings) || undefined }))
 );
 voiceRouter.post('/participant/extra-sample', (req: Request, res: Response) =>
   send(res, () =>
@@ -108,7 +124,10 @@ voiceRouter.post('/participant/extra-sample', (req: Request, res: Response) =>
   )
 );
 voiceRouter.post('/participant/create-instant', (req: Request, res: Response) =>
-  send(res, () => getVoiceService().startInstantClone(req.body?.token))
+  send(res, () => getVoiceService().startInstantClone(req.body?.token, { verify: req.body?.verify === false ? false : undefined }))
+);
+voiceRouter.post('/participant/preview', (req: Request, res: Response) =>
+  send(res, () => getVoiceService().previewVoice(req.body?.token))
 );
 voiceRouter.post('/participant/link-professional', (req: Request, res: Response) =>
   send(res, () => getVoiceService().linkProfessionalVoice(req.body?.token, req.body?.shareLink))

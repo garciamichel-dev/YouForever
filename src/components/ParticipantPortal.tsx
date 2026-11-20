@@ -26,6 +26,7 @@ import {
   MessageSquare,
   ShieldCheck,
   Loader2,
+  X,
 } from 'lucide-react';
 import {
   InterviewRecord,
@@ -56,7 +57,7 @@ import { AutoSaveAnswerEditor, AutosaveStatusLabel, useDebouncedAutosave } from 
 import { isPendingAutosavedAnswer } from '../logic/answerAutosave.ts';
 import { ForeverYouLogo } from './ForeverYouLogo';
 import { VoiceSetupWizard } from './voice/VoiceSetupWizard.tsx';
-import { voicePost, type ParticipantVoiceView } from './voice/voiceClient.ts';
+import { useVoiceActivation } from './voice/useVoiceActivation.ts';
 import {
   getActiveParticipantSession,
   saveActiveParticipantSession,
@@ -210,8 +211,9 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
   const [finishing, setFinishing] = useState(false);
   // V5.9.0 — Voz clonada (función opcional y aditiva).
   const [finishVoiceConsent, setFinishVoiceConsent] = useState(false);
-  const [voiceView, setVoiceView] = useState<ParticipantVoiceView | null>(null);
   const [voiceWizardOpen, setVoiceWizardOpen] = useState(false);
+  // V5.9.3 — Aviso del resultado cuando el proceso de voz termina con la ventana cerrada.
+  const [voiceNotice, setVoiceNotice] = useState<null | 'ready' | 'error' | 'needs_sample' | 'pending'>(null);
 
   // Tab view within participant portal: 'interview' | 'history' | 'book'
   const [activeTab, setActiveTab] = useState<'interview' | 'history' | 'book'>('interview');
@@ -316,6 +318,23 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
         ''
       : '')
   ).trim();
+
+  // V5.9.3 — «Activar mi voz»: el proceso vive en el portal y sigue aunque la ventana se cierre.
+  const voiceActivation = useVoiceActivation(activeToken, Boolean(sessionData?.participant?.id));
+  const voiceView = voiceActivation.view;
+  const voicePrevPhaseRef = useRef(voiceActivation.phase);
+  const voiceWizardOpenRef = useRef(voiceWizardOpen);
+  voiceWizardOpenRef.current = voiceWizardOpen;
+  useEffect(() => {
+    const prev = voicePrevPhaseRef.current;
+    voicePrevPhaseRef.current = voiceActivation.phase;
+    const wasRunning = ['loading', 'reviewing', 'checking_sample', 'creating', 'verifying', 'linking'].includes(prev);
+    const outcome = voiceActivation.phase;
+    if (wasRunning && !voiceWizardOpenRef.current && (outcome === 'ready' || outcome === 'error' || outcome === 'needs_sample' || outcome === 'pending')) {
+      setVoiceNotice(outcome);
+    }
+    if (voiceWizardOpenRef.current) setVoiceNotice(null);
+  }, [voiceActivation.phase]);
 
   const loadSession = async (token: string) => {
     const cleanToken = extractCleanTokenOrCode(token) || token.trim();
@@ -1688,19 +1707,6 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
   };
 
   // Voluntary Finish
-  // V5.9.0 — Estado de la voz del participante (silencioso: sin voz el portal funciona igual).
-  useEffect(() => {
-    const participantId = sessionData?.participant?.id;
-    if (!participantId || !activeToken) return;
-    let cancelled = false;
-    voicePost<ParticipantVoiceView>('/participant/status', { token: activeToken })
-      .then((v) => !cancelled && setVoiceView(v))
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [sessionData?.participant?.id, activeToken]);
-
   const handleFinishStory = async () => {
     if (!sessionData) return;
     try {
@@ -1740,12 +1746,9 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
         // V5.9.0: the interview is already finished; the voice setup is optional and independent.
         if (finishVoiceConsent) {
           setFinishVoiceConsent(false);
-          try {
-            await voicePost('/participant/authorize', { token: activeToken, source: 'finalizar_entrevista' });
-          } catch {
-            // The wizard shows the error and lets the participant resume later.
-          }
+          // The window shows the whole process; errors are shown there and never undo the finish.
           setVoiceWizardOpen(true);
+          void voiceActivation.authorize('finalizar_entrevista').catch(() => undefined);
         }
       }
     } catch (err) {
@@ -1973,17 +1976,24 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
               </button>
             )}
 
-            {/* V5.9.0 — «Activar mi voz» (sólo si la voz aún no está lista y el servicio está disponible) */}
-            {voiceView && !voiceView.ready && voiceView.serviceConfigured && (
+            {/* V5.9.0 — «Activar mi voz» (sólo si la voz aún no está lista y el servicio está disponible).
+                V5.9.3 — Mientras el proceso avanza muestra el porcentaje. */}
+            {voiceView && voiceView.serviceConfigured && (!voiceView.ready || voiceActivation.running) && (
               <button
                 type="button"
                 data-testid="activate-my-voice"
-                onClick={() => setVoiceWizardOpen(true)}
-                title={voiceView.authorized ? 'Retomar la configuración de tu voz' : 'Activar mi voz para Mi Esencia'}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold border bg-stone-50 hover:bg-stone-100 text-stone-700 border-stone-200 transition cursor-pointer"
+                onClick={() => {
+                  setVoiceNotice(null);
+                  setVoiceWizardOpen(true);
+                }}
+                title={voiceActivation.running ? 'Ver el avance de tu voz' : voiceView.authorized ? 'Retomar la configuración de tu voz' : 'Activar mi voz para Mi Esencia'}
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold border transition cursor-pointer ${
+                  voiceActivation.running ? 'bg-amber-50 hover:bg-amber-100 text-amber-900 border-amber-200' : 'bg-stone-50 hover:bg-stone-100 text-stone-700 border-stone-200'
+                }`}
               >
-                <Mic className="w-3.5 h-3.5 text-amber-700" />
-                <span className="hidden sm:inline">Activar mi voz</span>
+                {voiceActivation.running ? <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-700" /> : <Mic className="w-3.5 h-3.5 text-amber-700" />}
+                <span className="hidden sm:inline">{voiceActivation.running ? 'Activando mi voz' : 'Activar mi voz'}</span>
+                {voiceActivation.running && <span className="tabular-nums" data-testid="activate-my-voice-percent">{voiceActivation.progress.percent}%</span>}
               </button>
             )}
 
@@ -3345,12 +3355,48 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
       <FAQModal isOpen={isFaqOpen} onClose={() => setIsFaqOpen(false)} />
 
       {/* V5.9.0 — Asistente de voz (al finalizar la entrevista o desde «Activar mi voz») */}
-      <VoiceSetupWizard
-        token={activeToken}
-        open={voiceWizardOpen}
-        onClose={() => setVoiceWizardOpen(false)}
-        onStatusChange={(v) => setVoiceView((prev) => ({ ...(prev || {}), ...v, serviceConfigured: v.serviceConfigured ?? prev?.serviceConfigured }))}
-      />
+      <VoiceSetupWizard open={voiceWizardOpen} onClose={() => setVoiceWizardOpen(false)} activation={voiceActivation} />
+
+      {/* V5.9.3 — Resultado del proceso de voz cuando terminó con la ventana cerrada */}
+      {voiceNotice && !voiceWizardOpen && (
+        <div
+          className={`fixed bottom-4 right-4 z-[55] max-w-sm w-[calc(100%-2rem)] rounded-xl shadow-2xl border p-3.5 text-xs flex items-start gap-2.5 ${
+            voiceNotice === 'ready'
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+              : voiceNotice === 'error'
+              ? 'bg-rose-50 border-rose-200 text-rose-900'
+              : 'bg-amber-50 border-amber-200 text-amber-900'
+          }`}
+          role="status"
+          data-testid="voice-notice"
+        >
+          <Mic className="w-4 h-4 shrink-0 mt-0.5" />
+          <div className="flex-1 space-y-1.5">
+            <p className="font-semibold">
+              {voiceNotice === 'ready'
+                ? '¡Tu voz está lista!'
+                : voiceNotice === 'error'
+                ? 'Hubo un problema al activar tu voz'
+                : voiceNotice === 'needs_sample'
+                ? 'Necesitamos una muestra de tu voz'
+                : 'Tu voz se creó; falta una comprobación'}
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                setVoiceNotice(null);
+                setVoiceWizardOpen(true);
+              }}
+              className="font-semibold underline"
+            >
+              {voiceNotice === 'error' ? 'Ver qué pasó y qué hacer' : voiceNotice === 'needs_sample' ? 'Grabar la muestra' : 'Ver detalles'}
+            </button>
+          </div>
+          <button type="button" onClick={() => setVoiceNotice(null)} aria-label="Cerrar aviso" className="p-0.5 rounded hover:bg-black/5">
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
 
       {/* Participant Administrative Panel Modal */}
       {isParticipantAdminOpen && (

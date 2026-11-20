@@ -25,6 +25,13 @@ import {
   type DiarizedWord,
 } from '../voiceCloningRules.ts';
 import { ElevenLabsError, type ElevenLabsApi } from '../../server/voice/elevenLabsClient.ts';
+import {
+  activationProgress,
+  voiceErrorGuidance,
+  voiceSupportCode,
+  type ActivationPhase,
+} from '../../logic/voiceActivationProgress.ts';
+import { voiceErrorCategory, VOICE_PREVIEW_DAILY_LIMIT } from '../../server/voice/voiceService.ts';
 import { VOICE_READING_TEXTS } from '../../components/voice/voiceReadingTexts.ts';
 import { createMemoryVoiceDocStore, VOICE_COLLECTIONS } from '../../server/voice/voiceDocStore.ts';
 import { VoiceService, VoiceServiceError, type VoiceFamilyAdapter } from '../../server/voice/voiceService.ts';
@@ -604,11 +611,11 @@ test('V5.9.0-U1: al finalizar la entrevista — casilla desmarcada; la entrevist
   assert.match(portal, /<span>Autorizo el uso de mis grabaciones para clonar mi voz y utilizarla en Mi Esencia<\/span>/);
   const finish = portal.slice(portal.indexOf('const handleFinishStory = async'), portal.indexOf("// If no session loaded"));
   const finishCall = finish.indexOf("fetch('/api/participant/finish'");
-  const voiceCall = finish.indexOf("voicePost('/participant/authorize'");
+  const voiceCall = finish.indexOf("voiceActivation.authorize('finalizar_entrevista')");
   assert.ok(finishCall > 0 && voiceCall > finishCall, 'primero se guarda la finalización');
-  assert.match(finish, /if \(finishVoiceConsent\) \{[\s\S]*try \{[\s\S]*catch \{[\s\S]*setVoiceWizardOpen\(true\);/, 'un error de voz no afecta la finalización');
+  assert.match(finish, /if \(finishVoiceConsent\) \{[\s\S]*setVoiceWizardOpen\(true\);[\s\S]*void voiceActivation\.authorize\('finalizar_entrevista'\)\.catch/, 'un error de voz no afecta la finalización');
   assert.match(portal, /data-testid="activate-my-voice"/);
-  assert.match(portal, /voiceView && !voiceView\.ready && voiceView\.serviceConfigured/, '«Activar mi voz» sólo sin voz lista');
+  assert.match(portal, /voiceView && voiceView\.serviceConfigured && \(!voiceView\.ready \|\| voiceActivation\.running\)/, '«Activar mi voz» sólo sin voz lista (o mientras termina)');
 });
 
 test('V5.9.0-U2: Mi Esencia — «Habilitar voz» debajo de «Sugerencias opcionales» y el chat escrito comparte la misma actualización', () => {
@@ -712,14 +719,13 @@ test('V5.9.1-R4: una grabación guardada con duración 0 (desconocida) sí se co
 });
 
 test('V5.9.1-U4: el asistente no se recarga en ciclo y ofrece un texto para leer', () => {
+  // V5.9.3: la ventana ya no carga por su cuenta; el controlador del portal arranca una sola vez al abrir.
   const wiz = read('src/components/voice/VoiceSetupWizard.tsx');
-  assert.match(wiz, /onStatusChangeRef\.current = onStatusChange;/);
-  assert.match(wiz, /const apply = useCallback\(\(v: ParticipantVoiceView\) => \{[\s\S]*?\}, \[\]\);/, '«apply» no depende del callback del padre');
-  assert.match(wiz, /\}, \[open, token, run\]\);/);
-  assert.doesNotMatch(wiz, /\[onStatusChange\]/);
-  assert.match(wiz, /data-testid="voice-reading-text"/);
-  assert.match(wiz, /data-testid="voice-analysis-retry"/);
-  assert.ok(VOICE_READING_TEXTS.length >= 3);
+  assert.match(wiz, /if \(phase === 'idle' \|\| phase === 'pending'\) void activation\.run\(\);\n  \}, \[open\]\);/);
+  const hook = read('src/components/voice/useVoiceActivation.ts');
+  assert.match(hook, /if \(runningRef\.current \|\| !tokenRef\.current\) return;/, 'una sola ejecución a la vez');
+  const rec = read('src/components/voice/VoiceSampleRecorder.tsx');
+  assert.match(rec, /data-testid="voice-reading-text"/);
   for (const t of VOICE_READING_TEXTS) {
     const n = t.paragraphs.join(' ').split(/\s+/).length;
     assert.ok(n >= 150 && n <= 210, `${t.title}: ${n} palabras (≈60–90 s)`);
@@ -768,4 +774,158 @@ test('V5.9.2-S3: el orden de revisión prefiere 15 s–4 min, luego cortas o sin
   assert.deepEqual(picked.map((r) => r.id), ['buena', 'media', 'corta', 'sin', 'larga1', 'larga2']);
   const excluded = selectCandidateRecordings([{ id: 'a', durationSeconds: 60 }, { id: 'b', durationSeconds: 60 }], 10_000, new Set(['a']));
   assert.deepEqual(excluded.map((r) => r.id), ['b']);
+});
+
+// ---------------------------------------------------------------------------------------------
+// V5.9.3 — proceso completo con porcentaje, pasos, guía de errores y «Escuchar mi voz»
+// ---------------------------------------------------------------------------------------------
+
+const viewWith = (analysis: any, extra: any = {}) => ({ authorized: true, mode: 'ivc' as const, status: 'sin_configurar', extraSamples: 0, analysis, ...extra });
+
+test('V5.9.3-P1: el porcentaje avanza en orden y sólo llega a 100 con la voz lista', () => {
+  const half = { sufficient: false, usableSpeechSeconds: 20, usableRecordings: 1, reviewedRecordings: 5, totalRecordings: 10, unreviewedRecordings: 5, retryPending: 0 };
+  const reviewed = { ...half, sufficient: true, usableSpeechSeconds: 130, reviewedRecordings: 6, unreviewedRecordings: 4 };
+  const seq: Array<[ActivationPhase, any, number?]> = [
+    ['consent', { authorized: false, mode: 'ivc' }],
+    ['reviewing', viewWith(null)],
+    ['reviewing', viewWith(half)],
+    ['needs_sample', viewWith({ ...half, unreviewedRecordings: 0 })],
+    ['checking_sample', viewWith({ ...half, unreviewedRecordings: 0 }), 5000],
+    ['creating', viewWith(reviewed), 0],
+    ['creating', viewWith(reviewed), 15000],
+    ['creating', viewWith(reviewed), 600000],
+    ['verifying', viewWith(reviewed, { status: 'pendiente_verificacion' }), 2000],
+    ['ready', viewWith(reviewed, { status: 'lista', ready: true })],
+  ];
+  const pcts = seq.map(([phase, view, ms]) => activationProgress({ phase, view, phaseElapsedMs: ms }).percent);
+  assert.deepEqual(pcts.slice(0, 3), [0, 10, 35], 'autorización 10 %, revisión hasta 60 % según lo revisado');
+  assert.equal(pcts[3], 60);
+  for (let i = 1; i < pcts.length; i++) assert.ok(pcts[i] >= pcts[i - 1], `no retrocede: ${pcts.join(', ')}`);
+  assert.ok(pcts[7] < 90, 'la creación nunca llega sola al final mientras no responde ElevenLabs');
+  assert.equal(pcts.at(-1), 100);
+  assert.ok(pcts.slice(0, -1).every((p) => p < 100));
+});
+
+test('V5.9.3-P2: los pasos dicen qué está pasando (muestra no necesaria, en espera, error)', () => {
+  const ok = { sufficient: true, usableSpeechSeconds: 130, usableRecordings: 3, reviewedRecordings: 4, totalRecordings: 9, unreviewedRecordings: 5, retryPending: 0 };
+  const creating = activationProgress({ phase: 'creating', view: viewWith(ok) });
+  const st = Object.fromEntries(creating.steps.map((x) => [x.key, x.state]));
+  assert.deepEqual(st, { autorizacion: 'listo', revision: 'listo', muestra: 'omitido', creacion: 'en_curso', comprobacion: 'pendiente' });
+  assert.equal(creating.steps.find((x) => x.key === 'muestra')?.detail, 'No fue necesaria');
+  assert.match(creating.steps.find((x) => x.key === 'revision')?.detail || '', /4 de 9 revisadas · 130 s de voz clara/);
+
+  const waiting = activationProgress({ phase: 'needs_sample', view: viewWith({ ...ok, sufficient: false, usableSpeechSeconds: 30, unreviewedRecordings: 0 }) });
+  assert.equal(waiting.steps.find((x) => x.key === 'muestra')?.state, 'espera');
+
+  const failed = activationProgress({ phase: 'error', failedAt: 'creating', view: viewWith(ok) });
+  assert.equal(failed.steps.find((x) => x.key === 'creacion')?.state, 'error');
+  assert.equal(failed.percent, 70, 'conserva el avance donde se detuvo');
+
+  const pvc = activationProgress({ phase: 'pvc_link', view: { authorized: true, mode: 'pvc' } });
+  assert.deepEqual(pvc.steps.map((x) => x.key), ['autorizacion', 'vinculacion', 'comprobacion']);
+});
+
+test('V5.9.3-P3: cada tipo de error dice qué pasó y qué hacer', () => {
+  for (const c of ['configuracion', 'cuenta', 'temporal', 'muestras', 'microfono', 'otro', null] as const) {
+    const g = voiceErrorGuidance(c);
+    assert.ok(g.title && g.whatHappened && g.whatToDo.length >= 2, String(c));
+  }
+  assert.equal(voiceErrorGuidance('temporal').primaryAction, 'retry');
+  assert.equal(voiceErrorGuidance('muestras').primaryAction, 'record');
+  assert.equal(voiceErrorGuidance('cuenta').primaryAction, 'close', 'si es de la cuenta, el participante no puede resolverlo');
+  assert.match(voiceErrorGuidance('cuenta').whatToDo.join(' '), /código de soporte/);
+  assert.match(voiceSupportCode('int_1__p_ana'), /^VZ-[0-9A-Z]{6}$/);
+  assert.equal(voiceSupportCode('int_1__p_ana'), voiceSupportCode('int_1__p_ana'));
+  assert.notEqual(voiceSupportCode('int_1__p_ana'), voiceSupportCode('int_1__p_luis'));
+});
+
+test('V5.9.3-P4: clasificación de los errores de ElevenLabs', () => {
+  assert.equal(voiceErrorCategory(new ElevenLabsError('x', 0, 'missing_api_key')), 'configuracion');
+  assert.equal(voiceErrorCategory(new ElevenLabsError('x', 401, 'invalid_api_key')), 'configuracion');
+  assert.equal(voiceErrorCategory(new ElevenLabsError('x', 402, '')), 'cuenta');
+  assert.equal(voiceErrorCategory(new ElevenLabsError('x', 400, 'voice_limit_reached')), 'cuenta');
+  assert.equal(voiceErrorCategory(new ElevenLabsError('x', 0, 'timeout')), 'temporal');
+  assert.equal(voiceErrorCategory(new ElevenLabsError('x', 503, 'busy')), 'temporal');
+  assert.equal(voiceErrorCategory(new ElevenLabsError('x', 422, 'invalid audio')), 'muestras');
+  assert.equal(voiceErrorCategory(new VoiceServiceError('m', 'needs_extra_sample')), 'muestras');
+});
+
+test('V5.9.3-S1: la revisión puede avanzar de 3 en 3 (avance real en la ventana)', async () => {
+  const diarize: Record<string, DiarizedWord[]> = {};
+  for (const id of ['aud_rosa_1', 'aud_rosa_2', 'aud_rosa_4', 'aud_rosa_5', 'aud_rosa_6', 'aud_rosa_7']) diarize[id] = words(140, ['speaker_0', 'speaker_1']);
+  const { svc, el } = setup({ diarize });
+  await svc.authorize('tok_rosa', 'portal');
+  const r1 = await svc.analyzeSamples('tok_rosa', { maxRecordings: 3 });
+  assert.equal(el.calls.stt, 3);
+  assert.equal(r1.analysis?.reviewedRecordings, 3);
+  assert.equal(r1.analysis?.unreviewedRecordings, 4);
+  const r2 = await svc.analyzeSamples('tok_rosa', { maxRecordings: 3 });
+  assert.equal(r2.analysis?.reviewedRecordings, 6);
+  const r3 = await svc.analyzeSamples('tok_rosa', { maxRecordings: 3 });
+  assert.equal(r3.analysis?.reviewedRecordings, 7);
+  assert.equal(r3.analysis?.unreviewedRecordings, 0);
+  assert.equal(el.calls.stt, 7, 'nada se revisa dos veces');
+});
+
+test('V5.9.3-S2: crear y comprobar como pasos separados', async () => {
+  const { svc, el } = setup();
+  await svc.authorize('tok_ana', 'portal');
+  await svc.analyzeSamples('tok_ana');
+  const created = await svc.startInstantClone('tok_ana', { verify: false });
+  assert.equal(created.status, 'pendiente_verificacion');
+  assert.equal(created.ready, false);
+  assert.equal(el.calls.tts.length, 0, 'todavía no se comprobó');
+  const checked = await svc.recheckPending('tok_ana');
+  assert.equal(checked.status, 'lista');
+  assert.equal(checked.ready, true);
+  assert.equal(el.calls.create, 1);
+});
+
+test('V5.9.3-S3: un error guarda su tipo y el participante recibe un código de soporte', async () => {
+  const { svc } = setup({ failCreate: new ElevenLabsError('Creación: 402', 402, 'quota_exceeded') });
+  await svc.authorize('tok_ana', 'portal');
+  await svc.analyzeSamples('tok_ana');
+  const r = await svc.startInstantClone('tok_ana', { verify: false });
+  assert.equal(r.status, 'error');
+  assert.equal(r.errorCategory, 'cuenta');
+  assert.equal(r.supportCode, voiceSupportCode('int_1__p_ana'));
+  const st = await svc.participantStatus('tok_ana');
+  assert.equal(st.errorCategory, 'cuenta', 'al reabrir se ve el mismo resultado');
+});
+
+test('V5.9.3-S4: «Escuchar mi voz» sólo con la voz lista, con límite diario; una falla no gasta el intento', async () => {
+  const opts: FakeOptions = {};
+  const { svc, el } = setup(opts);
+  await svc.authorize('tok_ana', 'portal');
+  await assert.rejects(() => svc.previewVoice('tok_ana'), (e: any) => e.code === 'not_ready');
+  await svc.analyzeSamples('tok_ana');
+  await svc.startInstantClone('tok_ana');
+  const first = await svc.previewVoice('tok_ana');
+  assert.ok(first.audioBase64.length > 0);
+  assert.equal(first.remainingToday, VOICE_PREVIEW_DAILY_LIMIT - 1);
+  assert.equal(el.calls.tts.at(-1)?.text, first.text);
+
+  opts.failTts = true;
+  await assert.rejects(() => svc.previewVoice('tok_ana'), (e: any) => e.code === 'voice_temporal');
+  opts.failTts = false;
+  for (let i = 0; i < VOICE_PREVIEW_DAILY_LIMIT - 1; i++) await svc.previewVoice('tok_ana');
+  await assert.rejects(() => svc.previewVoice('tok_ana'), (e: any) => e.code === 'preview_limit');
+});
+
+test('V5.9.3-U5: la ventana muestra porcentaje, pasos, detalle y resultado; el proceso vive en el portal', () => {
+  const wiz = read('src/components/voice/VoiceSetupWizard.tsx');
+  for (const id of ['voice-progress-percent', 'voice-steps', 'voice-activity-log', 'voice-success', 'voice-error', 'voice-preview-button', 'voice-support-code']) {
+    assert.ok(wiz.includes(`data-testid="${id}"`), id);
+  }
+  assert.match(wiz, /role="progressbar"/);
+  assert.match(wiz, /Qué puedes hacer:/);
+  const portal = read('src/components/ParticipantPortal.tsx');
+  assert.match(portal, /const voiceActivation = useVoiceActivation\(activeToken/);
+  assert.match(portal, /data-testid="activate-my-voice-percent"/);
+  assert.match(portal, /data-testid="voice-notice"/);
+  const rec = read('src/components/voice/VoiceSampleRecorder.tsx');
+  for (const id of ['voice-sample-timer', 'voice-mic-meter', 'voice-sample-hint', 'voice-sample-preview', 'voice-sample-send']) {
+    assert.ok(rec.includes(`data-testid="${id}"`), id);
+  }
+  assert.match(rec, /disabled=\{disabled \|\| tooShort \|\| !blob\}/, 'no se envía con menos de 30 s');
 });
