@@ -18,6 +18,11 @@ export interface ParticipantVoiceView {
     rejected: Array<{ reason: string; label: string }>;
     /** Recordings that could not be checked because of a temporary failure; they are retried. */
     retryPending?: number;
+    /** V5.9.2 — Recordings of the interview reviewed so far, out of the total with voice. */
+    reviewedRecordings?: number | null;
+    totalRecordings?: number | null;
+    /** Recordings not reviewed yet (the next review continues with them). */
+    unreviewedRecordings?: number;
   } | null;
   extraSamples: number;
   consentText: string;

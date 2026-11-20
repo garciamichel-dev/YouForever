@@ -32,9 +32,13 @@ const MAX_SAMPLE_BASE64 = 900_000;
 /** 48 kbps keeps 90 seconds under the limit with any browser codec. */
 const SAMPLE_BITS_PER_SECOND = 48_000;
 
-/** Analysis is (re)run when it never ran or when some recordings are waiting for a retry. */
+/** Recordings waiting for a retry or never reviewed while the clear voice is still not enough. */
+const pendingReview = (v: ParticipantVoiceView) =>
+  Boolean(v.analysis && !v.analysis.sufficient && ((v.analysis.retryPending || 0) > 0 || (v.analysis.unreviewedRecordings || 0) > 0));
+
+/** The review runs when it never ran or when there are recordings left to check. */
 const shouldAnalyze = (v: ParticipantVoiceView) =>
-  v.authorized && v.mode === 'ivc' && v.status !== 'lista' && !v.inProgress && (!v.analysis || (v.analysis.retryPending || 0) > 0);
+  v.authorized && v.mode === 'ivc' && v.status !== 'lista' && !v.inProgress && (!v.analysis || pendingReview(v));
 
 export const VoiceSetupWizard: React.FC<Props> = ({ token, open, onClose, onStatusChange }) => {
   const [view, setView] = useState<ParticipantVoiceView | null>(null);
@@ -293,16 +297,25 @@ export const VoiceSetupWizard: React.FC<Props> = ({ token, open, onClose, onStat
 
             {v.mode === 'ivc' && v.analysis && !v.ready && (
               <p>
-                Encontramos <strong>{v.analysis.usableRecordings}</strong> grabación(es) útiles de tu entrevista
+                {typeof v.analysis.totalRecordings === 'number' && (
+                  <>Revisamos {v.analysis.reviewedRecordings ?? 0} de tus {v.analysis.totalRecordings} grabaciones de la entrevista. </>
+                )}
+                Encontramos <strong>{v.analysis.usableRecordings}</strong> útil(es)
                 ({Math.round(v.analysis.usableSpeechSeconds)} s de voz clara).
                 {v.analysis.rejected.length > 0 && <> Descartamos {v.analysis.rejected.length} porque {Array.from(new Set(v.analysis.rejected.map((r) => r.label))).join(', ')}.</>}
               </p>
             )}
 
-            {v.mode === 'ivc' && v.analysis && !v.ready && (v.analysis.retryPending || 0) > 0 && (
+            {v.mode === 'ivc' && v.analysis && !v.ready && pendingReview(v) && (
               <div className="p-2.5 rounded-lg border border-stone-200 bg-stone-50 flex flex-wrap items-center justify-between gap-2" data-testid="voice-analysis-retry">
                 <span>
-                  No pudimos revisar {v.analysis.retryPending} grabación(es) por un problema temporal. Puedes intentarlo de nuevo o grabar una muestra.
+                  {(v.analysis.retryPending || 0) > 0
+                    ? <>No pudimos revisar {v.analysis.retryPending} grabación(es) por un problema temporal. </>
+                    : null}
+                  {(v.analysis.unreviewedRecordings || 0) > 0
+                    ? <>Quedan {v.analysis.unreviewedRecordings} grabación(es) por revisar. </>
+                    : null}
+                  Puedes revisarlas o grabar una muestra.
                 </span>
                 <button
                   type="button"
@@ -310,7 +323,7 @@ export const VoiceSetupWizard: React.FC<Props> = ({ token, open, onClose, onStat
                   onClick={() => run('Revisando tus grabaciones…', () => voicePost<ParticipantVoiceView>('/participant/analyze', { token }))}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-stone-300 bg-white rounded-lg font-semibold disabled:opacity-50"
                 >
-                  <RefreshCw className="w-3.5 h-3.5" /> Volver a revisar
+                  <RefreshCw className="w-3.5 h-3.5" /> Revisar mis grabaciones
                 </button>
               </div>
             )}

@@ -27,6 +27,7 @@ import {
   releaseVoiceTurn,
   reserveVoiceTurn,
   resolveVoiceDailyLimit,
+  isCandidateRecording,
   selectCandidateRecordings,
   voiceProfileId,
   voiceQuotaDayKey,
@@ -169,6 +170,25 @@ const TURN_CACHE_TTL_MS = 5 * 60 * 1000;
 const MAX_EXTRA_SAMPLE_BASE64 = 900_000; // < 1 MiB por documento de Firestore
 /** A recording that fails to be read or transcribed is retried up to this many times. */
 const MAX_ANALYSIS_ATTEMPTS = 3;
+/** Recordings transcribed at the same time during a review. */
+const ANALYSIS_CONCURRENCY = 3;
+
+/** How many recordings were reviewed, are waiting for a retry, or were never reviewed. */
+function reviewStats(analysis: VoiceSampleAnalysis, recordings?: Array<{ id: string; durationSeconds?: number }>) {
+  const retry = new Set(analysis.retryPendingAudioIds || []);
+  // Failures saved by V5.9.0 (without attempt count) are also retried.
+  for (const r of analysis.rejected || []) {
+    if (r.reason === 'no_se_pudo_analizar' && (analysis.failedAttempts?.[r.audioId]?.count || 0) < MAX_ANALYSIS_ATTEMPTS) retry.add(r.audioId);
+  }
+  const reviewed = new Set((analysis.analyzedAudioIds || []).filter((id) => !retry.has(id)));
+  const eligible = recordings ? recordings.filter((r) => isCandidateRecording(r)) : null;
+  return {
+    retryPending: retry.size,
+    reviewed: eligible ? eligible.filter((r) => reviewed.has(r.id)).length : reviewed.size,
+    total: eligible ? eligible.length : null,
+    unreviewed: eligible ? eligible.filter((r) => !reviewed.has(r.id) && !retry.has(r.id)).length : 0,
+  };
+}
 
 function describeFailure(err: unknown): string {
   if (err instanceof ElevenLabsError) return `ElevenLabs ${err.status || ''} ${err.detail || err.message}`.replace(/\s+/g, ' ').trim().slice(0, 300);
@@ -306,7 +326,8 @@ export class VoiceService {
   }
 
   /** Vista del participante (sin datos internos de ElevenLabs). */
-  publicProfile(p: VoiceProfileRecord | null, settings: VoiceGlobalSettings) {
+  publicProfile(p: VoiceProfileRecord | null, settings: VoiceGlobalSettings, recordings?: Array<{ id: string; durationSeconds?: number }>) {
+    const stats = p?.analysis ? reviewStats(p.analysis, recordings) : null;
     const lockActive = Boolean(p?.lock && Date.parse(p.lock.expiresAt) > this.now());
     return {
       exists: Boolean(p),
@@ -322,7 +343,10 @@ export class VoiceService {
             usableSpeechSeconds: p.analysis.usableSpeechSeconds,
             usableRecordings: p.analysis.usableAudioIds.length,
             rejected: p.analysis.rejected.map((r) => ({ reason: r.reason, label: SAMPLE_REJECT_LABELS[r.reason] })),
-            retryPending: p.analysis.retryPendingAudioIds?.length || 0,
+            retryPending: stats?.retryPending || 0,
+            reviewedRecordings: stats?.reviewed ?? null,
+            totalRecordings: stats?.total ?? null,
+            unreviewedRecordings: stats?.unreviewed ?? 0,
           }
         : null,
       extraSamples: p?.extraSampleIds?.length || 0,
@@ -336,7 +360,7 @@ export class VoiceService {
     const profile = await this.getProfile(voiceProfileId(ctx.interviewId, ctx.participantId));
     const recordings = this.deps.interviews.listParticipantRecordings(ctx.interviewId, ctx.participantId);
     return {
-      ...this.publicProfile(profile, settings),
+      ...this.publicProfile(profile, settings, recordings),
       recordingsAvailable: recordings.length,
       serviceConfigured: this.deps.client.configured,
     };
@@ -437,9 +461,8 @@ export class VoiceService {
       }
     };
 
-    for (const rec of selectCandidateRecordings(recordings, MAX_ANALYZED_SAMPLE_SECONDS)) {
-      if (usableSeconds >= MIN_USABLE_SAMPLE_SECONDS * 2) break;
-      if (already.has(rec.id)) continue;
+    const candidates = selectCandidateRecordings(recordings, MAX_ANALYZED_SAMPLE_SECONDS, already);
+    const reviewOne = async (rec: (typeof candidates)[number]) => {
       analyzedSeconds += rec.durationSeconds || 0;
       let media: { buffer: Buffer; mimeType: string } | null = null;
       try {
@@ -449,7 +472,7 @@ export class VoiceService {
       }
       if (!media || !media.buffer?.length) {
         noteFailure(rec.id, 'No se encontró el audio de la grabación en el almacenamiento.');
-        continue;
+        return;
       }
       const a = await this.transcribeForAssessment(
         { buffer: media.buffer, mimeType: media.mimeType, fileName: `${rec.id}.${extFor(media.mimeType)}` },
@@ -457,7 +480,7 @@ export class VoiceService {
       );
       if (a.failureDetail) {
         noteFailure(rec.id, a.failureDetail);
-        continue;
+        return;
       }
       already.add(rec.id);
       delete failedAttempts[rec.id];
@@ -468,6 +491,11 @@ export class VoiceService {
       } else {
         rejectedById.set(rec.id, { audioId: rec.id, reason: a.reason || 'no_se_pudo_analizar' });
       }
+    };
+    // Up to 3 at a time; stop as soon as there is enough clear voice.
+    for (let i = 0; i < candidates.length; i += ANALYSIS_CONCURRENCY) {
+      if (usableSeconds >= MIN_USABLE_SAMPLE_SECONDS * 2) break;
+      await Promise.all(candidates.slice(i, i + ANALYSIS_CONCURRENCY).map(reviewOne));
     }
     if (Object.keys(failedAttempts).length === 0) lastErrorDetail = null;
     const rejected = Array.from(rejectedById.values());
@@ -498,7 +526,7 @@ export class VoiceService {
         return { next, result: next };
       }
     );
-    return { ...this.publicProfile(saved, settings), analyzedSecondsThisRun: analyzedSeconds };
+    return { ...this.publicProfile(saved, settings, recordings), analyzedSecondsThisRun: analyzedSeconds };
   }
 
   private async loadExtraSamples(profile: VoiceProfileRecord): Promise<VoiceExtraSampleRecord[]> {

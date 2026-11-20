@@ -286,8 +286,15 @@ export function releaseVoiceTurn(current: VoiceQuotaDayDoc, turnId: string, nowM
 
 /** ElevenLabs recomienda 1–2 minutos de voz limpia; con menos de 60 s se pide una muestra adicional. */
 export const MIN_USABLE_SAMPLE_SECONDS = 60;
-/** Tope de audio que se analiza (cada análisis cuesta transcripción). */
-export const MAX_ANALYZED_SAMPLE_SECONDS = 6 * 60;
+/**
+ * Tope de audio que se analiza en cada revisión (cada análisis cuesta transcripción: ~US$0.04 por
+ * 10 minutos). Si no alcanza, la siguiente revisión continúa con las grabaciones que faltan.
+ */
+export const MAX_ANALYZED_SAMPLE_SECONDS = 10 * 60;
+/** Duración preferida de una grabación para revisarla primero (las muy largas tardan y fallan más). */
+export const PREFERRED_RECORDING_SECONDS = { min: 15, max: 4 * 60 };
+/** Una grabación muy larga cuenta, para el tope de cada revisión, como máximo esto. */
+const LONG_RECORDING_BUDGET_SECONDS = 5 * 60;
 /** Tope de audio que se envía a ElevenLabs para el clon. */
 export const MAX_CLONE_SAMPLE_SECONDS = 3 * 60;
 export const MIN_RECORDING_SECONDS = 4;
@@ -359,21 +366,48 @@ export interface CandidateRecording {
   createdAt?: string;
 }
 
-/** Elige las grabaciones más largas del participante hasta un tope de segundos analizados. */
+/** Grabaciones que pueden servir de muestra (una duración 0 significa «no registrada» y sí cuenta). */
+export function isCandidateRecording(r: CandidateRecording | null | undefined): boolean {
+  return Boolean(r && r.id && (r.durationSeconds || MIN_RECORDING_SECONDS) >= MIN_RECORDING_SECONDS);
+}
+
+/**
+ * V5.9.2 — Elige qué grabaciones revisar en esta pasada:
+ *  1. las de duración preferida (15 s a 4 min), de la más larga a la más corta;
+ *  2. las cortas (4 a 15 s) y las de duración desconocida;
+ *  3. al final las muy largas (más de 4 min), de la menos larga a la más larga.
+ * Se omiten las ya revisadas (`exclude`). Antes se tomaban sólo las más largas hasta 6 min, así que una
+ * sola respuesta larga dejaba fuera a todas las demás.
+ */
 export function selectCandidateRecordings<T extends CandidateRecording>(
   recordings: T[],
-  maxTotalSeconds: number = MAX_ANALYZED_SAMPLE_SECONDS
+  maxTotalSeconds: number = MAX_ANALYZED_SAMPLE_SECONDS,
+  exclude: ReadonlySet<string> = new Set()
 ): T[] {
-  const sorted = [...recordings]
-    // A duration of 0 means it was not recorded: the recording is still a candidate.
-    .filter((r) => r && r.id && (r.durationSeconds || MIN_RECORDING_SECONDS) >= MIN_RECORDING_SECONDS)
-    .sort((a, b) => (b.durationSeconds ?? 0) - (a.durationSeconds ?? 0) || String(a.id).localeCompare(String(b.id)));
+  const { min, max } = PREFERRED_RECORDING_SECONDS;
+  const tier = (r: T) => {
+    const d = r.durationSeconds || 0;
+    if (d >= min && d <= max) return 0;
+    if (d > max) return 2;
+    return 1;
+  };
+  const sorted = recordings
+    .filter((r) => isCandidateRecording(r) && !exclude.has(r.id))
+    .sort((a, b) => {
+      const ta = tier(a);
+      const tb = tier(b);
+      if (ta !== tb) return ta - tb;
+      const da = a.durationSeconds || 0;
+      const db = b.durationSeconds || 0;
+      const byDuration = ta === 2 ? da - db : db - da;
+      return byDuration || String(a.id).localeCompare(String(b.id));
+    });
   const picked: T[] = [];
   let total = 0;
   for (const r of sorted) {
     if (total >= maxTotalSeconds) break;
     picked.push(r);
-    total += r.durationSeconds || 30;
+    total += Math.min(r.durationSeconds || 30, LONG_RECORDING_BUDGET_SECONDS);
   }
   return picked;
 }

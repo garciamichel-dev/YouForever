@@ -51,13 +51,15 @@ interface FakeOptions {
   transcript?: string;
   failTts?: boolean;
   failStt?: boolean;
+  /** Audio ids whose transcription fails (e.g. a very long answer that times out). */
+  failSttIds?: string[];
   failCreate?: ElevenLabsError;
   failShared?: ElevenLabsError;
   createDelayMs?: number;
 }
 
 function fakeElevenLabs(opts: FakeOptions = {}) {
-  const calls = { create: 0, shared: 0, tts: [] as Array<{ voiceId: string; modelId: string; text: string }>, stt: 0, createdFiles: [] as string[] };
+  const calls = { create: 0, shared: 0, tts: [] as Array<{ voiceId: string; modelId: string; text: string }>, stt: 0, sttIds: [] as string[], createdFiles: [] as string[] };
   const voices = new Map<string, string>(); // voiceId -> name
   const api: ElevenLabsApi = {
     configured: true,
@@ -92,8 +94,9 @@ function fakeElevenLabs(opts: FakeOptions = {}) {
     },
     async speechToText({ file, diarize }) {
       calls.stt++;
-      if (opts.failStt) throw new ElevenLabsError('Transcripción: 500', 500);
       const id = file.fileName.split('.')[0];
+      calls.sttIds = [...(calls.sttIds || []), id];
+      if (opts.failStt || opts.failSttIds?.includes(id)) throw new ElevenLabsError('Transcripción: tiempo de espera agotado', 0, 'timeout');
       if (diarize) {
         const w = opts.diarize?.[id] ?? words(140);
         return { text: w.map((x) => x.text).join(''), languageCode: 'spa', words: w, audioSeconds: 40 };
@@ -115,6 +118,7 @@ const PARTICIPANTS: Record<string, { interviewId: string; participantId: string;
   tok_ana: { interviewId: 'int_1', participantId: 'p_ana', participantName: 'Ana' },
   tok_luis: { interviewId: 'int_1', participantId: 'p_luis', participantName: 'Luis' },
   tok_solo: { interviewId: 'int_2', participantId: 'p_solo', participantName: 'Marta' },
+  tok_rosa: { interviewId: 'int_3', participantId: 'p_rosa', participantName: 'Rosa' },
 };
 const RECORDINGS: Record<string, Array<{ id: string; durationSeconds: number; mimeType: string }>> = {
   p_ana: [
@@ -123,6 +127,17 @@ const RECORDINGS: Record<string, Array<{ id: string; durationSeconds: number; mi
   ],
   p_luis: [{ id: 'aud_luis_1', durationSeconds: 50, mimeType: 'audio/webm' }],
   p_solo: [{ id: 'aud_solo_1', durationSeconds: 8, mimeType: 'audio/webm' }],
+  // V5.9.2 — the case reported: many answers, one of them very long (its transcription times out).
+  p_rosa: [
+    { id: 'aud_rosa_larga', durationSeconds: 430, mimeType: 'audio/webm' },
+    { id: 'aud_rosa_1', durationSeconds: 25, mimeType: 'audio/webm' },
+    { id: 'aud_rosa_2', durationSeconds: 70, mimeType: 'audio/webm' },
+    { id: 'aud_rosa_3', durationSeconds: 3, mimeType: 'audio/webm' },
+    { id: 'aud_rosa_4', durationSeconds: 0, mimeType: 'audio/webm' },
+    { id: 'aud_rosa_5', durationSeconds: 55, mimeType: 'audio/webm' },
+    { id: 'aud_rosa_6', durationSeconds: 40, mimeType: 'audio/webm' },
+    { id: 'aud_rosa_7', durationSeconds: 35, mimeType: 'audio/webm' },
+  ],
 };
 const originals = new Map<string, Buffer>(
   Object.values(RECORDINGS).flat().map((r) => [r.id, Buffer.from(`ORIGINAL-${r.id}`)])
@@ -641,7 +656,7 @@ test('V5.9.1-R1: una falla temporal al transcribir no queda guardada: se reinten
   assert.equal(first.analysis?.retryPending, 2, 'las dos grabaciones quedan pendientes de reintento');
   assert.equal(first.analysis?.rejected.length, 0, 'una falla temporal no es un descarte');
   const saved: any = await store.get(VOICE_COLLECTIONS.profiles, 'int_1__p_ana');
-  assert.match(saved.analysis.lastErrorDetail, /ElevenLabs 500/, 'el administrador ve el motivo técnico');
+  assert.match(saved.analysis.lastErrorDetail, /ElevenLabs timeout/, 'el administrador ve el motivo técnico');
   assert.equal(saved.analysis.analyzedAudioIds.length, 0);
 
   opts.failStt = false;
@@ -685,7 +700,7 @@ test('V5.9.1-R3: los descartes «no se pudo analizar» guardados por V5.9.0 se v
     return { next, result: next };
   });
   const status = await svc.participantStatus('tok_luis');
-  assert.equal(status.analysis?.retryPending, 0, 'el registro antiguo no trae la lista de reintentos');
+  assert.equal(status.analysis?.retryPending, 1, 'la falla guardada por V5.9.0 se cuenta como pendiente de reintento');
   const re = await svc.analyzeSamples('tok_luis');
   assert.equal(re.analysis?.usableRecordings, 1);
   assert.equal(re.analysis?.rejected.length, 0, 'sin descartes duplicados');
@@ -709,4 +724,48 @@ test('V5.9.1-U4: el asistente no se recarga en ciclo y ofrece un texto para leer
     const n = t.paragraphs.join(' ').split(/\s+/).length;
     assert.ok(n >= 150 && n <= 210, `${t.title}: ${n} palabras (≈60–90 s)`);
   }
+});
+
+test('V5.9.2-S1: con muchas respuestas y una muy larga, se revisan primero las de duración normal y la larga no bloquea', async () => {
+  const { svc, el } = setup({ failSttIds: ['aud_rosa_larga'] });
+  await svc.authorize('tok_rosa', 'portal');
+  const r = await svc.analyzeSamples('tok_rosa');
+  assert.equal(r.analysis?.sufficient, true, 'con las respuestas normales alcanza');
+  assert.ok((r.analysis?.usableRecordings || 0) >= 2);
+  assert.ok(!el.calls.sttIds.includes('aud_rosa_larga'), 'la respuesta de 7 min no se transcribe mientras haya otras');
+  assert.ok(!el.calls.sttIds.includes('aud_rosa_3'), 'las de menos de 4 s no se revisan');
+  assert.equal(el.calls.sttIds[0], 'aud_rosa_2', 'primero la más larga dentro de la duración preferida');
+  const st = await svc.participantStatus('tok_rosa');
+  assert.equal(st.analysis?.totalRecordings, 7, '7 con voz (la de 3 s no cuenta; la de duración 0 sí)');
+  assert.equal(st.analysis?.reviewedRecordings, r.analysis?.reviewedRecordings);
+});
+
+test('V5.9.2-S2: si las primeras no alcanzan, la revisión sigue con las que faltan (y la larga va al final)', async () => {
+  const diarize: Record<string, DiarizedWord[]> = {};
+  for (const id of ['aud_rosa_1', 'aud_rosa_2', 'aud_rosa_4', 'aud_rosa_5', 'aud_rosa_6', 'aud_rosa_7']) diarize[id] = words(140, ['speaker_0', 'speaker_1']);
+  const { svc, el } = setup({ diarize, failSttIds: ['aud_rosa_larga'] });
+  await svc.authorize('tok_rosa', 'portal');
+  const r = await svc.analyzeSamples('tok_rosa');
+  assert.equal(r.analysis?.sufficient, false);
+  assert.equal(el.calls.sttIds.at(-1), 'aud_rosa_larga', 'la muy larga se intenta al final');
+  assert.equal(r.analysis?.retryPending, 1, 'y su falla se reintenta después');
+  assert.equal(r.analysis?.unreviewedRecordings, 0);
+  assert.equal(r.analysis?.reviewedRecordings, 6);
+});
+
+test('V5.9.2-S3: el orden de revisión prefiere 15 s–4 min, luego cortas o sin duración, y al final las muy largas', () => {
+  const picked = selectCandidateRecordings(
+    [
+      { id: 'larga2', durationSeconds: 900 },
+      { id: 'larga1', durationSeconds: 300 },
+      { id: 'corta', durationSeconds: 8 },
+      { id: 'sin', durationSeconds: 0 },
+      { id: 'media', durationSeconds: 60 },
+      { id: 'buena', durationSeconds: 200 },
+    ],
+    10_000
+  );
+  assert.deepEqual(picked.map((r) => r.id), ['buena', 'media', 'corta', 'sin', 'larga1', 'larga2']);
+  const excluded = selectCandidateRecordings([{ id: 'a', durationSeconds: 60 }, { id: 'b', durationSeconds: 60 }], 10_000, new Set(['a']));
+  assert.deepEqual(excluded.map((r) => r.id), ['b']);
 });
