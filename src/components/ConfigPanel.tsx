@@ -47,6 +47,7 @@ import {
   type BookLayoutMode,
 } from '../logic/bookReferenceLayout.ts';
 import { apiFetch } from '../utils/apiClient.ts';
+import { VoiceGlobalConfigSection } from './voice/VoiceGlobalConfigSection.tsx';
 import {
   AdminProgressModal,
   AdminProgressState,
@@ -1819,6 +1820,9 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ adminEmail }) => {
               El cambio no modifica el texto, las fotos ni las versiones guardadas: solo cómo se reparten en las páginas. Por eso un libro ya guardado puede mostrar otro número de páginas al abrirlo o descargarlo de nuevo.
             </p>
           </div>
+
+          {/* V5.9.0 — Voz clonada en Mi Esencia (ElevenLabs): sección independiente con su propio guardado */}
+          <VoiceGlobalConfigSection />
 
           <div className="p-3 bg-indigo-50/70 border border-indigo-200 rounded-lg text-xs text-indigo-950 flex items-start space-x-2.5">
             <Info className="w-4 h-4 text-indigo-700 shrink-0 mt-0.5" />

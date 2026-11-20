@@ -54,6 +54,7 @@ import { withParticipantBookDefaults } from '../logic/participantBookConfig.ts';
 import { preloadBookResourcesForPdf } from '../utils/demoPdfGenerator.ts';
 import { generateBookPdfMatchingViewer } from '../utils/bookPdfExporter.ts';
 import { apiFetch } from '../utils/apiClient.ts';
+import { VoiceQuotaInlineControl } from './voice/VoiceQuotaInlineControl.tsx';
 import {
   AdminProgressModal,
   AdminProgressState,
@@ -2078,6 +2079,9 @@ export const InterviewsPanel: React.FC<InterviewsPanelProps> = ({
                       </button>
                     </div>
                   </div>
+
+                  {/* V5.9.0 — Cuota diaria de mensajes de voz (junto a «Libro PDF y Cuota de Edición») */}
+                  <VoiceQuotaInlineControl interviewId={inv.id} interviewTitle={inv.title} />
                 </div>
 
                 {/* Participants & Invitation Links */}

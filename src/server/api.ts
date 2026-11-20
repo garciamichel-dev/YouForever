@@ -27,6 +27,7 @@ import {
 } from './geminiService.ts';
 import { miEsenciaRouter } from './miEsencia/miEsenciaRouter.ts';
 import { miEsenciaStore } from './miEsencia/miEsenciaStore.ts';
+import { voiceRouter } from './voice/voiceRouter.ts';
 import {
   getEmailConfigStatus,
   sendSelfRegisterParticipantEmail,
@@ -3067,6 +3068,11 @@ apiRouter.post('/public/free-register/:interviewId/retry-email', async (req: Req
 
 // Isolated Mi Esencia Subsystem Routes (/api/mi-esencia/*)
 apiRouter.use('/mi-esencia', miEsenciaRouter);
+
+// V5.9.0 — Voz clonada con ElevenLabs y conversación de viva voz (/api/voice/*). Aditivo:
+// las rutas de administración pasan primero por requireAdmin.
+apiRouter.use('/voice/admin', requireAdmin);
+apiRouter.use('/voice', voiceRouter);
 
 // Explicit 404 handler for API routes to guarantee JSON response and prevent falling through to Vite SPA index.html
 apiRouter.use((req: Request, res: Response) => {

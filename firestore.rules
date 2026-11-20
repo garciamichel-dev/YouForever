@@ -234,6 +234,38 @@ service cloud.firestore {
       allow read: if true;
       allow write: if isValidId(chunkId);
     }
+
+    // V5.9.0 — Voz clonada (ElevenLabs) y cuota de mensajes de voz (mismo patrón que Mi Esencia).
+
+    match /voice_settings/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /voice_profiles/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /voice_quota_days/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /voice_quota_overrides/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /voice_extra_samples/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
+    match /voice_admin_test_runs/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
   }
 }
 

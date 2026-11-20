@@ -841,7 +841,9 @@ miEsenciaRouter.post('/family/new-session', async (req: Request, res: Response) 
 miEsenciaRouter.post('/family/converse', async (req: Request, res: Response) => {
   try {
     await miEsenciaStore.ensureInitialized();
-    const result = await miEsenciaStore.converseWithAvatar(req.body || {});
+    // V5.9.0: the voice channel (no text quota) is reserved for the server-side voice service.
+    const { quotaChannel: _ignoredChannel, ...body } = (req.body || {}) as Record<string, unknown>;
+    const result = await miEsenciaStore.converseWithAvatar(body as any);
     res.json({ success: true, data: result });
   } catch (err: unknown) {
     res.status(400).json({ success: false, error: (err as Error).message });

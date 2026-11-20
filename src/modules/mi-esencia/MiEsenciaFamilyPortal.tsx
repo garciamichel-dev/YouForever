@@ -18,6 +18,7 @@ import {
   HelpCircle,
   X,
 } from 'lucide-react';
+import { MiEsenciaVoiceConversation } from './MiEsenciaVoiceConversation.tsx';
 import { ForeverYouLogo } from '../../components/ForeverYouLogo';
 import { MiEsenciaChatPhotos } from './MiEsenciaChatPhotos.tsx';
 import { ThemeToggleButton, useTheme } from '../../context/ThemeContext';
@@ -402,6 +403,53 @@ export const MiEsenciaFamilyPortal: React.FC<MiEsenciaFamilyPortalProps> = ({
     }
   };
 
+  // V5.9.0: misma actualización del hilo para el chat escrito y para la conversación de voz.
+  const applyConverseData = (data: any) => {
+    const updatedSession: MiEsenciaConversationSession = data.session;
+    setSessions((prev) => {
+      const others = prev.filter((s) => s.sessionId !== updatedSession.sessionId);
+      return [...others, updatedSession];
+    });
+    setSelectedSessionId(updatedSession.sessionId);
+
+    const baseInterlocutor: MiEsenciaInterlocutor | null =
+      data.updatedInterlocutor || interlocutor;
+
+    if (baseInterlocutor) {
+      if (
+        updatedSession.confirmedIdentity?.declaredName &&
+        isGenericAdministrativeInterlocutorName(baseInterlocutor.fullName)
+      ) {
+        setInterlocutor({
+          ...baseInterlocutor,
+          fullName: updatedSession.confirmedIdentity.declaredName,
+          affectionateCallName: updatedSession.confirmedIdentity.affectionateNickname,
+          relationshipToPerson:
+            updatedSession.confirmedIdentity.relationshipToPerson ||
+            baseInterlocutor.relationshipToPerson,
+        });
+      } else {
+        setInterlocutor(baseInterlocutor);
+      }
+    }
+
+    if (data.updatedSubscription) {
+      setSubscription(data.updatedSubscription);
+    }
+
+    if (data.subscriptionBanner) {
+      setSubscriptionBanner(data.subscriptionBanner);
+    }
+
+    if (data.memoryCreated?.memoryId) {
+      setRecentMemoryIdToUndo(data.memoryCreated.memoryId);
+    }
+
+    if (data.contradictionCreated) {
+      setOpenContradictions((prev) => [...prev, data.contradictionCreated]);
+    }
+  };
+
   const handleSendMessage = async (presetText?: string) => {
     const text = (presetText ?? messageInput).trim();
     if (!text || !activePerson || isSending) return;
@@ -431,49 +479,7 @@ export const MiEsenciaFamilyPortal: React.FC<MiEsenciaFamilyPortalProps> = ({
         return;
       }
 
-      const updatedSession: MiEsenciaConversationSession = json.data.session;
-      setSessions((prev) => {
-        const others = prev.filter((s) => s.sessionId !== updatedSession.sessionId);
-        return [...others, updatedSession];
-      });
-      setSelectedSessionId(updatedSession.sessionId);
-
-      const baseInterlocutor: MiEsenciaInterlocutor | null =
-        json.data.updatedInterlocutor || interlocutor;
-
-      if (baseInterlocutor) {
-        if (
-          updatedSession.confirmedIdentity?.declaredName &&
-          isGenericAdministrativeInterlocutorName(baseInterlocutor.fullName)
-        ) {
-          setInterlocutor({
-            ...baseInterlocutor,
-            fullName: updatedSession.confirmedIdentity.declaredName,
-            affectionateCallName: updatedSession.confirmedIdentity.affectionateNickname,
-            relationshipToPerson:
-              updatedSession.confirmedIdentity.relationshipToPerson ||
-              baseInterlocutor.relationshipToPerson,
-          });
-        } else {
-          setInterlocutor(baseInterlocutor);
-        }
-      }
-
-      if (json.data.updatedSubscription) {
-        setSubscription(json.data.updatedSubscription);
-      }
-
-      if (json.data.subscriptionBanner) {
-        setSubscriptionBanner(json.data.subscriptionBanner);
-      }
-
-      if (json.data.memoryCreated?.memoryId) {
-        setRecentMemoryIdToUndo(json.data.memoryCreated.memoryId);
-      }
-
-      if (json.data.contradictionCreated) {
-        setOpenContradictions((prev) => [...prev, json.data.contradictionCreated]);
-      }
+      applyConverseData(json.data);
     } catch (err: any) {
       setSendError(err?.message || 'No pudimos enviar tu mensaje en este momento. Inténtalo nuevamente.');
     } finally {
@@ -1234,6 +1240,17 @@ export const MiEsenciaFamilyPortal: React.FC<MiEsenciaFamilyPortalProps> = ({
             <span>Guardar confidencia privada (Nivel C)</span>
           </button>
         </div>
+
+        {/* V5.9.0 — Conversación de viva voz (sólo si la voz clonada está lista) */}
+        {activePerson && (
+          <MiEsenciaVoiceConversation
+            personalCode={personalCode}
+            selectedPersonId={activePerson.personId}
+            sessionId={activeSession?.sessionId}
+            onConverseResult={applyConverseData}
+            textBusy={isSending}
+          />
+        )}
 
         {isDailyLimitReached && (
           <div className="mb-2 mt-2 p-3 rounded-xl bg-amber-50 dark:bg-amber-950/60 border border-amber-300 dark:border-amber-800 text-amber-900 dark:text-amber-200 text-xs flex items-center justify-between gap-3 flex-wrap">

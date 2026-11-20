@@ -3488,6 +3488,12 @@ class MiEsenciaStore {
     sessionId?: string;
     messageText: string;
     acceptConsent?: boolean;
+    /**
+     * V5.9.0 — 'voice': turno de la conversación de viva voz. Usa el mismo motor, prompt, historial
+     * y recuerdos; sólo NO consume la cuota diaria de mensajes de texto (la voz tiene su propia
+     * cuota compartida). Sin este campo el comportamiento es exactamente el de siempre.
+     */
+    quotaChannel?: 'text' | 'voice';
   }): Promise<{
     replyText: string;
     responseCategory: MiEsenciaResponseCategory;
@@ -3542,7 +3548,8 @@ class MiEsenciaStore {
           50
       )
     );
-    if (interlocutor.messagesSentToday >= dailyLimit) {
+    const isVoiceChannel = params.quotaChannel === 'voice';
+    if (!isVoiceChannel && interlocutor.messagesSentToday >= dailyLimit) {
       throw new Error(
         `Has alcanzado tu límite diario de ${dailyLimit} mensajes por hoy (${interlocutor.messagesSentToday} usados). Si necesitas más mensajes hoy, ponte en contacto con YouForever.`
       );
@@ -3763,7 +3770,7 @@ class MiEsenciaStore {
       this.conversations.set(session.sessionId, session);
       await this.persistDoc('mi_esencia_conversations', session.sessionId, session);
 
-      interlocutor.messagesSentToday += 1;
+      if (!isVoiceChannel) interlocutor.messagesSentToday += 1;
       interlocutor.messagesSentThisMonth += 1;
       interlocutor.lastActiveDate = nowIso;
       this.interlocutors.set(interlocutor.interlocutorId, interlocutor);
@@ -3977,7 +3984,7 @@ class MiEsenciaStore {
     this.conversations.set(session.sessionId, session);
     await this.persistDoc('mi_esencia_conversations', session.sessionId, session);
 
-    interlocutor.messagesSentToday += 1;
+    if (!isVoiceChannel) interlocutor.messagesSentToday += 1;
     interlocutor.messagesSentThisMonth += 1;
     interlocutor.lastActiveDate = nowIso;
     this.interlocutors.set(interlocutor.interlocutorId, interlocutor);

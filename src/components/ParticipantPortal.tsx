@@ -55,6 +55,8 @@ import { ParticipantBookVersionRecord } from '../logic/demoStoryRules.ts';
 import { AutoSaveAnswerEditor, AutosaveStatusLabel, useDebouncedAutosave } from './AutoSaveAnswerEditor.tsx';
 import { isPendingAutosavedAnswer } from '../logic/answerAutosave.ts';
 import { ForeverYouLogo } from './ForeverYouLogo';
+import { VoiceSetupWizard } from './voice/VoiceSetupWizard.tsx';
+import { voicePost, type ParticipantVoiceView } from './voice/voiceClient.ts';
 import {
   getActiveParticipantSession,
   saveActiveParticipantSession,
@@ -206,6 +208,10 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
   const [showFinishModal, setShowFinishModal] = useState(false);
   const [finishReason, setFinishReason] = useState('');
   const [finishing, setFinishing] = useState(false);
+  // V5.9.0 — Voz clonada (función opcional y aditiva).
+  const [finishVoiceConsent, setFinishVoiceConsent] = useState(false);
+  const [voiceView, setVoiceView] = useState<ParticipantVoiceView | null>(null);
+  const [voiceWizardOpen, setVoiceWizardOpen] = useState(false);
 
   // Tab view within participant portal: 'interview' | 'history' | 'book'
   const [activeTab, setActiveTab] = useState<'interview' | 'history' | 'book'>('interview');
@@ -1682,6 +1688,19 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
   };
 
   // Voluntary Finish
+  // V5.9.0 — Estado de la voz del participante (silencioso: sin voz el portal funciona igual).
+  useEffect(() => {
+    const participantId = sessionData?.participant?.id;
+    if (!participantId || !activeToken) return;
+    let cancelled = false;
+    voicePost<ParticipantVoiceView>('/participant/status', { token: activeToken })
+      .then((v) => !cancelled && setVoiceView(v))
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionData?.participant?.id, activeToken]);
+
   const handleFinishStory = async () => {
     if (!sessionData) return;
     try {
@@ -1718,6 +1737,16 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
           ...sessionData,
           interview: data.data,
         });
+        // V5.9.0: the interview is already finished; the voice setup is optional and independent.
+        if (finishVoiceConsent) {
+          setFinishVoiceConsent(false);
+          try {
+            await voicePost('/participant/authorize', { token: activeToken, source: 'finalizar_entrevista' });
+          } catch {
+            // The wizard shows the error and lets the participant resume later.
+          }
+          setVoiceWizardOpen(true);
+        }
       }
     } catch (err) {
       console.error(err);
@@ -1941,6 +1970,20 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
                     {sessionData.bookVersions.length}
                   </span>
                 )}
+              </button>
+            )}
+
+            {/* V5.9.0 — «Activar mi voz» (sólo si la voz aún no está lista y el servicio está disponible) */}
+            {voiceView && !voiceView.ready && voiceView.serviceConfigured && (
+              <button
+                type="button"
+                data-testid="activate-my-voice"
+                onClick={() => setVoiceWizardOpen(true)}
+                title={voiceView.authorized ? 'Retomar la configuración de tu voz' : 'Activar mi voz para Mi Esencia'}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold border bg-stone-50 hover:bg-stone-100 text-stone-700 border-stone-200 transition cursor-pointer"
+              >
+                <Mic className="w-3.5 h-3.5 text-amber-700" />
+                <span className="hidden sm:inline">Activar mi voz</span>
               </button>
             )}
 
@@ -3263,6 +3306,20 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
               </p>
             </div>
 
+            {/* V5.9.0 — Autorización opcional de la voz (desmarcada por defecto). */}
+            {voiceView?.serviceConfigured && !voiceView.ready && (
+              <label className="flex items-start gap-2 text-[11px] text-stone-700 cursor-pointer p-2.5 rounded-lg border border-stone-200 bg-stone-50/60">
+                <input
+                  type="checkbox"
+                  data-testid="finish-voice-consent"
+                  checked={finishVoiceConsent}
+                  onChange={(e) => setFinishVoiceConsent(e.target.checked)}
+                  className="mt-0.5 h-3.5 w-3.5 accent-amber-700"
+                />
+                <span>Autorizo el uso de mis grabaciones para clonar mi voz y utilizarla en Mi Esencia</span>
+              </label>
+            )}
+
             <div className="flex space-x-2 pt-2">
               <button
                 type="button"
@@ -3286,6 +3343,14 @@ export const ParticipantPortal: React.FC<ParticipantPortalProps> = ({
 
       {/* FAQ Modal */}
       <FAQModal isOpen={isFaqOpen} onClose={() => setIsFaqOpen(false)} />
+
+      {/* V5.9.0 — Asistente de voz (al finalizar la entrevista o desde «Activar mi voz») */}
+      <VoiceSetupWizard
+        token={activeToken}
+        open={voiceWizardOpen}
+        onClose={() => setVoiceWizardOpen(false)}
+        onStatusChange={(v) => setVoiceView((prev) => ({ ...(prev || {}), ...v, serviceConfigured: v.serviceConfigured ?? prev?.serviceConfigured }))}
+      />
 
       {/* Participant Administrative Panel Modal */}
       {isParticipantAdminOpen && (
