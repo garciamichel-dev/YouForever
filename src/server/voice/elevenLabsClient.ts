@@ -116,10 +116,10 @@ export function createElevenLabsClient(options: { apiKey?: string; fetchImpl?: F
   const base = options.baseUrl || ELEVENLABS_API_BASE;
   const timeoutMs = options.timeoutMs ?? 60_000;
 
-  const call = async (path: string, init: any = {}, label = 'ElevenLabs'): Promise<any> => {
+  const call = async (path: string, init: any = {}, label = 'ElevenLabs', callTimeoutMs = timeoutMs): Promise<any> => {
     if (!apiKey) throw new ElevenLabsError('Falta configurar ELEVENLABS_API_KEY en el servidor.', 0, 'missing_api_key');
     const controller = typeof AbortController === 'function' ? new AbortController() : null;
-    const timer = setTimeout(() => controller?.abort(), timeoutMs);
+    const timer = setTimeout(() => controller?.abort(), callTimeoutMs);
     try {
       const res = await fetchImpl(`${base}${path}`, {
         ...init,
@@ -211,7 +211,8 @@ export function createElevenLabsClient(options: { apiKey?: string; fetchImpl?: F
       if (languageCode) form.append('language_code', languageCode);
       if (diarize) form.append('diarize', 'true');
       form.append('tag_audio_events', 'false');
-      const res = await call('/v1/speech-to-text', { method: 'POST', body: form }, 'Transcripción');
+      // Diarizing a long answer can take more than a minute.
+      const res = await call('/v1/speech-to-text', { method: 'POST', body: form }, 'Transcripción', Math.max(timeoutMs, 180_000));
       const json = await res.json();
       const words: DiarizedWord[] = Array.isArray(json?.words) ? json.words : [];
       const lastEnd = words.reduce((m, w) => (typeof w.end === 'number' && w.end > m ? w.end : m), 0);

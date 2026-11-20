@@ -1,5 +1,7 @@
 /**
  * V5.9.0 — Asistente «Activar mi voz» (el mismo al finalizar la entrevista y desde el portal).
+ * V5.9.1 — Carga una sola vez al abrir (antes se recargaba sin fin dentro del portal), reintenta
+ * las grabaciones que no se pudieron revisar y ofrece un texto para leer en la muestra adicional.
  *
  * Pasos: autorización (casilla desmarcada) → revisión de las grabaciones de la entrevista →
  * muestra adicional si hace falta (se escucha antes de enviarla) → creación del clon (IVC) o
@@ -7,7 +9,8 @@
  * momento; el servidor evita clones duplicados.
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { AlertCircle, CheckCircle2, Loader2, Mic, RotateCcw, Square, X } from 'lucide-react';
+import { AlertCircle, BookOpen, CheckCircle2, Loader2, Mic, RefreshCw, RotateCcw, Shuffle, Square, X } from 'lucide-react';
+import { VOICE_READING_TEXTS } from './voiceReadingTexts.ts';
 import {
   blobToBase64,
   pickRecorderMimeType,
@@ -24,6 +27,14 @@ interface Props {
 }
 
 const CONSENT_LABEL = 'Autorizo el uso de mis grabaciones para clonar mi voz y utilizarla en Mi Esencia';
+/** Must match MAX_EXTRA_SAMPLE_BASE64 on the server (one Firestore document). */
+const MAX_SAMPLE_BASE64 = 900_000;
+/** 48 kbps keeps 90 seconds under the limit with any browser codec. */
+const SAMPLE_BITS_PER_SECOND = 48_000;
+
+/** Analysis is (re)run when it never ran or when some recordings are waiting for a retry. */
+const shouldAnalyze = (v: ParticipantVoiceView) =>
+  v.authorized && v.mode === 'ivc' && v.status !== 'lista' && !v.inProgress && (!v.analysis || (v.analysis.retryPending || 0) > 0);
 
 export const VoiceSetupWizard: React.FC<Props> = ({ token, open, onClose, onStatusChange }) => {
   const [view, setView] = useState<ParticipantVoiceView | null>(null);
@@ -35,18 +46,20 @@ export const VoiceSetupWizard: React.FC<Props> = ({ token, open, onClose, onStat
   const [sampleBlob, setSampleBlob] = useState<Blob | null>(null);
   const [sampleUrl, setSampleUrl] = useState<string | null>(null);
   const [sampleSeconds, setSampleSeconds] = useState(0);
+  const [textIndex, setTextIndex] = useState(0);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const startedAtRef = useRef(0);
   const timerRef = useRef<number | null>(null);
 
-  const apply = useCallback(
-    (v: ParticipantVoiceView) => {
-      setView(v);
-      onStatusChange?.(v);
-    },
-    [onStatusChange]
-  );
+  // The parent may pass a new function on every render: keep it in a ref so `apply`, `run` and the
+  // loading effect stay stable (otherwise each update re-triggered the load, endlessly).
+  const onStatusChangeRef = useRef(onStatusChange);
+  onStatusChangeRef.current = onStatusChange;
+  const apply = useCallback((v: ParticipantVoiceView) => {
+    setView(v);
+    onStatusChangeRef.current?.(v);
+  }, []);
 
   const run = useCallback(
     async (label: string, fn: () => Promise<ParticipantVoiceView>) => {
@@ -68,8 +81,8 @@ export const VoiceSetupWizard: React.FC<Props> = ({ token, open, onClose, onStat
     if (!open || !token) return;
     void run('Cargando tu configuración de voz…', async () => {
       const v = await voicePost<ParticipantVoiceView>('/participant/status', { token });
-      if (v.authorized && v.mode === 'ivc' && !v.analysis && v.status !== 'lista') {
-        return voicePost<ParticipantVoiceView>('/participant/analyze', { token });
+      if (shouldAnalyze(v)) {
+        return { ...v, ...(await voicePost<ParticipantVoiceView>('/participant/analyze', { token })) };
       }
       return v;
     });
@@ -111,7 +124,14 @@ export const VoiceSetupWizard: React.FC<Props> = ({ token, open, onClose, onStat
       });
       streamRef.current = stream;
       const mimeType = pickRecorderMimeType();
-      const rec = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+      const options: MediaRecorderOptions = { audioBitsPerSecond: SAMPLE_BITS_PER_SECOND };
+      if (mimeType) options.mimeType = mimeType;
+      let rec: MediaRecorder;
+      try {
+        rec = new MediaRecorder(stream, options);
+      } catch {
+        rec = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+      }
       const chunks: Blob[] = [];
       rec.ondataavailable = (e) => e.data.size > 0 && chunks.push(e.data);
       rec.onstop = () => {
@@ -146,6 +166,9 @@ export const VoiceSetupWizard: React.FC<Props> = ({ token, open, onClose, onStat
     run('Revisando tu muestra…', async () => {
       if (!sampleBlob) throw new Error('Primero graba tu muestra.');
       const audioBase64 = await blobToBase64(sampleBlob);
+      if (audioBase64.length > MAX_SAMPLE_BASE64) {
+        throw new Error('La muestra quedó demasiado pesada. Grábala de nuevo con una duración de 30 a 90 segundos.');
+      }
       const v = await voicePost<ParticipantVoiceView>('/participant/extra-sample', {
         token,
         audioBase64,
@@ -276,15 +299,29 @@ export const VoiceSetupWizard: React.FC<Props> = ({ token, open, onClose, onStat
               </p>
             )}
 
+            {v.mode === 'ivc' && v.analysis && !v.ready && (v.analysis.retryPending || 0) > 0 && (
+              <div className="p-2.5 rounded-lg border border-stone-200 bg-stone-50 flex flex-wrap items-center justify-between gap-2" data-testid="voice-analysis-retry">
+                <span>
+                  No pudimos revisar {v.analysis.retryPending} grabación(es) por un problema temporal. Puedes intentarlo de nuevo o grabar una muestra.
+                </span>
+                <button
+                  type="button"
+                  disabled={Boolean(busy)}
+                  onClick={() => run('Revisando tus grabaciones…', () => voicePost<ParticipantVoiceView>('/participant/analyze', { token }))}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-stone-300 bg-white rounded-lg font-semibold disabled:opacity-50"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" /> Volver a revisar
+                </button>
+              </div>
+            )}
+
             {needsSample && (
               <div className="p-3 rounded-lg border border-amber-200 bg-amber-50/60 space-y-2.5" data-testid="voice-extra-sample">
                 <p className="text-amber-950 font-semibold">Necesitamos una muestra adicional de tu voz.</p>
                 <p>
-                  Busca un lugar tranquilo, sin otras voces, y lee o cuenta algo con naturalidad durante 30 a 90 segundos. Podrás escucharla antes de enviarla.
+                  Busca un lugar tranquilo, sin otras voces, y lee en voz alta el siguiente texto con tu tono de siempre, como si se lo contaras a tu familia
+                  (de 30 a 90 segundos). Podrás escucharla antes de enviarla.
                 </p>
-                {v.sample && !v.sample.usable && (
-                  <p className="text-rose-700">La muestra anterior no sirvió porque {v.sample.reason}. Inténtalo de nuevo.</p>
-                )}
                 <div className="flex flex-wrap items-center gap-2">
                   {!recording ? (
                     <button type="button" onClick={startRecording} disabled={Boolean(busy)} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-stone-900 text-white rounded-lg font-semibold disabled:opacity-50">
@@ -297,6 +334,30 @@ export const VoiceSetupWizard: React.FC<Props> = ({ token, open, onClose, onStat
                     </button>
                   )}
                 </div>
+                <div className="rounded-lg border border-amber-200 bg-white p-3 space-y-2" data-testid="voice-reading-text">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="inline-flex items-center gap-1.5 font-semibold text-stone-800">
+                      <BookOpen className="w-3.5 h-3.5 text-amber-700" /> Texto para leer: {VOICE_READING_TEXTS[textIndex].title}
+                    </p>
+                    <button
+                      type="button"
+                      disabled={recording}
+                      onClick={() => setTextIndex((i) => (i + 1) % VOICE_READING_TEXTS.length)}
+                      className="inline-flex items-center gap-1 text-[11px] text-amber-800 hover:underline disabled:opacity-40"
+                    >
+                      <Shuffle className="w-3 h-3" /> Otro texto
+                    </button>
+                  </div>
+                  <div className="max-h-56 overflow-y-auto pr-1 space-y-2 font-serif text-[15px] leading-relaxed text-stone-900">
+                    {VOICE_READING_TEXTS[textIndex].paragraphs.map((para, i) => (
+                      <p key={i}>{para}</p>
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-stone-500">Si te equivocas, sigue leyendo con calma; no hace falta empezar de nuevo.</p>
+                </div>
+                {v.sample && !v.sample.usable && (
+                  <p className="text-rose-700">La muestra anterior no sirvió porque {v.sample.reason}. Inténtalo de nuevo.</p>
+                )}
                 {sampleUrl && !recording && (
                   <div className="space-y-2">
                     <audio controls src={sampleUrl} className="w-full" data-testid="voice-sample-preview" />

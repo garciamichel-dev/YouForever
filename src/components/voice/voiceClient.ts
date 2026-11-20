@@ -16,6 +16,8 @@ export interface ParticipantVoiceView {
     usableSpeechSeconds: number;
     usableRecordings: number;
     rejected: Array<{ reason: string; label: string }>;
+    /** Recordings that could not be checked because of a temporary failure; they are retried. */
+    retryPending?: number;
   } | null;
   extraSamples: number;
   consentText: string;

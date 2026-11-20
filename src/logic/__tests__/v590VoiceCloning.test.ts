@@ -20,10 +20,12 @@ import {
   parseElevenLabsShareLink,
   reserveVoiceTurn,
   resolveVoiceDailyLimit,
+  selectCandidateRecordings,
   voiceQuotaDayKey,
   type DiarizedWord,
 } from '../voiceCloningRules.ts';
 import { ElevenLabsError, type ElevenLabsApi } from '../../server/voice/elevenLabsClient.ts';
+import { VOICE_READING_TEXTS } from '../../components/voice/voiceReadingTexts.ts';
 import { createMemoryVoiceDocStore, VOICE_COLLECTIONS } from '../../server/voice/voiceDocStore.ts';
 import { VoiceService, VoiceServiceError, type VoiceFamilyAdapter } from '../../server/voice/voiceService.ts';
 
@@ -624,4 +626,87 @@ test('V5.9.0-U3: administración — sección en Configuración Global y cuota j
   const ctl = read('src/components/voice/VoiceQuotaInlineControl.tsx');
   assert.match(ctl, /Cuota diaria de mensajes de voz:/);
   assert.match(ctl, /Usar valor global/);
+});
+
+// ---------------------------------------------------------------------------------------------
+// V5.9.1 — reintento del análisis, duración desconocida y asistente sin recargas infinitas
+// ---------------------------------------------------------------------------------------------
+
+test('V5.9.1-R1: una falla temporal al transcribir no queda guardada: se reintenta y luego la grabación sirve', async () => {
+  const opts: FakeOptions = { failStt: true };
+  const { svc, store } = setup(opts);
+  await svc.authorize('tok_ana', 'portal');
+  const first = await svc.analyzeSamples('tok_ana');
+  assert.equal(first.analysis?.sufficient, false);
+  assert.equal(first.analysis?.retryPending, 2, 'las dos grabaciones quedan pendientes de reintento');
+  assert.equal(first.analysis?.rejected.length, 0, 'una falla temporal no es un descarte');
+  const saved: any = await store.get(VOICE_COLLECTIONS.profiles, 'int_1__p_ana');
+  assert.match(saved.analysis.lastErrorDetail, /ElevenLabs 500/, 'el administrador ve el motivo técnico');
+  assert.equal(saved.analysis.analyzedAudioIds.length, 0);
+
+  opts.failStt = false;
+  const second = await svc.analyzeSamples('tok_ana');
+  assert.equal(second.analysis?.retryPending, 0);
+  assert.equal(second.analysis?.usableRecordings, 2);
+  assert.equal(second.analysis?.sufficient, true);
+  const after: any = await store.get(VOICE_COLLECTIONS.profiles, 'int_1__p_ana');
+  assert.equal(after.analysis.lastErrorDetail, null);
+});
+
+test('V5.9.1-R2: tras 3 intentos fallidos la grabación se descarta y deja de reintentarse', async () => {
+  const { svc, el } = setup({ failStt: true });
+  await svc.authorize('tok_luis', 'portal');
+  await svc.analyzeSamples('tok_luis');
+  await svc.analyzeSamples('tok_luis');
+  const third = await svc.analyzeSamples('tok_luis');
+  assert.equal(third.analysis?.retryPending, 0);
+  assert.deepEqual(third.analysis?.rejected.map((r) => r.reason), ['no_se_pudo_analizar']);
+  const calls = el.calls.stt;
+  await svc.analyzeSamples('tok_luis');
+  assert.equal(el.calls.stt, calls, 'no se vuelve a llamar a ElevenLabs');
+});
+
+test('V5.9.1-R3: los descartes «no se pudo analizar» guardados por V5.9.0 se vuelven a intentar', async () => {
+  const { svc, store } = setup();
+  await svc.authorize('tok_luis', 'portal');
+  await store.atomicUpdate<any, any>(VOICE_COLLECTIONS.profiles, 'int_1__p_luis', (cur) => {
+    const next = {
+      ...cur,
+      analysis: {
+        analyzedAt: '2026-11-20T10:00:00.000Z',
+        analyzedAudioIds: ['aud_luis_1'],
+        usableAudioIds: [],
+        usableSpeechSeconds: 0,
+        rejected: [{ audioId: 'aud_luis_1', reason: 'no_se_pudo_analizar' }],
+        usableExtraSampleIds: [],
+        sufficient: false,
+      },
+    };
+    return { next, result: next };
+  });
+  const status = await svc.participantStatus('tok_luis');
+  assert.equal(status.analysis?.retryPending, 0, 'el registro antiguo no trae la lista de reintentos');
+  const re = await svc.analyzeSamples('tok_luis');
+  assert.equal(re.analysis?.usableRecordings, 1);
+  assert.equal(re.analysis?.rejected.length, 0, 'sin descartes duplicados');
+});
+
+test('V5.9.1-R4: una grabación guardada con duración 0 (desconocida) sí se considera', () => {
+  const picked = selectCandidateRecordings([{ id: 'a', durationSeconds: 0 }, { id: 'b', durationSeconds: 2 }]);
+  assert.deepEqual(picked.map((r) => r.id), ['a']);
+});
+
+test('V5.9.1-U4: el asistente no se recarga en ciclo y ofrece un texto para leer', () => {
+  const wiz = read('src/components/voice/VoiceSetupWizard.tsx');
+  assert.match(wiz, /onStatusChangeRef\.current = onStatusChange;/);
+  assert.match(wiz, /const apply = useCallback\(\(v: ParticipantVoiceView\) => \{[\s\S]*?\}, \[\]\);/, '«apply» no depende del callback del padre');
+  assert.match(wiz, /\}, \[open, token, run\]\);/);
+  assert.doesNotMatch(wiz, /\[onStatusChange\]/);
+  assert.match(wiz, /data-testid="voice-reading-text"/);
+  assert.match(wiz, /data-testid="voice-analysis-retry"/);
+  assert.ok(VOICE_READING_TEXTS.length >= 3);
+  for (const t of VOICE_READING_TEXTS) {
+    const n = t.paragraphs.join(' ').split(/\s+/).length;
+    assert.ok(n >= 150 && n <= 210, `${t.title}: ${n} palabras (≈60–90 s)`);
+  }
 });

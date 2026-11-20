@@ -31,6 +31,7 @@ interface AdminProfile {
   requirementPending?: string | null;
   lastError?: string | null;
   consent?: { grantedAt: string };
+  analysis?: { lastErrorDetail?: string | null; retryPendingAudioIds?: string[] } | null;
 }
 
 interface TestRun {
@@ -309,7 +310,7 @@ export const VoiceGlobalConfigSection: React.FC = () => {
                     <td className="py-1 pr-2">{p.participantName}</td>
                     <td className="py-1 pr-2">{p.mode.toUpperCase()}</td>
                     <td className="py-1 pr-2">{VOICE_STATUS_LABELS[p.status] || p.status}</td>
-                    <td className="py-1 text-amber-900">{p.requirementPending || p.lastError || '—'}</td>
+                    <td className="py-1 text-amber-900">{p.requirementPending || p.lastError || (p.analysis?.lastErrorDetail ? `Revisión de grabaciones: ${p.analysis.lastErrorDetail}` : '—')}</td>
                   </tr>
                 ))}
               </tbody>

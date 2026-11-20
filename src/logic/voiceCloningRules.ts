@@ -365,14 +365,15 @@ export function selectCandidateRecordings<T extends CandidateRecording>(
   maxTotalSeconds: number = MAX_ANALYZED_SAMPLE_SECONDS
 ): T[] {
   const sorted = [...recordings]
-    .filter((r) => r && r.id && (r.durationSeconds ?? MIN_RECORDING_SECONDS) >= MIN_RECORDING_SECONDS)
+    // A duration of 0 means it was not recorded: the recording is still a candidate.
+    .filter((r) => r && r.id && (r.durationSeconds || MIN_RECORDING_SECONDS) >= MIN_RECORDING_SECONDS)
     .sort((a, b) => (b.durationSeconds ?? 0) - (a.durationSeconds ?? 0) || String(a.id).localeCompare(String(b.id)));
   const picked: T[] = [];
   let total = 0;
   for (const r of sorted) {
     if (total >= maxTotalSeconds) break;
     picked.push(r);
-    total += r.durationSeconds ?? 30;
+    total += r.durationSeconds || 30;
   }
   return picked;
 }
